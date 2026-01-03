@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+	<dict>
+		<key>CFBundleDisplayName</key>
+		<string>WifiPartyRust</string>
+
+		<key>CFBundleExecutable</key>
+		<string>wifi-party-rust</string>
+
+		<key>CFBundleIdentifier</key>
+		<string>com.ken.WifiPartyRust</string>
+
+		<key>CFBundleName</key>
+		<string>WifiPartyRust</string>
+
+		<key>CFBundleIconFile</key>
+		<string>icon.icns</string>
+
+		<key>CFBundleInfoDictionaryVersion</key>
+		<string>6.0</string>
+
+		<key>CFBundlePackageType</key>
+		<string>APPL</string>
+
+		<key>CFBundleShortVersionString</key>
+		<string>7.4.0</string>
+
+		<key>CFBundleVersion</key>
+		<string>1</string>
+
+		<key>LSApplicationCategoryType</key>
+		<string>public.app-category.social-networking</string>
+
+		<key>LSMinimumSystemVersion</key>
+		<string>10.15</string>
+
+		<key>NSMicrophoneUsageDescription</key>
+		<string>This app needs access to your microphone to capture and share audio with other participants in the Wi-Fi Party.</string>
+	</dict>
+</plist>

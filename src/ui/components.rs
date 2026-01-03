@@ -1,17 +1,119 @@
+use crate::audio::{
+    capture::AudioCaptureHandler, mixer::AudioMixer, playback::AudioPlaybackHandler,
+};
+use crate::network::{receive::NetworkReceiver, send::NetworkSender};
+use crate::state::{AppState, ConnectionStatus, HostId, HostInfo};
 use dioxus::prelude::*;
-use crate::state::{AppState, ConnectionStatus, HostInfo};
+use std::net::{IpAddr, UdpSocket};
 use std::sync::Arc;
+use tracing::{error, info};
 
-#[component]
+/// Get the local IP address by creating a socket
+/// This doesn't actually send any data, just queries the local routing table
+pub fn get_local_ip() -> Result<HostId, String> {
+    // Create a UDP socket and connect to a multicast address
+    // This doesn't send any data, but tells us which interface would be used
+    let socket =
+        UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("Failed to create socket: {}", e))?;
+
+    socket
+        .connect("239.255.43.2:7667")
+        .map_err(|e| format!("Failed to connect socket: {}", e))?;
+
+    let local_addr = socket
+        .local_addr()
+        .map_err(|e| format!("Failed to get local address: {}", e))?;
+
+    match local_addr.ip() {
+        IpAddr::V4(ipv4) => Ok(HostId::from(ipv4.octets())),
+        IpAddr::V6(_) => Err("IPv6 not supported".to_string()),
+    }
+}
+
+fn setup() -> Arc<AppState> {
+    // Create application state
+    let state = Arc::new(AppState::new());
+
+    // Set local host ID from local IP address
+    if let Ok(local_ip) = get_local_ip() {
+        info!("Local IP address: {}", local_ip.to_string());
+        *state.local_host_id.lock().unwrap() = Some(local_ip);
+    } else {
+        error!("Failed to determine local IP address");
+    }
+
+    // Create SPSC queues for audio pipeline
+    let (send_producer, send_consumer) = rtrb::RingBuffer::<Vec<u8>>::new(500);
+    let (playback_producer, playback_consumer) = rtrb::RingBuffer::<Vec<i16>>::new(100);
+    let (loopback_producer, loopback_consumer) = rtrb::RingBuffer::<Vec<i16>>::new(100);
+    let (frame_sender, frame_receiver) = crossbeam_channel::unbounded();
+
+    // Start network threads
+    let state_clone = state.clone();
+    std::thread::spawn(move || {
+        if let Err(e) = NetworkSender::start(state_clone, send_consumer) {
+            error!("Failed to start network sender: {}", e);
+        }
+    });
+
+    let state_clone = state.clone();
+    std::thread::spawn(move || {
+        if let Err(e) = NetworkReceiver::start(state_clone, frame_sender) {
+            error!("Failed to start network receiver: {}", e);
+        }
+    });
+
+    // Start mixer thread
+    let state_clone = state.clone();
+    std::thread::spawn(move || {
+        if let Err(e) = AudioMixer::start(state_clone, frame_receiver, playback_producer) {
+            error!("Failed to start audio mixer: {}", e);
+        }
+    });
+
+    // Start audio capture
+    let state_clone = state.clone();
+    std::thread::spawn(move || {
+        match AudioCaptureHandler::start(state_clone, send_producer, loopback_producer) {
+            Ok(_capture) => {
+                info!("Audio capture started, keeping alive...");
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+            }
+            Err(e) => {
+                error!("Failed to start audio capture: {}", e);
+            }
+        }
+    });
+
+    // Start audio playback
+    std::thread::spawn(move || {
+        match AudioPlaybackHandler::start(playback_consumer, loopback_consumer) {
+            Ok(_playback) => {
+                info!("Audio playback started, keeping alive...");
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+            }
+            Err(e) => {
+                error!("Failed to start audio playback: {}", e);
+            }
+        }
+    });
+
+    state
+}
+
 pub fn App() -> Element {
-    // Get state from context or create it
-    let state_arc = use_context_provider(|| Arc::new(AppState::new()));
-    
+    let state_arc = use_context_provider(|| setup());
+
     // Create signals for reactive UI
     let mut connection_status = use_signal(|| ConnectionStatus::Disconnected);
     let mut active_hosts = use_signal(|| Vec::<HostInfo>::new());
     let mut mic_muted = use_signal(|| false);
     let mut mic_volume = use_signal(|| 1.0f32);
+    let mut mic_audio_level = use_signal(|| 0.0f32);
     let mut loopback_enabled = use_signal(|| false);
     let mut local_host_id = use_signal(|| String::from("Unknown"));
 
@@ -38,8 +140,18 @@ pub fn App() -> Element {
                     mic_volume.set(*vol);
                 }
 
+                // Update mic audio level
+                if let Ok(level) = state.mic_audio_level.lock() {
+                    let new_level = *level;
+                    mic_audio_level.set(new_level);
+                }
+
                 // Update loopback status
-                loopback_enabled.set(state.loopback_enabled.load(std::sync::atomic::Ordering::Relaxed));
+                loopback_enabled.set(
+                    state
+                        .loopback_enabled
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                );
 
                 // Update local host ID
                 if let Ok(id_opt) = state.local_host_id.lock() {
@@ -56,7 +168,7 @@ pub fn App() -> Element {
     rsx! {
         div {
             class: "container mx-auto p-4",
-            
+
             // Header
             Header {
                 connection_status: connection_status(),
@@ -68,6 +180,7 @@ pub fn App() -> Element {
             SelfAudioSection {
                 mic_muted: mic_muted(),
                 mic_volume: mic_volume(),
+                mic_audio_level: mic_audio_level(),
                 loopback_enabled: loopback_enabled(),
             }
 
@@ -101,7 +214,7 @@ fn Header(
     rsx! {
         div {
             class: "bg-gray-800 text-white p-6 rounded-lg mb-6",
-            
+
             h1 {
                 class: "text-3xl font-bold mb-4",
                 "🎤 Wi-Fi Party KTV"
@@ -109,7 +222,7 @@ fn Header(
 
             div {
                 class: "flex items-center gap-4",
-                
+
                 div {
                     span { class: "text-gray-400", "Status: " }
                     span { class: status_color, "{status_text}" }
@@ -133,13 +246,18 @@ fn Header(
 fn SelfAudioSection(
     mic_muted: bool,
     mic_volume: f32,
+    mic_audio_level: f32,
     loopback_enabled: bool,
 ) -> Element {
     let state_arc = use_context::<Arc<AppState>>();
     let state_clone = state_arc.clone();
     let on_mute_toggle = move |_| {
-        let current = state_clone.mic_muted.load(std::sync::atomic::Ordering::Relaxed);
-        state_clone.mic_muted.store(!current, std::sync::atomic::Ordering::Relaxed);
+        let current = state_clone
+            .mic_muted
+            .load(std::sync::atomic::Ordering::Relaxed);
+        state_clone
+            .mic_muted
+            .store(!current, std::sync::atomic::Ordering::Relaxed);
     };
 
     let state_clone2 = state_arc.clone();
@@ -154,8 +272,12 @@ fn SelfAudioSection(
 
     let state_clone3 = state_arc.clone();
     let on_loopback_toggle = move |_| {
-        let current = state_clone3.loopback_enabled.load(std::sync::atomic::Ordering::Relaxed);
-        state_clone3.loopback_enabled.store(!current, std::sync::atomic::Ordering::Relaxed);
+        let current = state_clone3
+            .loopback_enabled
+            .load(std::sync::atomic::Ordering::Relaxed);
+        state_clone3
+            .loopback_enabled
+            .store(!current, std::sync::atomic::Ordering::Relaxed);
     };
 
     let mute_button_class = if mic_muted {
@@ -169,7 +291,7 @@ fn SelfAudioSection(
     rsx! {
         div {
             class: "bg-gray-800 text-white p-6 rounded-lg mb-6",
-            
+
             h2 {
                 class: "text-2xl font-bold mb-4",
                 "Your Audio"
@@ -177,7 +299,7 @@ fn SelfAudioSection(
 
             div {
                 class: "flex items-center gap-6",
-                
+
                 button {
                     class: mute_button_class,
                     onclick: on_mute_toggle,
@@ -210,18 +332,31 @@ fn SelfAudioSection(
                     }
                 }
             }
+
+            div {
+                class: "mt-4",
+                label {
+                    class: "block text-sm mb-2",
+                    "🎤 Microphone Level: {(mic_audio_level * 100.0) as i32}%"
+                }
+                div {
+                    class: "relative w-full h-6 bg-gray-700 rounded-lg overflow-hidden border border-gray-600",
+                    div {
+                        class: "absolute h-full bg-gradient-to-r from-green-500 via-yellow-500 to-red-500 transition-all duration-100",
+                        style: "width: {(mic_audio_level * 100.0).min(100.0)}%",
+                    }
+                }
+            }
         }
     }
 }
 
 #[component]
-fn ParticipantsSection(
-    hosts: Vec<HostInfo>,
-) -> Element {
+fn ParticipantsSection(hosts: Vec<HostInfo>) -> Element {
     rsx! {
         div {
             class: "bg-gray-800 text-white p-6 rounded-lg mb-6",
-            
+
             h2 {
                 class: "text-2xl font-bold mb-4",
                 "Participants ({hosts.len()})"
@@ -247,13 +382,11 @@ fn ParticipantsSection(
 }
 
 #[component]
-fn HostCard(
-    host: HostInfo,
-) -> Element {
+fn HostCard(host: HostInfo) -> Element {
     let state_arc = use_context::<Arc<AppState>>();
     let host_id = host.id;
     let state_clone = state_arc.clone();
-    
+
     let on_volume_change = move |evt: Event<FormData>| {
         if let Ok(value_str) = evt.value().parse::<f32>() {
             let volume = value_str / 100.0;
@@ -268,10 +401,10 @@ fn HostCard(
     rsx! {
         div {
             class: "bg-gray-700 p-4 rounded-lg",
-            
+
             div {
                 class: "flex items-center justify-between mb-2",
-                
+
                 div {
                     class: "font-mono text-sm",
                     "{host.id.to_string()}"
@@ -306,7 +439,7 @@ fn StatisticsPanel() -> Element {
     rsx! {
         div {
             class: "bg-gray-800 text-white p-6 rounded-lg",
-            
+
             h2 {
                 class: "text-2xl font-bold mb-4",
                 "Statistics"
@@ -314,7 +447,7 @@ fn StatisticsPanel() -> Element {
 
             div {
                 class: "grid grid-cols-3 gap-4",
-                
+
                 div {
                     class: "text-center",
                     div { class: "text-sm text-gray-400", "Latency" }

@@ -1,5 +1,13 @@
 [application]
 
+[bundle]
+identifier = "com.ken.WifiPartyRust"
+publisher = "ken"
+icon = []
+resources = []
+
+[bundle.macos]
+info_plist_path = "assets/Info.plist"
 
 [web.app]
 

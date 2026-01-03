@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::{Arc, Mutex};
 
 /// Host identifier using IPv4 address
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -30,9 +30,9 @@ impl From<[u8; 4]> for HostId {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HostInfo {
     pub id: HostId,
-    pub volume: f32,        // 0.0 to 2.0 (0-200%)
-    pub audio_level: f32,   // 0.0 to 1.0
-    pub packet_loss: f32,   // 0.0 to 1.0 (percentage)
+    pub volume: f32,      // 0.0 to 2.0 (0-200%)
+    pub audio_level: f32, // 0.0 to 1.0
+    pub packet_loss: f32, // 0.0 to 1.0 (percentage)
     pub last_seen: std::time::Instant,
 }
 
@@ -101,6 +101,7 @@ pub struct AppState {
     pub connection_status: Arc<Mutex<ConnectionStatus>>,
     pub mic_muted: Arc<AtomicBool>,
     pub mic_volume: Arc<Mutex<f32>>,
+    pub mic_audio_level: Arc<Mutex<f32>>,
     pub loopback_enabled: Arc<AtomicBool>,
     pub sequence_number: Arc<AtomicU64>,
     pub local_host_id: Arc<Mutex<Option<HostId>>>,
@@ -115,6 +116,7 @@ impl AppState {
             connection_status: Arc::new(Mutex::new(ConnectionStatus::Disconnected)),
             mic_muted: Arc::new(AtomicBool::new(false)),
             mic_volume: Arc::new(Mutex::new(1.0)),
+            mic_audio_level: Arc::new(Mutex::new(0.0)),
             loopback_enabled: Arc::new(AtomicBool::new(false)),
             sequence_number: Arc::new(AtomicU64::new(0)),
             local_host_id: Arc::new(Mutex::new(None)),
