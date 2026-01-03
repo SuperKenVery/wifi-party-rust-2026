@@ -32,14 +32,14 @@
     });
 
     dioxus-cli = eachSystem (pkgs: pkgs.dioxus-cli.overrideAttrs (oldAttrs: {
-      postPatch = ''
-        rm Cargo.lock
-        cp ${./Dioxus.lock} Cargo.lock
-      '';
+      # postPatch = ''
+      #   rm Cargo.lock
+      #   cp ${./Dioxus.lock} Cargo.lock
+      # '';
 
-      cargoDeps = pkgs.rustPlatform.importCargoLock {
-        lockFile = ./Dioxus.lock;
-      };
+      # cargoDeps = pkgs.rustPlatform.importCargoLock {
+      #   lockFile = ./Dioxus.lock;
+      # };
     }));
 
     cargoLock = builtins.fromTOML (builtins.readFile ./Cargo.lock);
