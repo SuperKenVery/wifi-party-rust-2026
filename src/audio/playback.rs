@@ -1,8 +1,9 @@
+use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, Stream, StreamConfig, SampleFormat};
+use cpal::{Device, SampleFormat, Stream, StreamConfig};
+use dasp_sample::{FromSample, Sample as DaspSample};
 use rtrb::Consumer;
-use tracing::{info, error};
-use dasp_sample::{Sample as DaspSample, FromSample};
+use tracing::{error, info};
 
 pub struct AudioPlaybackHandler {
     _stream: Stream,
@@ -14,20 +15,23 @@ impl AudioPlaybackHandler {
     pub fn start(
         network_consumer: Consumer<Vec<i16>>,
         loopback_consumer: Consumer<Vec<i16>>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         let host = cpal::default_host();
-        
+
         // Get default output device
         let device = host
             .default_output_device()
-            .ok_or_else(|| "No output device available".to_string())?;
+            .context("No output device available")?;
 
-        info!("Using output device: {}", device.name().unwrap_or_else(|_| "Unknown".to_string()));
+        info!(
+            "Using output device: {}",
+            device.name().unwrap_or_else(|_| "Unknown".to_string())
+        );
 
         // Get default config
         let config = device
             .default_output_config()
-            .map_err(|e| format!("Failed to get default output config: {}", e))?;
+            .context("Failed to get default output config")?;
 
         info!("Output config: {:?}", config);
 
@@ -39,22 +43,31 @@ impl AudioPlaybackHandler {
         };
 
         let stream = match config.sample_format() {
-            SampleFormat::I16 => {
-                Self::build_output_stream::<i16>(&device, &stream_config, network_consumer, loopback_consumer)?
-            }
-            SampleFormat::U16 => {
-                Self::build_output_stream::<u16>(&device, &stream_config, network_consumer, loopback_consumer)?
-            }
-            SampleFormat::F32 => {
-                Self::build_output_stream::<f32>(&device, &stream_config, network_consumer, loopback_consumer)?
-            }
+            SampleFormat::I16 => Self::build_output_stream::<i16>(
+                &device,
+                &stream_config,
+                network_consumer,
+                loopback_consumer,
+            )?,
+            SampleFormat::U16 => Self::build_output_stream::<u16>(
+                &device,
+                &stream_config,
+                network_consumer,
+                loopback_consumer,
+            )?,
+            SampleFormat::F32 => Self::build_output_stream::<f32>(
+                &device,
+                &stream_config,
+                network_consumer,
+                loopback_consumer,
+            )?,
             format => {
-                return Err(format!("Unsupported sample format: {:?}", format));
+                anyhow::bail!("Unsupported sample format: {:?}", format);
             }
         };
 
-        stream.play().map_err(|e| format!("Failed to play stream: {}", e))?;
-        
+        stream.play().context("Failed to play stream")?;
+
         info!("Audio playback started");
 
         Ok(Self { _stream: stream })
@@ -65,7 +78,7 @@ impl AudioPlaybackHandler {
         config: &StreamConfig,
         mut network_consumer: Consumer<Vec<i16>>,
         mut loopback_consumer: Consumer<Vec<i16>>,
-    ) -> Result<Stream, String>
+    ) -> Result<Stream>
     where
         T: cpal::Sample + cpal::SizedSample,
         T: FromSample<i16>,
@@ -129,7 +142,7 @@ impl AudioPlaybackHandler {
                         // Mix the two sources (simple addition with clamping)
                         let mixed = (network_sample as i32 + loopback_sample as i32)
                             .clamp(-32768, 32767) as i16;
-                        
+
                         *sample_slot = T::from_sample(mixed);
                     }
                 },
@@ -138,7 +151,7 @@ impl AudioPlaybackHandler {
                 },
                 None,
             )
-            .map_err(|e| format!("Failed to build output stream: {}", e))?;
+            .context("Failed to build output stream")?;
 
         Ok(stream)
     }

@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use rkyv::{Archive, Deserialize, Serialize};
 
 /// Audio frame structure for network transmission
@@ -5,20 +6,17 @@ use rkyv::{Archive, Deserialize, Serialize};
 /// Sample rate is always 48kHz (resampled before sending if needed)
 /// Host ID is extracted from UDP packet source address when receiving
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
-#[rkyv(
-    compare(PartialEq),
-    derive(Debug),
-)]
+#[rkyv(compare(PartialEq), derive(Debug))]
 pub struct AudioFrame {
     /// Monotonic sequence number for packet ordering and loss detection
     pub sequence_number: u64,
-    
+
     /// Capture timestamp in microseconds
     pub timestamp: u64,
-    
+
     /// Number of audio channels (1=mono, 2=stereo)
     pub channels: u8,
-    
+
     /// Interleaved 16-bit PCM samples at 48kHz
     /// For stereo: [L0, R0, L1, R1, ...]
     pub samples: Vec<i16>,
@@ -27,11 +25,7 @@ pub struct AudioFrame {
 impl AudioFrame {
     /// Create a new audio frame
     /// Sample rate is assumed to be 48kHz
-    pub fn new(
-        sequence_number: u64,
-        channels: u8,
-        samples: Vec<i16>,
-    ) -> Self {
+    pub fn new(sequence_number: u64, channels: u8, samples: Vec<i16>) -> Self {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -51,16 +45,15 @@ impl AudioFrame {
     }
 
     /// Serialize the frame using rkyv
-    pub fn serialize(&self) -> Result<Vec<u8>, String> {
+    pub fn serialize(&self) -> Result<Vec<u8>> {
         rkyv::to_bytes::<rkyv::rancor::Error>(self)
             .map(|bytes| bytes.to_vec())
-            .map_err(|e| format!("Serialization error: {:?}", e))
+            .context("Serialization error")
     }
 
     /// Deserialize a frame from bytes using rkyv
-    pub fn deserialize(bytes: &[u8]) -> Result<Self, String> {
-        rkyv::from_bytes::<AudioFrame, rkyv::rancor::Error>(bytes)
-            .map_err(|e| format!("Deserialization error: {:?}", e))
+    pub fn deserialize(bytes: &[u8]) -> Result<Self> {
+        rkyv::from_bytes::<AudioFrame, rkyv::rancor::Error>(bytes).context("Deserialization error")
     }
 
     /// Validate the frame
@@ -88,7 +81,7 @@ mod tests {
     fn test_audio_frame_creation() {
         let samples = vec![100, -100, 200, -200];
         let frame = AudioFrame::new(1, 2, samples.clone());
-        
+
         assert_eq!(frame.sequence_number, 1);
         assert_eq!(frame.channels, 2);
         assert_eq!(frame.samples, samples);
@@ -99,10 +92,10 @@ mod tests {
     fn test_audio_frame_serialization() {
         let samples = vec![100, -100, 200, -200];
         let frame = AudioFrame::new(1, 2, samples);
-        
+
         let serialized = frame.serialize().unwrap();
         let deserialized = AudioFrame::deserialize(&serialized).unwrap();
-        
+
         assert_eq!(frame.sequence_number, deserialized.sequence_number);
         assert_eq!(frame.channels, deserialized.channels);
         assert_eq!(frame.samples, deserialized.samples);

@@ -3,6 +3,7 @@ use crate::audio::{
 };
 use crate::network::{receive::NetworkReceiver, send::NetworkSender};
 use crate::state::{AppState, ConnectionStatus, HostId, HostInfo};
+use anyhow::{Context, Result};
 use dioxus::prelude::*;
 use std::net::{IpAddr, UdpSocket};
 use std::sync::Arc;
@@ -10,23 +11,20 @@ use tracing::{error, info};
 
 /// Get the local IP address by creating a socket
 /// This doesn't actually send any data, just queries the local routing table
-pub fn get_local_ip() -> Result<HostId, String> {
+pub fn get_local_ip() -> Result<HostId> {
     // Create a UDP socket and connect to a multicast address
     // This doesn't send any data, but tells us which interface would be used
-    let socket =
-        UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("Failed to create socket: {}", e))?;
+    let socket = UdpSocket::bind("0.0.0.0:0").context("Failed to create socket")?;
 
     socket
         .connect("239.255.43.2:7667")
-        .map_err(|e| format!("Failed to connect socket: {}", e))?;
+        .context("Failed to connect socket")?;
 
-    let local_addr = socket
-        .local_addr()
-        .map_err(|e| format!("Failed to get local address: {}", e))?;
+    let local_addr = socket.local_addr().context("Failed to get local address")?;
 
     match local_addr.ip() {
         IpAddr::V4(ipv4) => Ok(HostId::from(ipv4.octets())),
-        IpAddr::V6(_) => Err("IPv6 not supported".to_string()),
+        IpAddr::V6(_) => anyhow::bail!("IPv6 not supported"),
     }
 }
 

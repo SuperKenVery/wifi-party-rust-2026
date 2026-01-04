@@ -1,7 +1,8 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use anyhow::{Context, Result};
 use crossbeam_channel::Receiver;
 use rtrb::Producer;
+use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::audio::AudioFrame;
@@ -15,13 +16,13 @@ impl AudioMixer {
         state: Arc<AppState>,
         frame_receiver: Receiver<(HostId, AudioFrame)>,
         playback_producer: Producer<Vec<i16>>,
-    ) -> Result<std::thread::JoinHandle<()>, String> {
+    ) -> Result<std::thread::JoinHandle<()>> {
         let handle = std::thread::Builder::new()
             .name("audio-mixer".to_string())
             .spawn(move || {
                 Self::run(state, frame_receiver, playback_producer);
             })
-            .map_err(|e| format!("Failed to spawn mixer thread: {}", e))?;
+            .context("Failed to spawn mixer thread")?;
 
         Ok(handle)
     }
@@ -36,7 +37,7 @@ impl AudioMixer {
 
         // Buffer for collecting frames from different hosts
         let mut host_frames: HashMap<HostId, AudioFrame> = HashMap::new();
-        
+
         // Timeout for host cleanup
         let host_timeout = std::time::Duration::from_secs(5);
 
@@ -60,7 +61,8 @@ impl AudioMixer {
             {
                 let hosts = state.active_hosts.lock().unwrap();
                 host_frames.retain(|host_id, _| {
-                    hosts.get(host_id)
+                    hosts
+                        .get(host_id)
                         .map(|info| now.duration_since(info.last_seen) < host_timeout)
                         .unwrap_or(false)
                 });
@@ -103,9 +105,7 @@ impl AudioMixer {
         // Sum all frames with volume control
         for (host_id, frame) in host_frames.iter() {
             // Get volume for this host (default 1.0)
-            let volume = hosts.get(host_id)
-                .map(|info| info.volume)
-                .unwrap_or(1.0);
+            let volume = hosts.get(host_id).map(|info| info.volume).unwrap_or(1.0);
 
             // Ensure frames are same length
             if frame.samples.len() != sample_count {
@@ -120,7 +120,8 @@ impl AudioMixer {
         }
 
         // Apply soft clipping and convert to i16
-        let output: Vec<i16> = mixed.iter()
+        let output: Vec<i16> = mixed
+            .iter()
             .map(|&sample| Self::soft_clip(sample))
             .collect();
 
@@ -178,7 +179,7 @@ mod tests {
     fn test_mix_frames_empty() {
         let state = Arc::new(AppState::new());
         let host_frames = HashMap::new();
-        
+
         let result = AudioMixer::mix_frames(&state, &host_frames);
         assert!(result.is_none());
     }

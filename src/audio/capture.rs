@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use dasp_sample::{FromSample, Sample as DaspSample};
@@ -19,13 +20,13 @@ impl AudioCaptureHandler {
         state: Arc<AppState>,
         network_producer: Producer<Vec<u8>>,
         loopback_producer: Producer<Vec<i16>>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         let host = cpal::default_host();
 
         // Get default input device
         let device = host
             .default_input_device()
-            .ok_or_else(|| "No input device available".to_string())?;
+            .context("No input device available")?;
 
         info!(
             "Using input device: {}",
@@ -35,7 +36,7 @@ impl AudioCaptureHandler {
         // Get default config
         let config = device
             .default_input_config()
-            .map_err(|e| format!("Failed to get default input config: {}", e))?;
+            .context("Failed to get default input config")?;
 
         info!("Input config: {:?}", config);
 
@@ -90,13 +91,11 @@ impl AudioCaptureHandler {
                 channels,
             )?,
             format => {
-                return Err(format!("Unsupported sample format: {:?}", format));
+                anyhow::bail!("Unsupported sample format: {:?}", format);
             }
         };
 
-        stream
-            .play()
-            .map_err(|e| format!("Failed to play stream: {}", e))?;
+        stream.play().context("Failed to play stream")?;
 
         info!("Audio capture started");
 
@@ -112,7 +111,7 @@ impl AudioCaptureHandler {
         frame_size: usize,
         sample_rate: u32,
         channels: u8,
-    ) -> Result<Stream, String>
+    ) -> Result<Stream>
     where
         T: cpal::Sample + cpal::SizedSample,
     {
@@ -192,7 +191,7 @@ impl AudioCaptureHandler {
                 },
                 None,
             )
-            .map_err(|e| format!("Failed to build input stream: {}", e))?;
+            .context("Failed to build input stream")?;
 
         Ok(stream)
     }

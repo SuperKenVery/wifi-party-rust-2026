@@ -5674,6 +5674,7 @@ dependencies = [
 name = "wifi-party-rust"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "cpal",
  "crossbeam-channel",
  "dasp_sample",

@@ -1,11 +1,12 @@
+use anyhow::{Context, Result};
+use rtrb::Consumer;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use rtrb::Consumer;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
-use crate::state::AppState;
 use super::{MULTICAST_ADDR, MULTICAST_PORT, TTL};
+use crate::state::AppState;
 
 pub struct NetworkSender {
     socket: Socket,
@@ -14,31 +15,31 @@ pub struct NetworkSender {
 
 impl NetworkSender {
     /// Create a new network sender
-    pub fn new() -> Result<Self, String> {
+    pub fn new() -> Result<Self> {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
-            .map_err(|e| format!("Failed to create socket: {}", e))?;
+            .context("Failed to create socket")?;
 
         // Set socket to non-blocking mode for truly non-blocking UDP sends
         socket
             .set_nonblocking(true)
-            .map_err(|e| format!("Failed to set non-blocking: {}", e))?;
+            .context("Failed to set non-blocking")?;
 
         // Set multicast TTL
         socket
             .set_multicast_ttl_v4(TTL)
-            .map_err(|e| format!("Failed to set multicast TTL: {}", e))?;
+            .context("Failed to set multicast TTL")?;
 
         // Parse multicast address
         let multicast_ip: Ipv4Addr = MULTICAST_ADDR
             .parse()
-            .map_err(|e| format!("Invalid multicast address: {}", e))?;
-        
-        let multicast_addr = SocketAddr::new(
-            IpAddr::V4(multicast_ip),
-            MULTICAST_PORT,
-        );
+            .context("Invalid multicast address")?;
 
-        info!("Network sender initialized for {}:{}", MULTICAST_ADDR, MULTICAST_PORT);
+        let multicast_addr = SocketAddr::new(IpAddr::V4(multicast_ip), MULTICAST_PORT);
+
+        info!(
+            "Network sender initialized for {}:{}",
+            MULTICAST_ADDR, MULTICAST_PORT
+        );
 
         Ok(Self {
             socket,
@@ -50,15 +51,15 @@ impl NetworkSender {
     pub fn start(
         _state: Arc<AppState>,
         consumer: Consumer<Vec<u8>>,
-    ) -> Result<std::thread::JoinHandle<()>, String> {
+    ) -> Result<std::thread::JoinHandle<()>> {
         let sender = Self::new()?;
-        
+
         let handle = std::thread::Builder::new()
             .name("network-send".to_string())
             .spawn(move || {
                 sender.run(consumer);
             })
-            .map_err(|e| format!("Failed to spawn send thread: {}", e))?;
+            .context("Failed to spawn send thread")?;
 
         Ok(handle)
     }
@@ -72,7 +73,10 @@ impl NetworkSender {
             match consumer.pop() {
                 Ok(serialized_frame) => {
                     // Send the packet (non-blocking)
-                    match self.socket.send_to(&serialized_frame, &self.multicast_addr.into()) {
+                    match self
+                        .socket
+                        .send_to(&serialized_frame, &self.multicast_addr.into())
+                    {
                         Ok(bytes_sent) => {
                             if bytes_sent != serialized_frame.len() {
                                 warn!(
