@@ -1,9 +1,8 @@
 use anyhow::{Context, Result};
-use crossbeam_channel::Sender;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{debug, info, warn};
 
 use super::{MULTICAST_ADDR, MULTICAST_PORT};
 use crate::audio::AudioFrame;
@@ -50,10 +49,7 @@ impl NetworkReceiver {
     }
 
     /// Create a [`NetworkReceiver`] and start the receive thread
-    pub fn start(
-        state: Arc<AppState>,
-        frame_sender: Sender<(HostId, AudioFrame)>,
-    ) -> Result<std::thread::JoinHandle<()>> {
+    pub fn start(state: Arc<AppState>) -> Result<std::thread::JoinHandle<()>> {
         let receiver = Self::new()?;
 
         // Update connection status
@@ -62,7 +58,7 @@ impl NetworkReceiver {
         let handle = std::thread::Builder::new()
             .name("network-receive".to_string())
             .spawn(move || {
-                receiver.run(state, frame_sender);
+                receiver.run(state);
             })
             .context("Failed to spawn receive thread")?;
 
@@ -70,25 +66,20 @@ impl NetworkReceiver {
     }
 
     /// Run the receive loop
-    fn run(&self, state: Arc<AppState>, frame_sender: Sender<(HostId, AudioFrame)>) {
+    fn run(&self, state: Arc<AppState>) {
         info!("Network receive thread started");
 
         let mut buf = [0u8; 65536];
 
         loop {
-            if let Err(e) = self.handle_packet(&mut buf, &state, &frame_sender) {
+            if let Err(e) = self.handle_packet(&mut buf, &state) {
                 warn!("Error processing packet: {:?}", e);
             }
         }
     }
 
     /// Handle a single incoming packet
-    fn handle_packet(
-        &self,
-        buf: &mut [u8],
-        state: &Arc<AppState>,
-        frame_sender: &Sender<(HostId, AudioFrame)>,
-    ) -> Result<()> {
+    fn handle_packet(&self, buf: &mut [u8], state: &Arc<AppState>) -> Result<()> {
         let (size, source_addr) = self
             .socket
             .recv_from(buf)
@@ -96,25 +87,14 @@ impl NetworkReceiver {
 
         let received_data = &buf[..size];
 
-        // Extract source IP
-        let source_ip = match source_addr {
-            SocketAddr::V4(addr) => addr.ip().octets(),
-            _ => {
-                anyhow::bail!("Received packet from non-IPv4 source");
-            }
-        };
+        let host_id = HostId::from(source_addr);
 
-        // Deserialize frame
         let frame = AudioFrame::deserialize(received_data)
-            .context(|| format!("Failed to deserialize frame from {:?}", source_ip))?;
+            .context(format!("Failed to deserialize frame from {}", source_addr))?;
 
-        // Validate frame
         if !frame.validate() {
-            anyhow::bail!("Invalid frame from {:?}", source_ip);
+            anyhow::bail!("Invalid frame from {}", source_addr);
         }
-
-        // Create HostId from source IP
-        let host_id = HostId::from(source_ip);
 
         // Check if this is our own packet (loopback)
         {
@@ -125,8 +105,14 @@ impl NetworkReceiver {
                 }
             }
         }
+        debug!(
+            "Reiceive packet from {:?}, seq num {}, is_v4: {}",
+            source_addr,
+            frame.sequence_number,
+            source_addr.is_ipv4()
+        );
 
-        // Update host tracking
+        // Update host tracking and push to jitter buffer
         {
             let mut hosts = state.active_hosts.lock().unwrap();
             hosts
@@ -140,10 +126,11 @@ impl NetworkReceiver {
                 });
         }
 
-        // Send frame with host_id to mixer via channel
-        frame_sender
-            .send((host_id, frame))
-            .context("Failed to send frame to mixer, channel closed")?;
+        // Create jitter buffer for new host if needed
+        state.jitter_buffers.get_or_create(host_id);
+
+        // Push frame to jitter buffer
+        state.jitter_buffers.push_frame(host_id, frame);
 
         Ok(())
     }

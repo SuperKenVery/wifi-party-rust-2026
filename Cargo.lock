@@ -3103,6 +3103,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "neteq"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "706010e003e8fcc6668973f0e3e248fb8c0c5c5b7a225edb771df175675ab904"
+dependencies = [
+ "log",
+ "ringbuf",
+ "serde",
+ "thiserror 1.0.69",
+ "web-time",
+]
+
+[[package]]
 name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4129,6 +4142,15 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "ringbuf"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "79abed428d1fd2a128201cec72c5f6938e2da607c6f3745f769fabea399d950a"
+dependencies = [
+ "crossbeam-utils",
 ]
 
 [[package]]
@@ -5679,6 +5701,7 @@ dependencies = [
  "crossbeam-channel",
  "dasp_sample",
  "dioxus",
+ "neteq",
  "rkyv",
  "rtrb",
  "socket2 0.5.10",

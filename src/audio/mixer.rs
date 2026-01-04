@@ -1,11 +1,9 @@
 use anyhow::{Context, Result};
-use crossbeam_channel::Receiver;
 use rtrb::Producer;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{info, warn};
 
-use crate::audio::AudioFrame;
 use crate::state::{AppState, HostId};
 
 pub struct AudioMixer;
@@ -14,13 +12,12 @@ impl AudioMixer {
     /// Start the mixer thread
     pub fn start(
         state: Arc<AppState>,
-        frame_receiver: Receiver<(HostId, AudioFrame)>,
-        playback_producer: Producer<Vec<i16>>,
+        mut playback_producer: Producer<Vec<i16>>,
     ) -> Result<std::thread::JoinHandle<()>> {
         let handle = std::thread::Builder::new()
             .name("audio-mixer".to_string())
             .spawn(move || {
-                Self::run(state, frame_receiver, playback_producer);
+                Self::run(state, playback_producer);
             })
             .context("Failed to spawn mixer thread")?;
 
@@ -28,44 +25,41 @@ impl AudioMixer {
     }
 
     /// Run the mixer loop
-    fn run(
-        state: Arc<AppState>,
-        frame_receiver: Receiver<(HostId, AudioFrame)>,
-        mut playback_producer: Producer<Vec<i16>>,
-    ) {
+    fn run(state: Arc<AppState>, mut playback_producer: Producer<Vec<i16>>) {
         info!("Audio mixer thread started");
-
-        // Buffer for collecting frames from different hosts
-        let mut host_frames: HashMap<HostId, AudioFrame> = HashMap::new();
 
         // Timeout for host cleanup
         let host_timeout = std::time::Duration::from_secs(5);
+        let mix_interval = std::time::Duration::from_millis(10);
 
         loop {
-            // Receive frames with timeout
-            match frame_receiver.recv_timeout(std::time::Duration::from_millis(10)) {
-                Ok((host_id, frame)) => {
-                    host_frames.insert(host_id, frame);
-                }
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                    // No new frames, continue to mixing
-                }
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                    info!("Frame receiver disconnected, mixer stopping");
-                    break;
+            std::thread::sleep(mix_interval);
+
+            // Get active host IDs
+            let host_ids: Vec<HostId> = {
+                let hosts = state.active_hosts.lock().unwrap();
+                hosts.keys().copied().collect()
+            };
+
+            // Pull frames from jitter buffers
+            let mut host_frames: HashMap<HostId, Vec<i16>> = HashMap::new();
+            for host_id in host_ids {
+                if let Some(samples) = state.jitter_buffers.pop_frame(host_id) {
+                    host_frames.insert(host_id, samples);
                 }
             }
 
-            // Clean up old hosts
+            // Clean up old hosts from jitter buffers
             let now = std::time::Instant::now();
             {
                 let hosts = state.active_hosts.lock().unwrap();
-                host_frames.retain(|host_id, _| {
-                    hosts
-                        .get(host_id)
-                        .map(|info| now.duration_since(info.last_seen) < host_timeout)
-                        .unwrap_or(false)
-                });
+                for host_id in hosts.keys() {
+                    if let Some(info) = hosts.get(host_id) {
+                        if now.duration_since(info.last_seen) >= host_timeout {
+                            state.jitter_buffers.remove(host_id);
+                        }
+                    }
+                }
             }
 
             // Mix frames if we have any
@@ -78,23 +72,21 @@ impl AudioMixer {
                 }
             }
         }
-
-        info!("Audio mixer thread stopped");
     }
 
-    /// Mix multiple audio frames into one
-    /// Simple summation with soft clipping for Phase 1
+    /// Mix multiple audio sample buffers into one
+    /// Simple summation with soft clipping
     fn mix_frames(
         state: &Arc<AppState>,
-        host_frames: &HashMap<HostId, AudioFrame>,
+        host_frames: &HashMap<HostId, Vec<i16>>,
     ) -> Option<Vec<i16>> {
         if host_frames.is_empty() {
             return None;
         }
 
         // Get the first frame to determine output format
-        let first_frame = host_frames.values().next()?;
-        let sample_count = first_frame.samples.len();
+        let first_samples = host_frames.values().next()?;
+        let sample_count = first_samples.len();
 
         // Initialize accumulator with zeros
         let mut mixed: Vec<i32> = vec![0; sample_count];
@@ -103,18 +95,18 @@ impl AudioMixer {
         let hosts = state.active_hosts.lock().unwrap();
 
         // Sum all frames with volume control
-        for (host_id, frame) in host_frames.iter() {
+        for (host_id, samples) in host_frames.iter() {
             // Get volume for this host (default 1.0)
             let volume = hosts.get(host_id).map(|info| info.volume).unwrap_or(1.0);
 
             // Ensure frames are same length
-            if frame.samples.len() != sample_count {
+            if samples.len() != sample_count {
                 warn!("Frame size mismatch, skipping host {:?}", host_id);
                 continue;
             }
 
             // Add samples with volume
-            for (i, &sample) in frame.samples.iter().enumerate() {
+            for (i, &sample) in samples.iter().enumerate() {
                 mixed[i] += (sample as f32 * volume) as i32;
             }
         }

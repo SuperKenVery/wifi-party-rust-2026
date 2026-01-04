@@ -178,6 +178,7 @@ impl AudioCaptureHandler {
                                     if network_producer.push(serialized).is_err() {
                                         warn!("Send queue full, dropping frame");
                                     }
+                                    debug!("Sending packet seq={}", frame.sequence_number);
                                 }
                                 Err(e) => {
                                     error!("Failed to serialize frame: {}", e);

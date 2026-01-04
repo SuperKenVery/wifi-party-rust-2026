@@ -39,7 +39,10 @@ impl AudioPlaybackHandler {
         let stream_config = StreamConfig {
             channels: config.channels().min(2), // Limit to stereo
             sample_rate: config.sample_rate(),
-            buffer_size: cpal::BufferSize::Default,
+            buffer_size: match config.buffer_size() {
+                cpal::SupportedBufferSize::Range { min, .. } => cpal::BufferSize::Fixed(*min),
+                cpal::SupportedBufferSize::Unknown => cpal::BufferSize::Default,
+            },
         };
 
         let stream = match config.sample_format() {

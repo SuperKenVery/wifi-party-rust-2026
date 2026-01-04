@@ -22,10 +22,7 @@ pub fn get_local_ip() -> Result<HostId> {
 
     let local_addr = socket.local_addr().context("Failed to get local address")?;
 
-    match local_addr.ip() {
-        IpAddr::V4(ipv4) => Ok(HostId::from(ipv4.octets())),
-        IpAddr::V6(_) => anyhow::bail!("IPv6 not supported"),
-    }
+    Ok(HostId::from(local_addr))
 }
 
 fn setup() -> Arc<AppState> {
@@ -44,7 +41,6 @@ fn setup() -> Arc<AppState> {
     let (send_producer, send_consumer) = rtrb::RingBuffer::<Vec<u8>>::new(500);
     let (playback_producer, playback_consumer) = rtrb::RingBuffer::<Vec<i16>>::new(100);
     let (loopback_producer, loopback_consumer) = rtrb::RingBuffer::<Vec<i16>>::new(100);
-    let (frame_sender, frame_receiver) = crossbeam_channel::unbounded();
 
     // Start network threads
     let state_clone = state.clone();
@@ -56,7 +52,7 @@ fn setup() -> Arc<AppState> {
 
     let state_clone = state.clone();
     std::thread::spawn(move || {
-        if let Err(e) = NetworkReceiver::start(state_clone, frame_sender) {
+        if let Err(e) = NetworkReceiver::start(state_clone) {
             error!("Failed to start network receiver: {}", e);
         }
     });
@@ -64,7 +60,7 @@ fn setup() -> Arc<AppState> {
     // Start mixer thread
     let state_clone = state.clone();
     std::thread::spawn(move || {
-        if let Err(e) = AudioMixer::start(state_clone, frame_receiver, playback_producer) {
+        if let Err(e) = AudioMixer::start(state_clone, playback_producer) {
             error!("Failed to start audio mixer: {}", e);
         }
     });

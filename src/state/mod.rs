@@ -1,39 +1,92 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 
-/// Host identifier using IPv4 address
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct HostId([u8; 4]);
+use crate::audio::HostJitterBuffer;
 
-impl HostId {
-    pub fn new(bytes: [u8; 4]) -> Self {
-        Self(bytes)
+pub struct JitterBufferMap {
+    buffers: Mutex<HashMap<HostId, HostJitterBuffer>>,
+}
+
+impl JitterBufferMap {
+    pub fn new() -> Self {
+        Self {
+            buffers: Mutex::new(HashMap::new()),
+        }
     }
 
-    pub fn as_bytes(&self) -> &[u8; 4] {
+    pub fn get_or_create(&self, host_id: HostId) -> Option<()> {
+        let mut buffers = self.buffers.lock().unwrap();
+        if !buffers.contains_key(&host_id) {
+            let buffer = HostJitterBuffer::new(48000, 2).ok()?;
+            buffers.insert(host_id, buffer);
+        }
+        Some(())
+    }
+
+    pub fn push_frame(&self, host_id: HostId, frame: crate::audio::AudioFrame) {
+        let mut buffers = self.buffers.lock().unwrap();
+        if let Some(buffer) = buffers.get_mut(&host_id) {
+            let _ = buffer.push(frame);
+        }
+    }
+
+    pub fn pop_frame(&self, host_id: HostId) -> Option<Vec<i16>> {
+        let mut buffers = self.buffers.lock().unwrap();
+        if let Some(buffer) = buffers.get_mut(&host_id) {
+            buffer.pop().ok().flatten()
+        } else {
+            None
+        }
+    }
+
+    pub fn remove(&self, host_id: &HostId) {
+        let mut buffers = self.buffers.lock().unwrap();
+        buffers.remove(host_id);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HostId(SocketAddr);
+
+impl HostId {
+    pub fn new(addr: SocketAddr) -> Self {
+        Self(addr)
+    }
+
+    pub fn as_socket_addr(&self) -> &SocketAddr {
         &self.0
     }
 
     pub fn to_string(&self) -> String {
-        format!("{}.{}.{}.{}", self.0[0], self.0[1], self.0[2], self.0[3])
+        self.0.to_string()
     }
 }
 
-impl From<[u8; 4]> for HostId {
-    fn from(bytes: [u8; 4]) -> Self {
-        Self(bytes)
+impl From<SocketAddr> for HostId {
+    fn from(addr: SocketAddr) -> Self {
+        Self(addr)
     }
 }
 
 /// Information about a remote host
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct HostInfo {
     pub id: HostId,
     pub volume: f32,      // 0.0 to 2.0 (0-200%)
     pub audio_level: f32, // 0.0 to 1.0
     pub packet_loss: f32, // 0.0 to 1.0 (percentage)
     pub last_seen: std::time::Instant,
+}
+
+impl PartialEq for HostInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.volume == other.volume
+            && self.audio_level == other.audio_level
+            && self.packet_loss == other.packet_loss
+    }
 }
 
 impl HostInfo {
@@ -98,6 +151,7 @@ pub struct AppState {
     pub audio_config: Arc<Mutex<AudioConfig>>,
     pub network_config: Arc<Mutex<NetworkConfig>>,
     pub active_hosts: Arc<Mutex<HashMap<HostId, HostInfo>>>,
+    pub jitter_buffers: Arc<JitterBufferMap>,
     pub connection_status: Arc<Mutex<ConnectionStatus>>,
     pub mic_muted: Arc<AtomicBool>,
     pub mic_volume: Arc<Mutex<f32>>,
@@ -113,6 +167,7 @@ impl AppState {
             audio_config: Arc::new(Mutex::new(AudioConfig::default())),
             network_config: Arc::new(Mutex::new(NetworkConfig::default())),
             active_hosts: Arc::new(Mutex::new(HashMap::new())),
+            jitter_buffers: Arc::new(JitterBufferMap::new()),
             connection_status: Arc::new(Mutex::new(ConnectionStatus::Disconnected)),
             mic_muted: Arc::new(AtomicBool::new(false)),
             mic_volume: Arc::new(Mutex::new(1.0)),
