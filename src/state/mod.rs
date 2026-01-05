@@ -19,7 +19,7 @@ impl JitterBufferMap {
     pub fn get_or_create(&self, host_id: HostId) -> Option<()> {
         let mut buffers = self.buffers.lock().unwrap();
         if !buffers.contains_key(&host_id) {
-            let buffer = HostJitterBuffer::new(48000, 2).ok()?;
+            let buffer = HostJitterBuffer::new(48000, 2);
             buffers.insert(host_id, buffer);
         }
         Some(())
@@ -28,14 +28,14 @@ impl JitterBufferMap {
     pub fn push_frame(&self, host_id: HostId, frame: crate::audio::AudioFrame) {
         let mut buffers = self.buffers.lock().unwrap();
         if let Some(buffer) = buffers.get_mut(&host_id) {
-            let _ = buffer.push(frame);
+            buffer.push(frame);
         }
     }
 
     pub fn pop_frame(&self, host_id: HostId) -> Option<Vec<i16>> {
         let mut buffers = self.buffers.lock().unwrap();
         if let Some(buffer) = buffers.get_mut(&host_id) {
-            buffer.pop().ok().flatten()
+            buffer.pop()
         } else {
             None
         }

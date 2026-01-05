@@ -1,12 +1,79 @@
 use anyhow::{Context, Result};
 use rkyv::{Archive, Deserialize, Serialize};
 
-/// Audio frame structure for network transmission
-/// Uses rkyv for zero-copy serialization/deserialization
-/// Sample rate is always 48kHz (resampled before sending if needed)
-/// Host ID is extracted from UDP packet source address when receiving
+/// A type-safe audio buffer with compile-time channel count and sample rate.
+///
+/// This structure ensures that audio processing logic (like channel iteration)
+/// is checked at compile time and can be heavily optimized by the compiler.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq)]
+#[rkyv(compare(PartialEq))]
+pub struct AudioBuffer<T, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    data: Vec<T>,
+}
+
+impl<T, const CHANNELS: usize, const SAMPLE_RATE: u32> AudioBuffer<T, CHANNELS, SAMPLE_RATE> {
+    /// Create a new audio buffer from raw samples.
+    ///
+    /// Returns an error if the data length is not a multiple of the channel count.
+    pub fn new(data: Vec<T>) -> Result<Self> {
+        if !data.is_empty() && data.len() % CHANNELS != 0 {
+            anyhow::bail!(
+                "Data length {} must be a multiple of channels {}",
+                data.len(),
+                CHANNELS
+            );
+        }
+        Ok(Self { data })
+    }
+
+    /// Returns an iterator over the samples of a specific channel.
+    ///
+    /// This is fully static and compiler-optimized.
+    pub fn iter_channel(&self, channel_idx: usize) -> impl Iterator<Item = &T> {
+        assert!(
+            channel_idx < CHANNELS,
+            "Channel index {} out of bounds (max {})",
+            channel_idx,
+            CHANNELS - 1
+        );
+        self.data.iter().skip(channel_idx).step_by(CHANNELS)
+    }
+
+    /// Returns the number of samples per channel.
+    pub fn samples_per_channel(&self) -> usize {
+        self.data.len() / CHANNELS
+    }
+
+    /// Returns the number of channels.
+    pub const fn channels(&self) -> usize {
+        CHANNELS
+    }
+
+    /// Returns the sample rate.
+    pub const fn sample_rate(&self) -> u32 {
+        SAMPLE_RATE
+    }
+
+    /// Access the underlying raw sample data.
+    pub fn data(&self) -> &[T] {
+        &self.data
+    }
+
+    /// Access the underlying raw sample data mutably.
+    pub fn data_mut(&mut self) -> &mut [T] {
+        &mut self.data
+    }
+
+    /// Consumes the buffer and returns the raw vector.
+    pub fn into_inner(self) -> Vec<T> {
+        self.data
+    }
+}
+
+/// Audio frame structure for network transmission.
+/// Standardized to 48kHz Stereo 16-bit PCM.
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
-#[rkyv(compare(PartialEq), derive(Debug))]
+#[rkyv(compare(PartialEq))]
 pub struct AudioFrame {
     /// Monotonic sequence number for packet ordering and loss detection
     pub sequence_number: u64,
@@ -14,34 +81,29 @@ pub struct AudioFrame {
     /// Capture timestamp in microseconds
     pub timestamp: u64,
 
-    /// Number of audio channels (1=mono, 2=stereo)
-    pub channels: u8,
-
-    /// Interleaved 16-bit PCM samples at 48kHz
-    /// For stereo: [L0, R0, L1, R1, ...]
-    pub samples: Vec<i16>,
+    /// Interleaved 16-bit PCM samples at 48kHz stereo
+    pub samples: AudioBuffer<i16, 2, 48000>,
 }
 
 impl AudioFrame {
-    /// Create a new audio frame
-    /// Sample rate is assumed to be 48kHz
-    pub fn new(sequence_number: u64, channels: u8, samples: Vec<i16>) -> Self {
+    /// Create a new audio frame.
+    /// Expects interleaved stereo samples at 48kHz.
+    pub fn new(sequence_number: u64, samples: Vec<i16>) -> Result<Self> {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_micros() as u64;
 
-        Self {
+        Ok(Self {
             sequence_number,
             timestamp,
-            channels,
-            samples,
-        }
+            samples: AudioBuffer::new(samples)?,
+        })
     }
 
     /// Get the number of samples per channel
     pub fn samples_per_channel(&self) -> usize {
-        self.samples.len() / self.channels as usize
+        self.samples.samples_per_channel()
     }
 
     /// Serialize the frame using rkyv
@@ -59,14 +121,11 @@ impl AudioFrame {
     /// Validate the frame
     pub fn validate(&self) -> bool {
         // Basic validation checks
-        if self.channels == 0 || self.channels > 2 {
+        if self.samples.data().is_empty() {
             return false;
         }
-        if self.samples.is_empty() {
-            return false;
-        }
-        // Check if samples length is valid for the channel count
-        if self.samples.len() % self.channels as usize != 0 {
+        // Check if samples length is valid for the channel count (2 for stereo)
+        if self.samples.data().len() % 2 != 0 {
             return false;
         }
         true
@@ -80,46 +139,44 @@ mod tests {
     #[test]
     fn test_audio_frame_creation() {
         let samples = vec![100, -100, 200, -200];
-        let frame = AudioFrame::new(1, 2, samples.clone());
+        let frame = AudioFrame::new(1, samples.clone()).unwrap();
 
         assert_eq!(frame.sequence_number, 1);
-        assert_eq!(frame.channels, 2);
-        assert_eq!(frame.samples, samples);
+        assert_eq!(frame.samples.channels(), 2);
+        assert_eq!(frame.samples.data(), &samples);
         assert_eq!(frame.samples_per_channel(), 2);
+    }
+
+    #[test]
+    fn test_audio_buffer_channel_iter() {
+        let samples = vec![1, 10, 2, 20, 3, 30]; // L1, R1, L2, R2, L3, R3
+        let buffer = AudioBuffer::<i16, 2, 48000>::new(samples).unwrap();
+
+        let left: Vec<_> = buffer.iter_channel(0).cloned().collect();
+        let right: Vec<_> = buffer.iter_channel(1).cloned().collect();
+
+        assert_eq!(left, vec![1, 2, 3]);
+        assert_eq!(right, vec![10, 20, 30]);
     }
 
     #[test]
     fn test_audio_frame_serialization() {
         let samples = vec![100, -100, 200, -200];
-        let frame = AudioFrame::new(1, 2, samples);
+        let frame = AudioFrame::new(1, samples).unwrap();
 
         let serialized = frame.serialize().unwrap();
         let deserialized = AudioFrame::deserialize(&serialized).unwrap();
 
         assert_eq!(frame.sequence_number, deserialized.sequence_number);
-        assert_eq!(frame.channels, deserialized.channels);
-        assert_eq!(frame.samples, deserialized.samples);
+        assert_eq!(frame.samples.data(), deserialized.samples.data());
     }
 
     #[test]
     fn test_audio_frame_validation() {
-        let valid_frame = AudioFrame::new(1, 2, vec![0; 960]);
+        let valid_frame = AudioFrame::new(1, vec![0; 960]).unwrap();
         assert!(valid_frame.validate());
 
-        let invalid_channels = AudioFrame {
-            sequence_number: 1,
-            timestamp: 0,
-            channels: 0,
-            samples: vec![0; 960],
-        };
-        assert!(!invalid_channels.validate());
-
-        let invalid_sample_count = AudioFrame {
-            sequence_number: 1,
-            timestamp: 0,
-            channels: 2,
-            samples: vec![0; 961], // Odd number for stereo
-        };
-        assert!(!invalid_sample_count.validate());
+        let invalid_samples = AudioBuffer::<i16, 2, 48000>::new(vec![0; 961]);
+        assert!(invalid_samples.is_err());
     }
 }
