@@ -1,10 +1,11 @@
-pub mod capture;
+//! Audio processing, capture, and playback.
+//!
+//! This module handles everything related to audio I/O and processing,
+//! including microphone capture, mixing, and speaker playback.
+
 pub mod frame;
 pub mod jitter;
-pub mod mixer;
-pub mod playback;
+pub mod sample;
 
-pub use capture::AudioCaptureHandler;
 pub use frame::AudioFrame;
-pub use jitter::HostJitterBuffer;
-pub use playback::AudioPlaybackHandler;
+pub use sample::AudioSample;

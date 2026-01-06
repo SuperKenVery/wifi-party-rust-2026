@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 
-use crate::audio::HostJitterBuffer;
+use crate::audio::jitter::HostJitterBuffer;
 
 pub struct JitterBufferMap {
     buffers: Mutex<HashMap<HostId, HostJitterBuffer>>,

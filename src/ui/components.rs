@@ -1,106 +1,10 @@
-use crate::audio::{
-    capture::AudioCaptureHandler, mixer::AudioMixer, playback::AudioPlaybackHandler,
-};
-use crate::network::{receive::NetworkReceiver, send::NetworkSender};
-use crate::state::{AppState, ConnectionStatus, HostId, HostInfo};
-use anyhow::{Context, Result};
+use crate::state::{AppState, ConnectionStatus, HostInfo};
 use dioxus::prelude::*;
-use std::net::{IpAddr, UdpSocket};
 use std::sync::Arc;
-use tracing::{error, info};
 
-/// Get the local IP address by creating a socket
-/// This doesn't actually send any data, just queries the local routing table
-pub fn get_local_ip() -> Result<HostId> {
-    // Create a UDP socket and connect to a multicast address
-    // This doesn't send any data, but tells us which interface would be used
-    let socket = UdpSocket::bind("0.0.0.0:0").context("Failed to create socket")?;
-
-    socket
-        .connect("239.255.43.2:7667")
-        .context("Failed to connect socket")?;
-
-    let local_addr = socket.local_addr().context("Failed to get local address")?;
-
-    Ok(HostId::from(local_addr))
-}
-
-fn setup() -> Arc<AppState> {
-    // Create application state
-    let state = Arc::new(AppState::new());
-
-    // Set local host ID from local IP address
-    if let Ok(local_ip) = get_local_ip() {
-        info!("Local IP address: {}", local_ip.to_string());
-        *state.local_host_id.lock().unwrap() = Some(local_ip);
-    } else {
-        error!("Failed to determine local IP address");
-    }
-
-    // Create SPSC queues for audio pipeline
-    let (send_producer, send_consumer) = rtrb::RingBuffer::<Vec<u8>>::new(500);
-    let (playback_producer, playback_consumer) = rtrb::RingBuffer::<Vec<i16>>::new(100);
-    let (loopback_producer, loopback_consumer) = rtrb::RingBuffer::<Vec<i16>>::new(100);
-
-    // Start network threads
-    let state_clone = state.clone();
-    std::thread::spawn(move || {
-        if let Err(e) = NetworkSender::start(state_clone, send_consumer) {
-            error!("Failed to start network sender: {}", e);
-        }
-    });
-
-    let state_clone = state.clone();
-    std::thread::spawn(move || {
-        if let Err(e) = NetworkReceiver::start(state_clone) {
-            error!("Failed to start network receiver: {}", e);
-        }
-    });
-
-    // Start mixer thread
-    let state_clone = state.clone();
-    std::thread::spawn(move || {
-        if let Err(e) = AudioMixer::start(state_clone, playback_producer) {
-            error!("Failed to start audio mixer: {}", e);
-        }
-    });
-
-    // Start audio capture
-    let state_clone = state.clone();
-    std::thread::spawn(move || {
-        match AudioCaptureHandler::start(state_clone, send_producer, loopback_producer) {
-            Ok(_capture) => {
-                info!("Audio capture started, keeping alive...");
-                loop {
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                }
-            }
-            Err(e) => {
-                error!("Failed to start audio capture: {}", e);
-            }
-        }
-    });
-
-    // Start audio playback
-    std::thread::spawn(move || {
-        match AudioPlaybackHandler::start(playback_consumer, loopback_consumer) {
-            Ok(_playback) => {
-                info!("Audio playback started, keeping alive...");
-                loop {
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                }
-            }
-            Err(e) => {
-                error!("Failed to start audio playback: {}", e);
-            }
-        }
-    });
-
-    state
-}
-
+#[allow(non_snake_case)]
 pub fn App() -> Element {
-    let state_arc = use_context_provider(|| setup());
+    let state_arc = use_context::<Arc<AppState>>();
 
     // Create signals for reactive UI
     let mut connection_status = use_signal(|| ConnectionStatus::Disconnected);
@@ -189,6 +93,7 @@ pub fn App() -> Element {
     }
 }
 
+#[allow(non_snake_case)]
 #[component]
 fn Header(
     connection_status: ConnectionStatus,
@@ -236,6 +141,7 @@ fn Header(
     }
 }
 
+#[allow(non_snake_case)]
 #[component]
 fn SelfAudioSection(
     mic_muted: bool,
@@ -345,6 +251,7 @@ fn SelfAudioSection(
     }
 }
 
+#[allow(non_snake_case)]
 #[component]
 fn ParticipantsSection(hosts: Vec<HostInfo>) -> Element {
     rsx! {
@@ -375,6 +282,7 @@ fn ParticipantsSection(hosts: Vec<HostInfo>) -> Element {
     }
 }
 
+#[allow(non_snake_case)]
 #[component]
 fn HostCard(host: HostInfo) -> Element {
     let state_arc = use_context::<Arc<AppState>>();
@@ -428,6 +336,7 @@ fn HostCard(host: HostInfo) -> Element {
     }
 }
 
+#[allow(non_snake_case)]
 #[component]
 fn StatisticsPanel() -> Element {
     rsx! {
