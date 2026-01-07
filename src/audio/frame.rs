@@ -7,15 +7,17 @@ use rkyv::{Archive, Deserialize, Serialize};
 /// is checked at compile time and can be heavily optimized by the compiler.
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq)]
 #[rkyv(compare(PartialEq))]
-pub struct AudioBuffer<T, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    data: Vec<T>,
+pub struct AudioBuffer<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    data: Vec<Sample>,
 }
 
-impl<T, const CHANNELS: usize, const SAMPLE_RATE: u32> AudioBuffer<T, CHANNELS, SAMPLE_RATE> {
+impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>
+{
     /// Create a new audio buffer from raw samples.
     ///
     /// Returns an error if the data length is not a multiple of the channel count.
-    pub fn new(data: Vec<T>) -> Result<Self> {
+    pub fn new(data: Vec<Sample>) -> Result<Self> {
         if !data.is_empty() && data.len() % CHANNELS != 0 {
             anyhow::bail!(
                 "Data length {} must be a multiple of channels {}",
@@ -29,7 +31,7 @@ impl<T, const CHANNELS: usize, const SAMPLE_RATE: u32> AudioBuffer<T, CHANNELS, 
     /// Returns an iterator over the samples of a specific channel.
     ///
     /// This is fully static and compiler-optimized.
-    pub fn iter_channel(&self, channel_idx: usize) -> impl Iterator<Item = &T> {
+    pub fn iter_channel(&self, channel_idx: usize) -> impl Iterator<Item = &Sample> {
         assert!(
             channel_idx < CHANNELS,
             "Channel index {} out of bounds (max {})",
@@ -55,17 +57,17 @@ impl<T, const CHANNELS: usize, const SAMPLE_RATE: u32> AudioBuffer<T, CHANNELS, 
     }
 
     /// Access the underlying raw sample data.
-    pub fn data(&self) -> &[T] {
+    pub fn data(&self) -> &[Sample] {
         &self.data
     }
 
     /// Access the underlying raw sample data mutably.
-    pub fn data_mut(&mut self) -> &mut [T] {
+    pub fn data_mut(&mut self) -> &mut [Sample] {
         &mut self.data
     }
 
     /// Consumes the buffer and returns the raw vector.
-    pub fn into_inner(self) -> Vec<T> {
+    pub fn into_inner(self) -> Vec<Sample> {
         self.data
     }
 }
