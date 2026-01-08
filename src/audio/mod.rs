@@ -7,5 +7,5 @@ pub mod frame;
 pub mod jitter;
 pub mod sample;
 
-pub use frame::AudioFrame;
+pub use frame::{AudioBuffer, AudioFrame};
 pub use sample::AudioSample;

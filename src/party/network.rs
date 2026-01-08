@@ -1,47 +1,50 @@
-use crate::network::{receive::NetworkReceiver, send::NetworkSender};
+use crate::audio::AudioFrame;
+use crate::network::receive::{HostPipelineManager, NetworkReceiver, NetworkSource};
+use crate::network::send::NetworkSender;
+use crate::pipeline::{Sink, Source};
 use crate::state::AppState;
 use anyhow::Result;
-use rtrb::{Producer, RingBuffer};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use tracing::error;
 
 pub struct NetworkNode {
-    _sender_handle: Option<thread::JoinHandle<()>>,
+    pipeline_manager: Arc<Mutex<HostPipelineManager>>,
     _receiver_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl NetworkNode {
     pub fn new() -> Self {
         Self {
-            _sender_handle: None,
+            pipeline_manager: Arc::new(Mutex::new(HostPipelineManager::new())),
             _receiver_handle: None,
         }
     }
 
-    /// Starts the network threads and returns the Producer for the sender queue.
-    pub fn start(&mut self, state: Arc<AppState>) -> Result<Producer<Vec<u8>>> {
-        let (producer, consumer) = RingBuffer::<Vec<u8>>::new(500);
-        
-        // Start Network Sender Thread
-        let state_clone_send = state.clone();
-        let sender_handle = thread::spawn(move || {
-            if let Err(e) = NetworkSender::start(state_clone_send, consumer) {
-                error!("Failed to start network sender: {}", e);
-            }
-        });
+    pub fn start(
+        &mut self,
+        state: Arc<AppState>,
+    ) -> Result<(impl Sink<Input = AudioFrame>, impl Source<Output = AudioFrame>)> {
+        let sender = NetworkSender::new()?;
 
-        // Start Network Receiver Thread
-        let state_clone_recv = state.clone();
+        let pipeline_manager = self.pipeline_manager.clone();
         let receiver_handle = thread::spawn(move || {
-            if let Err(e) = NetworkReceiver::start(state_clone_recv) {
-                error!("Failed to start network receiver: {}", e);
+            match NetworkReceiver::new(state, pipeline_manager) {
+                Ok(receiver) => receiver.run(),
+                Err(e) => error!("Failed to start network receiver: {}", e),
             }
         });
 
-        self._sender_handle = Some(sender_handle);
         self._receiver_handle = Some(receiver_handle);
 
-        Ok(producer)
+        let source = NetworkSource::new(self.pipeline_manager.clone());
+
+        Ok((sender, source))
+    }
+}
+
+impl Default for NetworkNode {
+    fn default() -> Self {
+        Self::new()
     }
 }

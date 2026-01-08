@@ -1,15 +1,28 @@
-use num_traits::{One, PrimInt, Num, ToPrimitive};
+use num_traits::{Num, One, ToPrimitive, FromPrimitive, Bounded};
 
-/// Trait representing a single audio sample.
-/// Defines properties like the silence value (center point).
-pub trait AudioSample: Num + Copy + Send + Sync + PartialOrd + ToPrimitive {
-    /// Returns the value representing silence for this sample type.
+pub trait AudioSample: Num + Copy + Send + Sync + PartialOrd + ToPrimitive + FromPrimitive + Bounded + 'static {
     fn silence() -> Self;
+
+    fn to_f64_normalized(self) -> f64;
+
+    fn from_f64_normalized(value: f64) -> Self;
+
+    fn convert_from<S: AudioSample>(sample: S) -> Self {
+        Self::from_f64_normalized(sample.to_f64_normalized())
+    }
 }
 
 impl AudioSample for f32 {
     fn silence() -> Self {
         0.0
+    }
+
+    fn to_f64_normalized(self) -> f64 {
+        self as f64
+    }
+
+    fn from_f64_normalized(value: f64) -> Self {
+        value.clamp(-1.0, 1.0) as f32
     }
 }
 
@@ -17,18 +30,82 @@ impl AudioSample for f64 {
     fn silence() -> Self {
         0.0
     }
-}
 
-macro_rules! impl_audio_sample_int {
-    ($($t:ty),*) => {
-        $(
-            impl AudioSample for $t {
-                fn silence() -> Self {
-                    (Self::min_value() + Self::max_value()) / (Self::one() + Self::one())
-                }
-            }
-        )*
+    fn to_f64_normalized(self) -> f64 {
+        self
+    }
+
+    fn from_f64_normalized(value: f64) -> Self {
+        value.clamp(-1.0, 1.0)
     }
 }
 
-impl_audio_sample_int!(u8, i8, u16, i16, u32, i32, u64, i64, usize, isize);
+impl AudioSample for i16 {
+    fn silence() -> Self {
+        0
+    }
+
+    fn to_f64_normalized(self) -> f64 {
+        self as f64 / i16::MAX as f64
+    }
+
+    fn from_f64_normalized(value: f64) -> Self {
+        (value.clamp(-1.0, 1.0) * i16::MAX as f64) as i16
+    }
+}
+
+impl AudioSample for i32 {
+    fn silence() -> Self {
+        0
+    }
+
+    fn to_f64_normalized(self) -> f64 {
+        self as f64 / i32::MAX as f64
+    }
+
+    fn from_f64_normalized(value: f64) -> Self {
+        (value.clamp(-1.0, 1.0) * i32::MAX as f64) as i32
+    }
+}
+
+impl AudioSample for u8 {
+    fn silence() -> Self {
+        128
+    }
+
+    fn to_f64_normalized(self) -> f64 {
+        (self as f64 - 128.0) / 128.0
+    }
+
+    fn from_f64_normalized(value: f64) -> Self {
+        ((value.clamp(-1.0, 1.0) * 128.0) + 128.0) as u8
+    }
+}
+
+impl AudioSample for i8 {
+    fn silence() -> Self {
+        0
+    }
+
+    fn to_f64_normalized(self) -> f64 {
+        self as f64 / i8::MAX as f64
+    }
+
+    fn from_f64_normalized(value: f64) -> Self {
+        (value.clamp(-1.0, 1.0) * i8::MAX as f64) as i8
+    }
+}
+
+impl AudioSample for u16 {
+    fn silence() -> Self {
+        32768
+    }
+
+    fn to_f64_normalized(self) -> f64 {
+        (self as f64 - 32768.0) / 32768.0
+    }
+
+    fn from_f64_normalized(value: f64) -> Self {
+        ((value.clamp(-1.0, 1.0) * 32768.0) + 32768.0) as u16
+    }
+}

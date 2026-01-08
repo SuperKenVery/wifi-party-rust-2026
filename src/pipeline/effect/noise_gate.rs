@@ -15,17 +15,17 @@ use std::collections::VecDeque;
 /// ```
 #[derive(Debug, Clone)]
 pub struct NoiseGate<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    threshold: f32,
+    threshold: f64,
     window_size: usize,
-    window: VecDeque<f32>,
-    sum_sq: f32,
+    window: VecDeque<f64>,
+    sum_sq: f64,
     _marker: std::marker::PhantomData<Sample>,
 }
 
 impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     NoiseGate<Sample, CHANNELS, SAMPLE_RATE>
 {
-    pub fn new(threshold: f32, window_size: usize) -> Self {
+    pub fn new(threshold: f64, window_size: usize) -> Self {
         Self {
             threshold,
             window_size,
@@ -45,10 +45,8 @@ where
     type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
 
     fn process(&mut self, mut input: Self::Input) -> Option<Self::Output> {
-        let center = Sample::silence().to_f32().unwrap_or(0.0);
-
         for sample in input.data_mut() {
-            let val = sample.to_f32().unwrap_or(0.0) - center;
+            let val = sample.to_f64_normalized();
             let sq = val * val;
 
             self.window.push_back(sq);
@@ -60,7 +58,7 @@ where
                 }
             }
 
-            let count = self.window.len() as f32;
+            let count = self.window.len() as f64;
             let rms = if count > 0.0 {
                 (self.sum_sq / count).sqrt()
             } else {

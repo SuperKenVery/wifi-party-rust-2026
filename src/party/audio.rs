@@ -1,4 +1,5 @@
 use crate::audio::frame::AudioBuffer;
+use crate::audio::AudioSample;
 use crate::pipeline::{Sink, Source};
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -18,9 +19,10 @@ impl<S> AudioInput<S> {
         }
     }
 
-    pub fn start<const CHANNELS: usize, const SAMPLE_RATE: u32>(&mut self) -> Result<()>
+    pub fn start<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>(&mut self) -> Result<()>
     where
-        S: Sink<Input = AudioBuffer<f32, CHANNELS, SAMPLE_RATE>> + 'static,
+        Sample: AudioSample,
+        S: Sink<Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> + 'static,
     {
         let host = cpal::default_host();
         let input_device = host
@@ -41,7 +43,8 @@ impl<S> AudioInput<S> {
         let stream = input_device.build_input_stream(
             &input_config.config(),
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                if let Ok(frame) = AudioBuffer::<f32, CHANNELS, SAMPLE_RATE>::new(data.to_vec()) {
+                let converted: Vec<Sample> = data.iter().map(|&s| Sample::convert_from(s)).collect();
+                if let Ok(frame) = AudioBuffer::<Sample, CHANNELS, SAMPLE_RATE>::new(converted) {
                     if let Ok(mut sink) = sink.lock() {
                         sink.push(frame);
                     }
@@ -69,9 +72,10 @@ impl<S> AudioOutput<S> {
         }
     }
 
-    pub fn start<const CHANNELS: usize, const SAMPLE_RATE: u32>(&mut self) -> Result<()>
+    pub fn start<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>(&mut self) -> Result<()>
     where
-        S: Source<Output = AudioBuffer<f32, CHANNELS, SAMPLE_RATE>> + 'static,
+        Sample: AudioSample,
+        S: Source<Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> + 'static,
     {
         let host = cpal::default_host();
         let output_device = host
@@ -85,7 +89,11 @@ impl<S> AudioOutput<S> {
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 if let Ok(mut source) = source.lock() {
                     if let Some(frame) = source.pull() {
-                        data.copy_from_slice(frame.data());
+                        for (i, sample) in frame.data().iter().enumerate() {
+                            if i < data.len() {
+                                data[i] = f32::convert_from(*sample);
+                            }
+                        }
                     } else {
                         for sample in data {
                             *sample = 0.0;
