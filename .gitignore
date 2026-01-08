@@ -7,3 +7,8 @@
 **/*.rs.bk
 
 /.direnv
+
+# ai tools
+/.trae
+/.cursor
+

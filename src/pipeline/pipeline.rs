@@ -1,64 +1,67 @@
-use crate::pipeline::node::null_node::NullNode;
-use crate::pipeline::node::{PullNode, PushNode};
+//! Pipeline composition types.
+//!
+//! This module provides [`PullPipeline`] and [`PushPipeline`] which are used
+//! to compose nodes into processing chains.
 
-/// A generic Pipeline that can flow any type through its nodes.
+use crate::pipeline::node::{Node, Sink, Source};
+
+/// A pull-based pipeline that chains a source with a processing node.
 ///
-/// Like an axum router, it recursively contain the next pipeline node.
-/// It's like a linked list in this sense.
+/// Created by calling [`Source::pipe`] on a source. The resulting pipeline
+/// also implements [`Source`], allowing further chaining.
 ///
-/// # Example
-/// ```rust
-/// use crate::pipeline::pipeline::AudioPipeline;
-/// let pipeline = AudioPipeline::new(some_node);
-/// ```
-pub struct AudioPipeline<Node, Inner> {
-    pub inner: Inner,
-    pub node: Node,
+/// Data flows from source through the node when [`Source::pull`] is called.
+pub struct PullPipeline<S, N> {
+    source: S,
+    node: N,
 }
 
-impl<Node, Inner> AudioPipeline<Node, Inner> {
-    pub fn new(node: Node) -> Self
-    where
-        Inner: Default,
-    {
-        Self {
-            inner: Inner::default(),
-            node,
+impl<S, N> PullPipeline<S, N> {
+    pub fn new(source: S, node: N) -> Self {
+        Self { source, node }
+    }
+}
+
+impl<S, N> Source for PullPipeline<S, N>
+where
+    S: Source,
+    N: Node<Input = S::Output>,
+{
+    type Output = N::Output;
+
+    fn pull(&mut self) -> Option<Self::Output> {
+        let data = self.source.pull()?;
+        self.node.process(data)
+    }
+}
+
+/// A push-based pipeline that chains a processing node with a sink.
+///
+/// Created by calling [`Sink::pipe`] on a sink. The resulting pipeline
+/// also implements [`Sink`], allowing further chaining.
+///
+/// Data flows through the node into the sink when [`Sink::push`] is called.
+pub struct PushPipeline<N, S> {
+    node: N,
+    sink: S,
+}
+
+impl<N, S> PushPipeline<N, S> {
+    pub fn new(node: N, sink: S) -> Self {
+        Self { node, sink }
+    }
+}
+
+impl<N, S> Sink for PushPipeline<N, S>
+where
+    N: Node,
+    S: Sink<Input = N::Output>,
+{
+    type Input = N::Input;
+
+    fn push(&mut self, input: Self::Input) {
+        if let Some(output) = self.node.process(input) {
+            self.sink.push(output);
         }
-    }
-
-    pub fn connect<NewNode>(self, node: NewNode) -> AudioPipeline<NewNode, Self> {
-        AudioPipeline { inner: self, node }
-    }
-}
-
-// For PushNode: process with node (Effect), then push to inner (Next).
-// Output is the intermediate type that Node produces and Inner consumes.
-impl<Inner, Node> PushNode<NullNode<<Node as PushNode<Inner>>::Input, <Node as PushNode<Inner>>::Output>> for AudioPipeline<Node, Inner>
-where
-    Node: PushNode<Inner>,
-    Inner: PushNode<NullNode<<Node as PushNode<Inner>>::Input, <Node as PushNode<Inner>>::Output>, Input = <Node as PushNode<Inner>>::Output>,
-{
-    type Input = <Node as PushNode<Inner>>::Input;
-    type Output = <Node as PushNode<Inner>>::Output;
-
-    fn push(&mut self, data: Self::Input, _next: &mut NullNode<Self::Input, Self::Output>) {
-        // We ignore _next because we push to our internal inner.
-        self.node.push(data, &mut self.inner);
-    }
-}
-
-// For PullNode: pull from inner (Next), then process with node (Effect).
-// InnerInput is the intermediate type that Inner produces and Node consumes.
-impl<Inner, Node> PullNode<NullNode<<Node as PullNode<Inner>>::Input, <Node as PullNode<Inner>>::Output>> for AudioPipeline<Node, Inner>
-where
-    Node: PullNode<Inner>,
-    Inner: PullNode<NullNode<<Node as PullNode<Inner>>::Input, <Node as PullNode<Inner>>::Output>, Output = <Node as PullNode<Inner>>::Input>,
-{
-    type Input = <Node as PullNode<Inner>>::Input;
-    type Output = <Node as PullNode<Inner>>::Output;
-    fn pull(&mut self, _next: &mut NullNode<Self::Input, Self::Output>) -> Option<Self::Output> {
-        // We ignore _next because we pull from our internal inner.
-        self.node.pull(&mut self.inner)
     }
 }

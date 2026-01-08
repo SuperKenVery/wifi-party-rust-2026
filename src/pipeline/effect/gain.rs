@@ -1,24 +1,41 @@
+//! Gain (volume) effect.
+
 use crate::audio::frame::AudioBuffer;
 use crate::audio::sample::AudioSample;
-use crate::pipeline::effect::AudioEffect;
+use crate::pipeline::Node;
 
-/// An effect that applies a given gain (multiplier) to all samples.
+/// Applies a gain (volume multiplier) to all samples.
+///
+/// # Example
+///
+/// ```ignore
+/// let gain = Gain::<f32, 2, 48000>::new(0.5); // 50% volume
+/// let pipeline = source.pipe(gain);
+/// ```
 #[derive(Debug, Clone, Copy)]
-pub struct Gain<T>(pub T);
+pub struct Gain<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    factor: Sample,
+}
 
-impl<T, const CHANNELS: usize, const SAMPLE_RATE: u32> AudioEffect<T, CHANNELS, SAMPLE_RATE>
-    for Gain<T>
+impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Gain<Sample, CHANNELS, SAMPLE_RATE> {
+    pub fn new(factor: Sample) -> Self {
+        Self { factor }
+    }
+}
+
+impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Node
+    for Gain<Sample, CHANNELS, SAMPLE_RATE>
 where
-    T: AudioSample,
+    Sample: AudioSample,
 {
-    fn process(&mut self, frame: &mut AudioBuffer<T, CHANNELS, SAMPLE_RATE>) {
-        // Simple multiplication gain assumes the signal is centered at zero.
-        // For unsigned types (centered at 128, etc.), this simple multiplication will cause DC offset shift.
-        // A proper generic implementation would need to subtract silence, multiply, and add silence back.
-        // For now, we assume this is acceptable or T is signed/float.
-        let center = T::silence();
-        for sample in frame.data_mut() {
-             *sample = (*sample - center) * self.0 + center;
+    type Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
+    type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
+
+    fn process(&mut self, mut input: Self::Input) -> Option<Self::Output> {
+        let center = Sample::silence();
+        for sample in input.data_mut() {
+            *sample = (*sample - center) * self.factor + center;
         }
+        Some(input)
     }
 }

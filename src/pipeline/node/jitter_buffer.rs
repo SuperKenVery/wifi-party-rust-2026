@@ -1,17 +1,38 @@
-use crate::audio::frame::AudioBuffer;
-use crate::audio::AudioSample;
-use crate::pipeline::node::{PullNode, PushNode};
+//! A thread-safe buffer that bridges push and pull pipelines.
+
+use super::{Sink, Source};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
+/// A thread-safe FIFO buffer that implements both [`Source`] and [`Sink`].
+///
+/// `JitterBuffer` serves as a bridge between push-based and pull-based pipelines.
+/// It can be cloned (via internal `Arc`) to share between threads - one side
+/// pushing data in, another side pulling data out.
+///
+/// # Example
+///
+/// ```ignore
+/// let buffer = JitterBuffer::<AudioFrame>::new();
+///
+/// // Clone for use in different pipelines
+/// let push_side = buffer.clone();
+/// let pull_side = buffer.clone();
+///
+/// // Push pipeline feeds into buffer
+/// push_side.push(frame);
+///
+/// // Pull pipeline reads from buffer
+/// if let Some(frame) = pull_side.pull() {
+///     // process frame
+/// }
+/// ```
 #[derive(Clone)]
-pub struct JitterBuffer<const CHANNELS: usize, const SAMPLE_RATE: u32, Sample> {
-    queue: Arc<Mutex<VecDeque<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>>>,
+pub struct JitterBuffer<T> {
+    queue: Arc<Mutex<VecDeque<T>>>,
 }
 
-impl<const CHANNELS: usize, const SAMPLE_RATE: u32, Sample: AudioSample>
-    JitterBuffer<CHANNELS, SAMPLE_RATE, Sample>
-{
+impl<T> JitterBuffer<T> {
     pub fn new() -> Self {
         Self {
             queue: Arc::new(Mutex::new(VecDeque::new())),
@@ -19,32 +40,24 @@ impl<const CHANNELS: usize, const SAMPLE_RATE: u32, Sample: AudioSample>
     }
 }
 
-impl<const CHANNELS: usize, const SAMPLE_RATE: u32, Sample: AudioSample> Default
-    for JitterBuffer<CHANNELS, SAMPLE_RATE, Sample>
-{
+impl<T> Default for JitterBuffer<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<const CHANNELS: usize, const SAMPLE_RATE: u32, Next, Sample: AudioSample>
-    PushNode<Next> for JitterBuffer<CHANNELS, SAMPLE_RATE, Sample>
-{
-    type Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
-    type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
+impl<T: Send> Sink for JitterBuffer<T> {
+    type Input = T;
 
-    fn push(&mut self, frame: AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>, _next: &mut Next) {
-        self.queue.lock().unwrap().push_back(frame);
+    fn push(&mut self, input: T) {
+        self.queue.lock().unwrap().push_back(input);
     }
 }
 
-impl<const CHANNELS: usize, const SAMPLE_RATE: u32, Next, Sample: AudioSample>
-    PullNode<Next> for JitterBuffer<CHANNELS, SAMPLE_RATE, Sample>
-{
-    type Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
-    type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
+impl<T: Send> Source for JitterBuffer<T> {
+    type Output = T;
 
-    fn pull(&mut self, _next: &mut Next) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
+    fn pull(&mut self) -> Option<T> {
         self.queue.lock().unwrap().pop_front()
     }
 }

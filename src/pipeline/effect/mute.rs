@@ -1,19 +1,42 @@
+//! Mute effect.
+
 use crate::audio::frame::AudioBuffer;
 use crate::audio::sample::AudioSample;
-use crate::pipeline::effect::AudioEffect;
+use crate::pipeline::Node;
 
-/// An effect that silences all samples.
-#[derive(Debug, Clone, Copy)]
-pub struct Mute;
+/// Silences all samples.
+///
+/// # Example
+///
+/// ```ignore
+/// let mute = Mute::<f32, 2, 48000>::new();
+/// let pipeline = source.pipe(mute);
+/// ```
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Mute<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    _marker: std::marker::PhantomData<Sample>,
+}
 
-impl<T, const CHANNELS: usize, const SAMPLE_RATE: u32> AudioEffect<T, CHANNELS, SAMPLE_RATE>
-    for Mute
-where
-    T: AudioSample,
-{
-    fn process(&mut self, frame: &mut AudioBuffer<T, CHANNELS, SAMPLE_RATE>) {
-        for sample in frame.data_mut() {
-            *sample = T::silence();
+impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Mute<Sample, CHANNELS, SAMPLE_RATE> {
+    pub fn new() -> Self {
+        Self {
+            _marker: std::marker::PhantomData,
         }
+    }
+}
+
+impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Node
+    for Mute<Sample, CHANNELS, SAMPLE_RATE>
+where
+    Sample: AudioSample,
+{
+    type Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
+    type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
+
+    fn process(&mut self, mut input: Self::Input) -> Option<Self::Output> {
+        for sample in input.data_mut() {
+            *sample = Sample::silence();
+        }
+        Some(input)
     }
 }
