@@ -150,7 +150,7 @@ impl NetworkReceiver {
     pub fn run(mut self) {
         info!("Network receive thread started");
 
-        *self.state.connection_status.lock().unwrap() = ConnectionStatus::Connected;
+        self.state.set_connection_status(ConnectionStatus::Connected);
 
         let mut buf = [0u8; 65536];
         let mut last_cleanup = Instant::now();
@@ -161,7 +161,19 @@ impl NetworkReceiver {
             }
 
             if last_cleanup.elapsed() > Duration::from_secs(1) {
-                self.pipeline_manager.lock().unwrap().cleanup_stale_hosts();
+                let removed_count = {
+                    let mut hosts = self.state.active_hosts.lock().unwrap();
+                    let before_count = hosts.len();
+                    self.pipeline_manager.lock().unwrap().cleanup_stale_hosts();
+                    // Remove stale hosts from active_hosts
+                    let now = Instant::now();
+                    hosts.retain(|_, info| now.duration_since(info.last_seen) < HOST_TIMEOUT);
+                    let after_count = hosts.len();
+                    before_count - after_count
+                };
+                if removed_count > 0 {
+                    self.state.update_active_hosts();
+                }
                 last_cleanup = Instant::now();
             }
         }
@@ -201,6 +213,7 @@ impl NetworkReceiver {
 
         {
             let mut hosts = self.state.active_hosts.lock().unwrap();
+            let is_new = !hosts.contains_key(&host_id);
             hosts
                 .entry(host_id)
                 .and_modify(|info| {
@@ -210,6 +223,11 @@ impl NetworkReceiver {
                     info!("New host detected: {}", host_id.to_string());
                     HostInfo::new(host_id)
                 });
+            // Notify UI if a new host was added
+            if is_new {
+                drop(hosts);
+                self.state.update_active_hosts();
+            }
         }
 
         self.pipeline_manager
