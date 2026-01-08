@@ -1,24 +1,26 @@
-use crate::audio::frame::{AudioBuffer, AudioFrame};
-use crate::audio::AudioSample;
+use crate::audio::frame::AudioFrame;
 use crate::pipeline::node::PushNode;
 use anyhow::{Context, Result};
 use socket2::{Domain, Protocol, Socket, Type};
-use std::marker::PhantomData;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
-pub struct NetworkPushNode<const CHANNELS: usize, const SAMPLE_RATE: u32, Sample: AudioSample> {
+/// NetworkPushNode receives AudioFrame from network and pushes AudioFrame to next node.
+/// Generic over the next node type.
+pub struct NetworkPushNode<Next> {
     multicast_addr: SocketAddr,
-    next_node: PushNode<CHANNELS, SAMPLE_RATE, Sample, ()>,
+    next_node: Arc<Mutex<Next>>,
 }
 
-impl<const CHANNELS: usize, const SAMPLE_RATE: u32, Sample: AudioSample>
-    NetworkPushNode<CHANNELS, SAMPLE_RATE, Sample>
+impl<Next> NetworkPushNode<Next>
+where
+    Next: PushNode<(), Input = AudioFrame, Output = AudioFrame> + Send + 'static,
 {
     pub fn new(
         address: &str,
         port: u16,
-        next_node: PushNode<CHANNELS, SAMPLE_RATE, Sample, ()>,
+        next_node: Next,
     ) -> Result<Self> {
         let multicast_ip: Ipv4Addr = address
             .parse()
@@ -28,7 +30,7 @@ impl<const CHANNELS: usize, const SAMPLE_RATE: u32, Sample: AudioSample>
 
         Ok(Self {
             multicast_addr,
-            next_node,
+            next_node: Arc::new(Mutex::new(next_node)),
         })
     }
 
@@ -49,10 +51,13 @@ impl<const CHANNELS: usize, const SAMPLE_RATE: u32, Sample: AudioSample>
 
         match self.multicast_addr.ip() {
             IpAddr::V4(ipv4_addr) => socket.join_multicast_v4(&ipv4_addr, &Ipv4Addr::UNSPECIFIED),
-            IpAddr::V6(ipv6_addr) => socket.join_multicast_v6(&ipv6_addr, 0),
+            IpAddr::V6(_) => {
+                anyhow::bail!("IPv6 multicast not supported");
+            }
         }?;
 
         let socket: std::net::UdpSocket = socket.into();
+        let next_node = self.next_node.clone();
 
         info!(
             "Network receive thread listening on multicast group {}",
@@ -66,7 +71,7 @@ impl<const CHANNELS: usize, const SAMPLE_RATE: u32, Sample: AudioSample>
                 loop {
                     match socket.recv_from(&mut buf) {
                         Ok((size, source_addr)) => {
-                            if let Err(e) = Self::handle(&buf[..size], source_addr) {
+                            if let Err(e) = Self::handle(&buf[..size], source_addr, &next_node) {
                                 warn!("Error handling packet from {}: {:?}", source_addr, e);
                             }
                         }
@@ -81,7 +86,11 @@ impl<const CHANNELS: usize, const SAMPLE_RATE: u32, Sample: AudioSample>
         Ok(handle)
     }
 
-    fn handle(&mut self, data: &[u8], source_addr: SocketAddr) -> Result<()> {
+    fn handle(
+        data: &[u8],
+        source_addr: SocketAddr,
+        next_node: &Arc<Mutex<Next>>,
+    ) -> Result<()> {
         let frame = AudioFrame::deserialize(data).context("Failed to deserialize frame")?;
         anyhow::ensure!(frame.validate(), "Invalid frame from network");
 
@@ -90,17 +99,10 @@ impl<const CHANNELS: usize, const SAMPLE_RATE: u32, Sample: AudioSample>
             source_addr, frame.sequence_number
         );
 
-        self.next_node.push(frame, next);
+        // Push AudioFrame directly without conversion
+        let mut next = next_node.lock().unwrap();
+        let mut null = ();
+        next.push(frame, &mut null);
         Ok(())
-    }
-}
-
-impl<const CHANNELS: usize, const SAMPLE_RATE: u32, Next, Sample: AudioSample>
-    PushNode<CHANNELS, SAMPLE_RATE, Sample, Next> for NetworkPushNode<CHANNELS, SAMPLE_RATE, Sample>
-where
-    Next: PushNode<CHANNELS, SAMPLE_RATE, Sample, ()>,
-{
-    fn push(&mut self, frame: AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>, next: &mut Next) {
-        next.push(frame, &mut ());
     }
 }

@@ -3,19 +3,22 @@ use crate::pipeline::node::PullNode;
 use crate::state::AppState;
 use std::sync::Arc;
 
-pub struct MixerNode {
+pub struct MixerNode<const CHANNELS: usize, const SAMPLE_RATE: u32> {
     state: Arc<AppState>,
 }
 
-impl MixerNode {
+impl<const CHANNELS: usize, const SAMPLE_RATE: u32> MixerNode<CHANNELS, SAMPLE_RATE> {
     pub fn new(state: Arc<AppState>) -> Self {
         Self { state }
     }
 }
 
-impl<const CHANNELS: usize, const SAMPLE_RATE: u32, Next> PullNode<CHANNELS, SAMPLE_RATE, Next>
-    for MixerNode
+impl<const CHANNELS: usize, const SAMPLE_RATE: u32, Next> PullNode<Next>
+    for MixerNode<CHANNELS, SAMPLE_RATE>
 {
+    type Input = AudioBuffer<f32, CHANNELS, SAMPLE_RATE>;
+    type Output = AudioBuffer<f32, CHANNELS, SAMPLE_RATE>;
+
     fn pull(&mut self, _next: &mut Next) -> Option<AudioBuffer<f32, CHANNELS, SAMPLE_RATE>> {
         let host_ids: Vec<crate::state::HostId> = {
             self.state

@@ -28,16 +28,22 @@ impl<const CHANNELS: usize, const SAMPLE_RATE: u32, Sample: AudioSample> Default
 }
 
 impl<const CHANNELS: usize, const SAMPLE_RATE: u32, Next, Sample: AudioSample>
-    PushNode<CHANNELS, SAMPLE_RATE, Sample, Next> for JitterBuffer<CHANNELS, SAMPLE_RATE, Sample>
+    PushNode<Next> for JitterBuffer<CHANNELS, SAMPLE_RATE, Sample>
 {
+    type Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
+    type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
+
     fn push(&mut self, frame: AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>, _next: &mut Next) {
         self.queue.lock().unwrap().push_back(frame);
     }
 }
 
 impl<const CHANNELS: usize, const SAMPLE_RATE: u32, Next, Sample: AudioSample>
-    PullNode<CHANNELS, SAMPLE_RATE, Sample, Next> for JitterBuffer<CHANNELS, SAMPLE_RATE, Sample>
+    PullNode<Next> for JitterBuffer<CHANNELS, SAMPLE_RATE, Sample>
 {
+    type Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
+    type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
+
     fn pull(&mut self, _next: &mut Next) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
         self.queue.lock().unwrap().pop_front()
     }

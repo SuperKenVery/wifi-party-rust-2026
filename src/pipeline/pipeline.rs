@@ -1,19 +1,17 @@
-use crate::audio::frame::AudioBuffer;
-use crate::audio::AudioSample;
-use crate::pipeline::node::terminal::NullNode;
+use crate::pipeline::node::null_node::NullNode;
 use crate::pipeline::node::{PullNode, PushNode};
 
-/// An Audio Pipeline.
+/// A generic Pipeline that can flow any type through its nodes.
 ///
 /// Like an axum router, it recursively contain the next pipeline node.
 /// It's like a linked list in this sense.
 ///
 /// # Example
 /// ```rust
-/// use crate::pipeline::node::
-/// let pipeline = AudioPipeline::new((), )
+/// use crate::pipeline::pipeline::AudioPipeline;
+/// let pipeline = AudioPipeline::new(some_node);
 /// ```
-pub struct AudioPipeline<Node, Inner = NullNode> {
+pub struct AudioPipeline<Node, Inner> {
     pub inner: Inner,
     pub node: Node,
 }
@@ -35,28 +33,31 @@ impl<Node, Inner> AudioPipeline<Node, Inner> {
 }
 
 // For PushNode: process with node (Effect), then push to inner (Next).
-impl<const CHANNELS: usize, const SAMPLE_RATE: u32, Inner, Node, Sample>
-    PushNode<CHANNELS, SAMPLE_RATE, Sample, ()> for AudioPipeline<Node, Inner>
+// Output is the intermediate type that Node produces and Inner consumes.
+impl<Inner, Node> PushNode<NullNode<<Node as PushNode<Inner>>::Input, <Node as PushNode<Inner>>::Output>> for AudioPipeline<Node, Inner>
 where
-    Sample: AudioSample,
-    Node: PushNode<CHANNELS, SAMPLE_RATE, Sample, Inner>,
-    Inner: PushNode<CHANNELS, SAMPLE_RATE, Sample, ()>,
+    Node: PushNode<Inner>,
+    Inner: PushNode<NullNode<<Node as PushNode<Inner>>::Input, <Node as PushNode<Inner>>::Output>, Input = <Node as PushNode<Inner>>::Output>,
 {
-    fn push(&mut self, frame: AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>, _next: &mut ()) {
+    type Input = <Node as PushNode<Inner>>::Input;
+    type Output = <Node as PushNode<Inner>>::Output;
+
+    fn push(&mut self, data: Self::Input, _next: &mut NullNode<Self::Input, Self::Output>) {
         // We ignore _next because we push to our internal inner.
-        self.node.push(frame, &mut self.inner);
+        self.node.push(data, &mut self.inner);
     }
 }
 
 // For PullNode: pull from inner (Next), then process with node (Effect).
-impl<const CHANNELS: usize, const SAMPLE_RATE: u32, Inner, Node, Sample>
-    PullNode<CHANNELS, SAMPLE_RATE, Sample, ()> for AudioPipeline<Node, Inner>
+// InnerInput is the intermediate type that Inner produces and Node consumes.
+impl<Inner, Node> PullNode<NullNode<<Node as PullNode<Inner>>::Input, <Node as PullNode<Inner>>::Output>> for AudioPipeline<Node, Inner>
 where
-    Sample: AudioSample,
-    Node: PullNode<CHANNELS, SAMPLE_RATE, Sample, Inner>,
-    Inner: PullNode<CHANNELS, SAMPLE_RATE, Sample, ()>,
+    Node: PullNode<Inner>,
+    Inner: PullNode<NullNode<<Node as PullNode<Inner>>::Input, <Node as PullNode<Inner>>::Output>, Output = <Node as PullNode<Inner>>::Input>,
 {
-    fn pull(&mut self, _next: &mut ()) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
+    type Input = <Node as PullNode<Inner>>::Input;
+    type Output = <Node as PullNode<Inner>>::Output;
+    fn pull(&mut self, _next: &mut NullNode<Self::Input, Self::Output>) -> Option<Self::Output> {
         // We ignore _next because we pull from our internal inner.
         self.node.pull(&mut self.inner)
     }

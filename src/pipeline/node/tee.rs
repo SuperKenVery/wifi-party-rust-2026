@@ -14,14 +14,19 @@ impl<A, B> TeeNode<A, B> {
 }
 
 impl<const CHANNELS: usize, const SAMPLE_RATE: u32, A, B, Next, Sample>
-    PushNode<CHANNELS, SAMPLE_RATE, Sample, Next> for TeeNode<A, B>
+    PushNode<Next> for TeeNode<A, B>
 where
-    A: PushNode<CHANNELS, SAMPLE_RATE, Sample, ()>,
-    B: PushNode<CHANNELS, SAMPLE_RATE, Sample, ()>,
-    Sample: AudioSample,
+    A: PushNode<(), Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>, Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>,
+    B: PushNode<(), Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>, Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>,
+    Sample: AudioSample + Clone,
 {
-    fn push(&mut self, frame: AudioBuffer<f32, CHANNELS, SAMPLE_RATE>, _next: &mut Next) {
-        self.a.push(frame.clone(), &mut ());
-        self.b.push(frame, &mut ());
+    type Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
+    type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
+
+    fn push(&mut self, frame: AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>, _next: &mut Next) {
+        let mut null_a = ();
+        let mut null_b = ();
+        self.a.push(frame.clone(), &mut null_a);
+        self.b.push(frame, &mut null_b);
     }
 }

@@ -15,7 +15,7 @@ impl AudioInputNode {
 
     pub fn start<P, const CHANNELS: usize, const SAMPLE_RATE: u32>(&mut self, mut pipeline: P) -> Result<()>
     where
-        P: PushNode<CHANNELS, SAMPLE_RATE> + 'static,
+        P: PushNode<(), Input = AudioBuffer<f32, CHANNELS, SAMPLE_RATE>, Output = AudioBuffer<f32, CHANNELS, SAMPLE_RATE>> + 'static,
     {
         let host = cpal::default_host();
         let input_device = host
@@ -34,7 +34,8 @@ impl AudioInputNode {
             &input_config.config(),
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                 if let Ok(frame) = AudioBuffer::<f32, CHANNELS, SAMPLE_RATE>::new(data.to_vec()) {
-                    pipeline.push(frame, &mut ());
+                    let mut null = ();
+                    pipeline.push(frame, &mut null);
                 }
             },
             |err| error!("An error occurred on the input audio stream: {}", err),
@@ -57,7 +58,7 @@ impl AudioOutputNode {
 
     pub fn start<P, const CHANNELS: usize, const SAMPLE_RATE: u32>(&mut self, mut pipeline: P) -> Result<()>
     where
-        P: PullNode<CHANNELS, SAMPLE_RATE> + 'static,
+        P: PullNode<(), Input = AudioBuffer<f32, CHANNELS, SAMPLE_RATE>, Output = AudioBuffer<f32, CHANNELS, SAMPLE_RATE>> + 'static,
     {
         let host = cpal::default_host();
         let output_device = host
@@ -68,7 +69,8 @@ impl AudioOutputNode {
         let stream = output_device.build_output_stream(
             &output_config.config(),
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                if let Some(frame) = pipeline.pull(&mut ()) {
+                let mut null = ();
+                if let Some(frame) = pipeline.pull(&mut null) {
                     data.copy_from_slice(frame.data());
                 } else {
                     for sample in data {

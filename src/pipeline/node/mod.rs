@@ -1,21 +1,31 @@
-use crate::audio::{frame::AudioBuffer, AudioSample};
-
-/// A node that accepts audio frames in a push-based pipeline.
+/// A node that accepts data in a push-based pipeline.
+///
+/// Input: the type of data this node receives
+/// Output: the type of data this node pushes to the next node
+/// Next: the next node in the pipeline
 ///
 /// AudioPipeline also implements xxNode<..., Next=()> because it's self-contained and
 /// you don't need to care about its inner.
-pub trait PushNode<const CHANNELS: usize, const SAMPLE_RATE: u32, Sample, Next>: Send {
-    fn push(&mut self, frame: AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>, next: &mut Next);
+pub trait PushNode<Next>: Send {
+    type Input;
+    type Output;
+
+    fn push(&mut self, data: Self::Input, next: &mut Next);
 }
 
-/// A node that produces audio frames in a pull-based pipeline.
+/// A node that produces data in a pull-based pipeline.
 ///
-/// When Next=(), it means that this node is terminal node.
+/// Input: the type of data this node pulls from the next node
+/// Output: the type of data this node produces
+/// Next: the next node in the pipeline
 ///
 /// AudioPipeline also implements xxNode<..., Next=()> because it's self-contained and
 /// you don't need to care about its inner.
-pub trait PullNode<const CHANNELS: usize, const SAMPLE_RATE: u32, Sample, Next>: Send {
-    fn pull(&mut self, next: &mut Next) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>;
+pub trait PullNode<Prev>: Send {
+    type Input;
+    type Output;
+
+    fn pull(&mut self, next: &mut Prev) -> Option<Self::Output>;
 }
 
 pub mod inspect;
@@ -23,6 +33,6 @@ pub mod jitter_buffer;
 pub mod mix_pull;
 pub mod mixer;
 pub mod network_push;
+pub mod null_node;
 pub mod sinewave;
 pub mod tee;
-pub mod terminal;

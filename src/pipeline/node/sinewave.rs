@@ -31,12 +31,15 @@ impl SinewaveNode {
     }
 }
 
-impl<const CHANNELS: usize, const SAMPLE_RATE: u32, Next, Sample>
-    PushNode<CHANNELS, SAMPLE_RATE, Sample, Next> for SinewaveNode
+impl<const CHANNELS: usize, const SAMPLE_RATE: u32, Next>
+    PushNode<Next> for SinewaveNode
 where
-    Next: PushNode<CHANNELS, SAMPLE_RATE, Sample, ()>,
+    Next: PushNode<(), Input = AudioBuffer<f32, CHANNELS, SAMPLE_RATE>, Output = AudioBuffer<f32, CHANNELS, SAMPLE_RATE>>,
 {
-    fn push(&mut self, mut frame: AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>, next: &mut Next) {
+    type Input = AudioBuffer<f32, CHANNELS, SAMPLE_RATE>;
+    type Output = AudioBuffer<f32, CHANNELS, SAMPLE_RATE>;
+
+    fn push(&mut self, mut frame: AudioBuffer<f32, CHANNELS, SAMPLE_RATE>, next: &mut Next) {
         let phase_inc = 2.0 * PI * self.frequency / SAMPLE_RATE as f32;
         let samples_per_channel = frame.samples_per_channel();
         let data = frame.data_mut();
@@ -55,7 +58,8 @@ where
         }
 
         // Pass the modified frame to the next node in the pipeline
-        next.push(frame, &mut ());
+        let mut null = ();
+        next.push(frame, &mut null);
     }
 }
 

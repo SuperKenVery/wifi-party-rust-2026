@@ -12,15 +12,20 @@ impl<A, B> MixPullNode<A, B> {
     }
 }
 
-impl<const CHANNELS: usize, const SAMPLE_RATE: u32, A, B, Next> PullNode<CHANNELS, SAMPLE_RATE, Next>
+impl<const CHANNELS: usize, const SAMPLE_RATE: u32, A, B, Next> PullNode<Next>
     for MixPullNode<A, B>
 where
-    A: PullNode<CHANNELS, SAMPLE_RATE, ()>,
-    B: PullNode<CHANNELS, SAMPLE_RATE, ()>,
+    A: PullNode<(), Input = AudioBuffer<f32, CHANNELS, SAMPLE_RATE>, Output = AudioBuffer<f32, CHANNELS, SAMPLE_RATE>>,
+    B: PullNode<(), Input = AudioBuffer<f32, CHANNELS, SAMPLE_RATE>, Output = AudioBuffer<f32, CHANNELS, SAMPLE_RATE>>,
 {
+    type Input = AudioBuffer<f32, CHANNELS, SAMPLE_RATE>;
+    type Output = AudioBuffer<f32, CHANNELS, SAMPLE_RATE>;
+
     fn pull(&mut self, _next: &mut Next) -> Option<AudioBuffer<f32, CHANNELS, SAMPLE_RATE>> {
-        let frame_a = self.a.pull(&mut ());
-        let frame_b = self.b.pull(&mut ());
+        let mut null_a = ();
+        let mut null_b = ();
+        let frame_a = self.a.pull(&mut null_a);
+        let frame_b = self.b.pull(&mut null_b);
 
         match (frame_a, frame_b) {
             (Some(mut a), Some(b)) => {
