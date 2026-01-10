@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 
 use crate::audio::jitter::HostJitterBuffer;
-use crossbeam_channel::{Receiver, Sender};
+use tokio::sync::broadcast;
 
 pub struct JitterBufferMap {
     buffers: Mutex<HashMap<HostId, HostJitterBuffer>>,
@@ -172,14 +172,13 @@ pub struct AppState {
     pub loopback_enabled: Arc<AtomicBool>,
     pub sequence_number: Arc<AtomicU64>,
     pub local_host_id: Arc<Mutex<Option<HostId>>>,
-    // Reactive state update channel
-    pub state_update_tx: Sender<StateUpdate>,
-    pub state_update_rx: Arc<Mutex<Receiver<StateUpdate>>>,
+    // Reactive state update channel (using tokio broadcast for multiple receivers)
+    pub state_update_tx: broadcast::Sender<StateUpdate>,
 }
 
 impl AppState {
     pub fn new() -> Self {
-        let (tx, rx) = crossbeam_channel::unbounded();
+        let (tx, _) = broadcast::channel(1000); // Buffer up to 1000 messages
         Self {
             audio_config: Arc::new(Mutex::new(AudioConfig::default())),
             network_config: Arc::new(Mutex::new(NetworkConfig::default())),
@@ -193,8 +192,12 @@ impl AppState {
             sequence_number: Arc::new(AtomicU64::new(0)),
             local_host_id: Arc::new(Mutex::new(None)),
             state_update_tx: tx,
-            state_update_rx: Arc::new(Mutex::new(rx)),
         }
+    }
+    
+    /// Subscribe to state updates (returns a receiver that can be used in async contexts)
+    pub fn subscribe(&self) -> broadcast::Receiver<StateUpdate> {
+        self.state_update_tx.subscribe()
     }
 
     /// Helper method to update connection status and notify UI

@@ -46,23 +46,21 @@ pub fn App() -> Element {
         });
     });
 
-    // Listen to state updates via channel (reactive, minimal polling)
-    // This uses try_recv with a sleep, which is much more efficient than constant polling
-    // because state changes are sent immediately via the channel
+    // Listen to state updates via channel (fully reactive, no polling)
+    // This uses async recv which blocks until an update is available
     use_effect(move || {
         let state = state_arc.clone();
         spawn(async move {
+            // Subscribe to state updates (this creates a new receiver)
+            let mut rx = state.subscribe();
+            
+            // Drop the state reference before entering the loop
+            drop(state);
+            
             loop {
-                // Check for updates (non-blocking)
-                let mut has_update = false;
-                loop {
-                    let update = {
-                        let rx_guard = state.state_update_rx.lock().unwrap();
-                        rx_guard.try_recv().ok()
-                    };
-                    
-                    if let Some(update) = update {
-                        has_update = true;
+                // This will block until an update is received (fully reactive)
+                match rx.recv().await {
+                    Ok(update) => {
                         match update {
                             StateUpdate::ConnectionStatusChanged(status) => {
                                 connection_status.set(status);
@@ -86,15 +84,11 @@ pub fn App() -> Element {
                                 local_host_id.set(id);
                             }
                         }
-                    } else {
+                    }
+                    Err(_) => {
+                        // Channel closed or lagged, exit
                         break;
                     }
-                }
-                
-                // Only sleep if we didn't process any updates (avoids busy-waiting)
-                // If we processed updates, immediately check again for batched updates
-                if !has_update {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
                 }
             }
         });
