@@ -29,7 +29,7 @@ fn setup_state() -> Result<Arc<AppState>> {
     // --- 2. Set local host ID ---
     if let Ok(local_ip) = get_local_ip() {
         info!("Local IP address: {}", local_ip.to_string());
-        *state.local_host_id.lock().unwrap() = Some(local_ip);
+        state.set_local_host_id(Some(local_ip));
     } else {
         error!("Failed to determine local IP address");
     }

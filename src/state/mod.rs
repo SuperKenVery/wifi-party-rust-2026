@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 
 use crate::audio::jitter::HostJitterBuffer;
+use tokio::sync::broadcast;
 
 pub struct JitterBufferMap {
     buffers: Mutex<HashMap<HostId, HostJitterBuffer>>,
@@ -146,6 +147,18 @@ pub enum ConnectionStatus {
     Connected,
 }
 
+/// State update notifications for reactive UI
+#[derive(Debug, Clone)]
+pub enum StateUpdate {
+    ConnectionStatusChanged(ConnectionStatus),
+    ActiveHostsChanged(Vec<HostInfo>),
+    MicMutedChanged(bool),
+    MicVolumeChanged(f32),
+    MicAudioLevelChanged(f32),
+    LoopbackEnabledChanged(bool),
+    LocalHostIdChanged(String),
+}
+
 /// Shared application state
 pub struct AppState {
     pub audio_config: Arc<Mutex<AudioConfig>>,
@@ -159,10 +172,13 @@ pub struct AppState {
     pub loopback_enabled: Arc<AtomicBool>,
     pub sequence_number: Arc<AtomicU64>,
     pub local_host_id: Arc<Mutex<Option<HostId>>>,
+    // Reactive state update channel (using tokio broadcast for multiple receivers)
+    pub state_update_tx: broadcast::Sender<StateUpdate>,
 }
 
 impl AppState {
     pub fn new() -> Self {
+        let (tx, _) = broadcast::channel(1000); // Buffer up to 1000 messages
         Self {
             audio_config: Arc::new(Mutex::new(AudioConfig::default())),
             network_config: Arc::new(Mutex::new(NetworkConfig::default())),
@@ -175,6 +191,63 @@ impl AppState {
             loopback_enabled: Arc::new(AtomicBool::new(false)),
             sequence_number: Arc::new(AtomicU64::new(0)),
             local_host_id: Arc::new(Mutex::new(None)),
+            state_update_tx: tx,
+        }
+    }
+    
+    /// Subscribe to state updates (returns a receiver that can be used in async contexts)
+    pub fn subscribe(&self) -> broadcast::Receiver<StateUpdate> {
+        self.state_update_tx.subscribe()
+    }
+
+    /// Helper method to update connection status and notify UI
+    pub fn set_connection_status(&self, status: ConnectionStatus) {
+        *self.connection_status.lock().unwrap() = status;
+        let _ = self.state_update_tx.send(StateUpdate::ConnectionStatusChanged(status));
+    }
+
+    /// Helper method to update active hosts and notify UI
+    pub fn update_active_hosts(&self) {
+        let hosts: Vec<HostInfo> = self
+            .active_hosts
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        let _ = self.state_update_tx.send(StateUpdate::ActiveHostsChanged(hosts));
+    }
+
+    /// Helper method to update mic muted and notify UI
+    pub fn set_mic_muted(&self, muted: bool) {
+        self.mic_muted.store(muted, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.state_update_tx.send(StateUpdate::MicMutedChanged(muted));
+    }
+
+    /// Helper method to update mic volume and notify UI
+    pub fn set_mic_volume(&self, volume: f32) {
+        *self.mic_volume.lock().unwrap() = volume;
+        let _ = self.state_update_tx.send(StateUpdate::MicVolumeChanged(volume));
+    }
+
+    /// Helper method to update mic audio level and notify UI
+    pub fn set_mic_audio_level(&self, level: f32) {
+        *self.mic_audio_level.lock().unwrap() = level;
+        let _ = self.state_update_tx.send(StateUpdate::MicAudioLevelChanged(level));
+    }
+
+    /// Helper method to update loopback enabled and notify UI
+    pub fn set_loopback_enabled(&self, enabled: bool) {
+        self.loopback_enabled
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.state_update_tx.send(StateUpdate::LoopbackEnabledChanged(enabled));
+    }
+
+    /// Helper method to update local host ID and notify UI
+    pub fn set_local_host_id(&self, id: Option<HostId>) {
+        *self.local_host_id.lock().unwrap() = id;
+        if let Some(id) = id {
+            let _ = self.state_update_tx.send(StateUpdate::LocalHostIdChanged(id.to_string()));
         }
     }
 }

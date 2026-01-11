@@ -1,4 +1,4 @@
-use crate::state::{AppState, ConnectionStatus, HostInfo};
+use crate::state::{AppState, ConnectionStatus, HostInfo, StateUpdate};
 use dioxus::prelude::*;
 use std::sync::Arc;
 
@@ -15,80 +15,116 @@ pub fn App() -> Element {
     let mut loopback_enabled = use_signal(|| false);
     let mut local_host_id = use_signal(|| String::from("Unknown"));
 
-    // Poll state periodically
+    // Initialize state from current values
     use_effect(move || {
         let state = state_arc.clone();
         spawn(async move {
+            // Initial state load
+            if let Ok(status) = state.connection_status.lock() {
+                connection_status.set(*status);
+            }
+            if let Ok(hosts) = state.active_hosts.lock() {
+                active_hosts.set(hosts.values().cloned().collect());
+            }
+            mic_muted.set(state.mic_muted.load(std::sync::atomic::Ordering::Relaxed));
+            if let Ok(vol) = state.mic_volume.lock() {
+                mic_volume.set(*vol);
+            }
+            if let Ok(level) = state.mic_audio_level.lock() {
+                mic_audio_level.set(*level);
+            }
+            loopback_enabled.set(
+                state
+                    .loopback_enabled
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            );
+            if let Ok(id_opt) = state.local_host_id.lock() {
+                if let Some(id) = *id_opt {
+                    local_host_id.set(id.to_string());
+                }
+            }
+        });
+    });
+
+    // Listen to state updates via channel (fully reactive, no polling)
+    // This uses async recv which blocks until an update is available
+    use_effect(move || {
+        let state = state_arc.clone();
+        spawn(async move {
+            // Subscribe to state updates (this creates a new receiver)
+            let mut rx = state.subscribe();
+            
+            // Drop the state reference before entering the loop
+            drop(state);
+            
             loop {
-                // Update connection status
-                if let Ok(status) = state.connection_status.lock() {
-                    connection_status.set(*status);
-                }
-
-                // Update active hosts
-                if let Ok(hosts) = state.active_hosts.lock() {
-                    active_hosts.set(hosts.values().cloned().collect());
-                }
-
-                // Update mic muted status
-                mic_muted.set(state.mic_muted.load(std::sync::atomic::Ordering::Relaxed));
-
-                // Update mic volume
-                if let Ok(vol) = state.mic_volume.lock() {
-                    mic_volume.set(*vol);
-                }
-
-                // Update mic audio level
-                if let Ok(level) = state.mic_audio_level.lock() {
-                    let new_level = *level;
-                    mic_audio_level.set(new_level);
-                }
-
-                // Update loopback status
-                loopback_enabled.set(
-                    state
-                        .loopback_enabled
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                );
-
-                // Update local host ID
-                if let Ok(id_opt) = state.local_host_id.lock() {
-                    if let Some(id) = *id_opt {
-                        local_host_id.set(id.to_string());
+                // This will block until an update is received (fully reactive)
+                match rx.recv().await {
+                    Ok(update) => {
+                        match update {
+                            StateUpdate::ConnectionStatusChanged(status) => {
+                                connection_status.set(status);
+                            }
+                            StateUpdate::ActiveHostsChanged(hosts) => {
+                                active_hosts.set(hosts);
+                            }
+                            StateUpdate::MicMutedChanged(muted) => {
+                                mic_muted.set(muted);
+                            }
+                            StateUpdate::MicVolumeChanged(vol) => {
+                                mic_volume.set(vol);
+                            }
+                            StateUpdate::MicAudioLevelChanged(level) => {
+                                mic_audio_level.set(level);
+                            }
+                            StateUpdate::LoopbackEnabledChanged(enabled) => {
+                                loopback_enabled.set(enabled);
+                            }
+                            StateUpdate::LocalHostIdChanged(id) => {
+                                local_host_id.set(id);
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // Channel closed or lagged, exit
+                        break;
                     }
                 }
-
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
         });
     });
 
     rsx! {
         div {
-            class: "container mx-auto p-4",
+            class: "min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900",
+            style: "background: linear-gradient(135deg, #0f172a 0%, #581c87 50%, #0f172a 100%);",
+            
+            div {
+                class: "container mx-auto p-6 max-w-6xl",
+                
+                // Header
+                Header {
+                    connection_status: connection_status(),
+                    local_host_id: local_host_id(),
+                    participant_count: active_hosts().len(),
+                }
 
-            // Header
-            Header {
-                connection_status: connection_status(),
-                local_host_id: local_host_id(),
-                participant_count: active_hosts().len(),
+                // Self Audio Section
+                SelfAudioSection {
+                    mic_muted: mic_muted(),
+                    mic_volume: mic_volume(),
+                    mic_audio_level: mic_audio_level(),
+                    loopback_enabled: loopback_enabled(),
+                }
+
+                // Participants Section
+                ParticipantsSection {
+                    hosts: active_hosts(),
+                }
+
+                // Statistics Panel
+                StatisticsPanel {}
             }
-
-            // Self Audio Section
-            SelfAudioSection {
-                mic_muted: mic_muted(),
-                mic_volume: mic_volume(),
-                mic_audio_level: mic_audio_level(),
-                loopback_enabled: loopback_enabled(),
-            }
-
-            // Participants Section
-            ParticipantsSection {
-                hosts: active_hosts(),
-            }
-
-            // Statistics Panel
-            StatisticsPanel {}
         }
     }
 }
@@ -112,29 +148,45 @@ fn Header(
 
     rsx! {
         div {
-            class: "bg-gray-800 text-white p-6 rounded-lg mb-6",
+            class: "bg-gradient-to-r from-slate-800/90 to-slate-700/90 backdrop-blur-sm text-white p-8 rounded-2xl mb-6 shadow-2xl border border-slate-600/50",
+            style: "box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3), 0 10px 10px -5px rgba(0, 0, 0, 0.2);",
 
-            h1 {
-                class: "text-3xl font-bold mb-4",
-                "🎤 Wi-Fi Party KTV"
+            div {
+                class: "flex items-center justify-between mb-6",
+                h1 {
+                    class: "text-4xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent",
+                    "🎤 Wi-Fi Party KTV"
+                }
+                div {
+                    class: "flex items-center gap-2 px-4 py-2 rounded-full bg-slate-700/50 backdrop-blur-sm",
+                    div {
+                        class: "w-3 h-3 rounded-full",
+                        style: if connection_status == ConnectionStatus::Connected {
+                            "background: linear-gradient(135deg, #10b981, #34d399); box-shadow: 0 0 10px rgba(16, 185, 129, 0.5);"
+                        } else {
+                            "background: linear-gradient(135deg, #ef4444, #f87171); box-shadow: 0 0 10px rgba(239, 68, 68, 0.5);"
+                        },
+                    }
+                    span { 
+                        class: "text-sm font-semibold",
+                        "{status_text}"
+                    }
+                }
             }
 
             div {
-                class: "flex items-center gap-4",
-
+                class: "grid grid-cols-1 md:grid-cols-3 gap-4",
+                
                 div {
-                    span { class: "text-gray-400", "Status: " }
-                    span { class: status_color, "{status_text}" }
+                    class: "bg-slate-700/30 rounded-xl p-4 backdrop-blur-sm border border-slate-600/30",
+                    div { class: "text-xs text-slate-400 mb-1 uppercase tracking-wide", "Host ID" }
+                    div { class: "font-mono text-sm font-semibold text-purple-300", "{local_host_id}" }
                 }
 
                 div {
-                    span { class: "text-gray-400", "Host ID: " }
-                    span { class: "font-mono", "{local_host_id}" }
-                }
-
-                div {
-                    span { class: "text-gray-400", "Participants: " }
-                    span { class: "font-bold", "{participant_count}" }
+                    class: "bg-slate-700/30 rounded-xl p-4 backdrop-blur-sm border border-slate-600/30",
+                    div { class: "text-xs text-slate-400 mb-1 uppercase tracking-wide", "Participants" }
+                    div { class: "text-2xl font-bold text-pink-300", "{participant_count}" }
                 }
             }
         }
@@ -155,18 +207,14 @@ fn SelfAudioSection(
         let current = state_clone
             .mic_muted
             .load(std::sync::atomic::Ordering::Relaxed);
-        state_clone
-            .mic_muted
-            .store(!current, std::sync::atomic::Ordering::Relaxed);
+        state_clone.set_mic_muted(!current);
     };
 
     let state_clone2 = state_arc.clone();
     let on_volume_change = move |evt: Event<FormData>| {
         if let Ok(value_str) = evt.value().parse::<f32>() {
             let volume = value_str / 100.0;
-            if let Ok(mut vol) = state_clone2.mic_volume.lock() {
-                *vol = volume;
-            }
+            state_clone2.set_mic_volume(volume);
         }
     };
 
@@ -175,51 +223,50 @@ fn SelfAudioSection(
         let current = state_clone3
             .loopback_enabled
             .load(std::sync::atomic::Ordering::Relaxed);
-        state_clone3
-            .loopback_enabled
-            .store(!current, std::sync::atomic::Ordering::Relaxed);
+        state_clone3.set_loopback_enabled(!current);
     };
 
     let mute_button_class = if mic_muted {
-        "px-6 py-3 bg-red-600 hover:bg-red-700 text-white rounded-lg font-bold"
+        "px-8 py-4 bg-gradient-to-r from-red-600 to-red-500 hover:from-red-700 hover:to-red-600 text-white rounded-xl font-bold shadow-lg hover:shadow-xl transition-all duration-200 transform hover:scale-105 active:scale-95"
     } else {
-        "px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-bold"
+        "px-8 py-4 bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-700 hover:to-emerald-600 text-white rounded-xl font-bold shadow-lg hover:shadow-xl transition-all duration-200 transform hover:scale-105 active:scale-95"
     };
 
-    let mute_button_text = if mic_muted { "Unmute" } else { "Mute" };
+    let mute_button_text = if mic_muted { "🔇 Unmute" } else { "🎤 Mute" };
 
     rsx! {
         div {
-            class: "bg-gray-800 text-white p-6 rounded-lg mb-6",
+            class: "bg-gradient-to-r from-slate-800/90 to-slate-700/90 backdrop-blur-sm text-white p-8 rounded-2xl mb-6 shadow-2xl border border-slate-600/50",
+            style: "box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3), 0 10px 10px -5px rgba(0, 0, 0, 0.2);",
 
             h2 {
-                class: "text-2xl font-bold mb-4",
+                class: "text-3xl font-bold mb-6 bg-gradient-to-r from-purple-300 to-pink-300 bg-clip-text text-transparent",
                 "Your Audio"
             }
 
             div {
-                class: "flex items-center gap-6",
-
+                class: "flex flex-col md:flex-row items-stretch md:items-center gap-4 mb-6",
+                
                 button {
                     class: mute_button_class,
                     onclick: on_mute_toggle,
-                    "{mute_button_text} Microphone"
+                    "{mute_button_text}"
                 }
 
                 button {
                     class: if loopback_enabled {
-                        "px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold"
+                        "px-8 py-4 bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-700 hover:to-blue-600 text-white rounded-xl font-bold shadow-lg hover:shadow-xl transition-all duration-200 transform hover:scale-105 active:scale-95"
                     } else {
-                        "px-6 py-3 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-bold"
+                        "px-8 py-4 bg-gradient-to-r from-slate-600 to-slate-500 hover:from-slate-700 hover:to-slate-600 text-white rounded-xl font-bold shadow-lg hover:shadow-xl transition-all duration-200 transform hover:scale-105 active:scale-95"
                     },
                     onclick: on_loopback_toggle,
                     if loopback_enabled { "🎧 Loopback: ON" } else { "🎧 Loopback: OFF" }
                 }
 
                 div {
-                    class: "flex-1",
+                    class: "flex-1 bg-slate-700/30 rounded-xl p-4 backdrop-blur-sm border border-slate-600/30",
                     label {
-                        class: "block text-sm mb-2",
+                        class: "block text-sm mb-3 font-semibold text-slate-300",
                         "Microphone Volume: {(mic_volume * 100.0) as i32}%"
                     }
                     input {
@@ -227,23 +274,33 @@ fn SelfAudioSection(
                         min: 0,
                         max: 200,
                         value: (mic_volume * 100.0) as i32,
-                        class: "w-full",
+                        class: "w-full h-2 bg-slate-600 rounded-lg appearance-none cursor-pointer accent-purple-500",
+                        style: "background: linear-gradient(to right, #8b5cf6 0%, #8b5cf6 {(mic_volume * 50.0) as i32}%, #475569 {(mic_volume * 50.0) as i32}%, #475569 100%);",
                         oninput: on_volume_change,
                     }
                 }
             }
 
             div {
-                class: "mt-4",
+                class: "mt-6",
                 label {
-                    class: "block text-sm mb-2",
+                    class: "block text-sm mb-3 font-semibold text-slate-300",
                     "🎤 Microphone Level: {(mic_audio_level * 100.0) as i32}%"
                 }
                 div {
-                    class: "relative w-full h-6 bg-gray-700 rounded-lg overflow-hidden border border-gray-600",
+                    class: "relative w-full h-8 bg-slate-700/50 rounded-xl overflow-hidden border border-slate-600/50 shadow-inner",
                     div {
-                        class: "absolute h-full bg-gradient-to-r from-green-500 via-yellow-500 to-red-500 transition-all duration-100",
-                        style: "width: {(mic_audio_level * 100.0).min(100.0)}%",
+                        class: "absolute h-full bg-gradient-to-r from-emerald-500 via-yellow-400 to-red-500 transition-all duration-150 ease-out rounded-xl",
+                        style: "width: {(mic_audio_level * 100.0).min(100.0)}%; box-shadow: 0 0 20px rgba(16, 185, 129, 0.3);",
+                    }
+                    div {
+                        class: "absolute inset-0 flex items-center justify-center text-xs font-bold text-white drop-shadow-lg",
+                        style: "text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);",
+                        if mic_audio_level > 0.01 {
+                            "{(mic_audio_level * 100.0) as i32}%"
+                        } else {
+                            ""
+                        }
                     }
                 }
             }
@@ -256,21 +313,24 @@ fn SelfAudioSection(
 fn ParticipantsSection(hosts: Vec<HostInfo>) -> Element {
     rsx! {
         div {
-            class: "bg-gray-800 text-white p-6 rounded-lg mb-6",
+            class: "bg-gradient-to-r from-slate-800/90 to-slate-700/90 backdrop-blur-sm text-white p-8 rounded-2xl mb-6 shadow-2xl border border-slate-600/50",
+            style: "box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3), 0 10px 10px -5px rgba(0, 0, 0, 0.2);",
 
             h2 {
-                class: "text-2xl font-bold mb-4",
+                class: "text-3xl font-bold mb-6 bg-gradient-to-r from-purple-300 to-pink-300 bg-clip-text text-transparent",
                 "Participants ({hosts.len()})"
             }
 
             if hosts.is_empty() {
                 div {
-                    class: "text-gray-400 text-center py-8",
-                    "No other participants connected"
+                    class: "text-slate-400 text-center py-12 rounded-xl bg-slate-700/20 border border-slate-600/30 border-dashed",
+                    div { class: "text-4xl mb-2", "👥" }
+                    div { class: "text-lg font-medium", "No other participants connected" }
+                    div { class: "text-sm mt-2", "Waiting for others to join..." }
                 }
             } else {
                 div {
-                    class: "grid grid-cols-1 md:grid-cols-2 gap-4",
+                    class: "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4",
                     for host in hosts {
                         HostCard {
                             host: host.clone(),
@@ -302,25 +362,39 @@ fn HostCard(host: HostInfo) -> Element {
 
     rsx! {
         div {
-            class: "bg-gray-700 p-4 rounded-lg",
-
+            class: "bg-gradient-to-br from-slate-700/80 to-slate-600/80 backdrop-blur-sm p-5 rounded-xl border border-slate-500/50 shadow-lg hover:shadow-xl transition-all duration-200 hover:scale-[1.02]",
+            
             div {
-                class: "flex items-center justify-between mb-2",
-
+                class: "flex items-center justify-between mb-4",
+                
                 div {
-                    class: "font-mono text-sm",
-                    "{host.id.to_string()}"
+                    class: "flex items-center gap-2",
+                    div {
+                        class: "w-2 h-2 rounded-full bg-emerald-400 animate-pulse",
+                        style: "box-shadow: 0 0 8px rgba(16, 185, 129, 0.6);",
+                    }
+                    div {
+                        class: "font-mono text-sm font-semibold text-purple-300",
+                        "{host.id.to_string()}"
+                    }
                 }
 
                 div {
-                    class: "text-xs text-gray-400",
+                    class: "px-3 py-1 rounded-full bg-slate-600/50 text-xs font-medium",
+                    class: if host.packet_loss > 0.1 {
+                        "text-red-300"
+                    } else if host.packet_loss > 0.05 {
+                        "text-yellow-300"
+                    } else {
+                        "text-emerald-300"
+                    },
                     "Loss: {(host.packet_loss * 100.0) as i32}%"
                 }
             }
 
             div {
                 label {
-                    class: "block text-sm mb-1",
+                    class: "block text-sm mb-3 font-semibold text-slate-300",
                     "Volume: {(host.volume * 100.0) as i32}%"
                 }
                 input {
@@ -328,7 +402,8 @@ fn HostCard(host: HostInfo) -> Element {
                     min: 0,
                     max: 200,
                     value: (host.volume * 100.0) as i32,
-                    class: "w-full",
+                    class: "w-full h-2 bg-slate-600 rounded-lg appearance-none cursor-pointer accent-purple-500",
+                    style: "background: linear-gradient(to right, #8b5cf6 0%, #8b5cf6 {(host.volume * 50.0) as i32}%, #475569 {(host.volume * 50.0) as i32}%, #475569 100%);",
                     oninput: on_volume_change,
                 }
             }
@@ -341,32 +416,51 @@ fn HostCard(host: HostInfo) -> Element {
 fn StatisticsPanel() -> Element {
     rsx! {
         div {
-            class: "bg-gray-800 text-white p-6 rounded-lg",
+            class: "bg-gradient-to-r from-slate-800/90 to-slate-700/90 backdrop-blur-sm text-white p-8 rounded-2xl shadow-2xl border border-slate-600/50",
+            style: "box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3), 0 10px 10px -5px rgba(0, 0, 0, 0.2);",
 
             h2 {
-                class: "text-2xl font-bold mb-4",
+                class: "text-3xl font-bold mb-6 bg-gradient-to-r from-purple-300 to-pink-300 bg-clip-text text-transparent",
                 "Statistics"
             }
 
             div {
-                class: "grid grid-cols-3 gap-4",
+                class: "grid grid-cols-1 md:grid-cols-3 gap-6",
 
                 div {
-                    class: "text-center",
-                    div { class: "text-sm text-gray-400", "Latency" }
-                    div { class: "text-2xl font-bold", "~20ms" }
+                    class: "text-center bg-slate-700/30 rounded-xl p-6 backdrop-blur-sm border border-slate-600/30 hover:bg-slate-700/40 transition-all duration-200",
+                    div { 
+                        class: "text-sm text-slate-400 mb-2 uppercase tracking-wide font-semibold",
+                        "Latency"
+                    }
+                    div { 
+                        class: "text-3xl font-bold bg-gradient-to-r from-blue-400 to-cyan-400 bg-clip-text text-transparent",
+                        "~20ms"
+                    }
                 }
 
                 div {
-                    class: "text-center",
-                    div { class: "text-sm text-gray-400", "Packet Loss" }
-                    div { class: "text-2xl font-bold", "0%" }
+                    class: "text-center bg-slate-700/30 rounded-xl p-6 backdrop-blur-sm border border-slate-600/30 hover:bg-slate-700/40 transition-all duration-200",
+                    div { 
+                        class: "text-sm text-slate-400 mb-2 uppercase tracking-wide font-semibold",
+                        "Packet Loss"
+                    }
+                    div { 
+                        class: "text-3xl font-bold bg-gradient-to-r from-emerald-400 to-green-400 bg-clip-text text-transparent",
+                        "0%"
+                    }
                 }
 
                 div {
-                    class: "text-center",
-                    div { class: "text-sm text-gray-400", "Jitter" }
-                    div { class: "text-2xl font-bold", "2ms" }
+                    class: "text-center bg-slate-700/30 rounded-xl p-6 backdrop-blur-sm border border-slate-600/30 hover:bg-slate-700/40 transition-all duration-200",
+                    div { 
+                        class: "text-sm text-slate-400 mb-2 uppercase tracking-wide font-semibold",
+                        "Jitter"
+                    }
+                    div { 
+                        class: "text-3xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent",
+                        "2ms"
+                    }
                 }
             }
         }
