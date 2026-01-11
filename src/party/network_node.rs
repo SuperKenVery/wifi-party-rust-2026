@@ -1,14 +1,22 @@
-use crate::audio::frame::AudioFrame;
-use crate::audio::AudioSample;
-use crate::network::receive::{HostPipelineManager, NetworkReceiver, NetworkSource};
-use crate::network::send::NetworkSender;
-use crate::pipeline::{Sink, Source};
-use crate::state::AppState;
-use anyhow::Result;
+//! Network node orchestration.
+//!
+//! Manages the network sender and receiver threads, providing a unified
+//! interface for network audio transport.
+
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 use std::thread;
+
+use anyhow::Result;
 use tracing::error;
+
+use crate::audio::frame::AudioFrame;
+use crate::audio::AudioSample;
+use crate::io::{NetworkReceiver, NetworkSender};
+use crate::pipeline::{Sink, Source};
+use crate::state::AppState;
+
+use super::host::{HostPipelineManager, NetworkSource};
 
 pub struct NetworkNode<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     _receiver_handle: Option<thread::JoinHandle<()>>,
@@ -29,11 +37,18 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     NetworkNode<Sample, CHANNELS, SAMPLE_RATE>
 where
-    AudioFrame<Sample, CHANNELS, SAMPLE_RATE>:
-        for<'a> rkyv::Serialize<rkyv::api::high::HighSerializer<rkyv::util::AlignedVec, rkyv::ser::allocator::ArenaHandle<'a>, rkyv::rancor::Error>>,
+    AudioFrame<Sample, CHANNELS, SAMPLE_RATE>: for<'a> rkyv::Serialize<
+        rkyv::api::high::HighSerializer<
+            rkyv::util::AlignedVec,
+            rkyv::ser::allocator::ArenaHandle<'a>,
+            rkyv::rancor::Error,
+        >,
+    >,
     AudioFrame<Sample, CHANNELS, SAMPLE_RATE>: rkyv::Archive,
-    <AudioFrame<Sample, CHANNELS, SAMPLE_RATE> as rkyv::Archive>::Archived:
-        rkyv::Deserialize<AudioFrame<Sample, CHANNELS, SAMPLE_RATE>, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
+    <AudioFrame<Sample, CHANNELS, SAMPLE_RATE> as rkyv::Archive>::Archived: rkyv::Deserialize<
+        AudioFrame<Sample, CHANNELS, SAMPLE_RATE>,
+        rkyv::api::high::HighDeserializer<rkyv::rancor::Error>,
+    >,
 {
     pub fn start(
         &mut self,

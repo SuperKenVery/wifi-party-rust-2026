@@ -1,5 +1,5 @@
 mod audio;
-mod network;
+mod io;
 mod party;
 mod pipeline;
 mod state;
@@ -23,10 +23,8 @@ fn main() {
 }
 
 fn setup_state() -> Result<Arc<AppState>> {
-    // --- 1. Create application state ---
     let state = Arc::new(AppState::new());
 
-    // --- 2. Set local host ID ---
     if let Ok(local_ip) = get_local_ip() {
         info!("Local IP address: {}", local_ip.to_string());
         *state.local_host_id.lock().unwrap() = Some(local_ip);
@@ -40,17 +38,13 @@ fn setup_state() -> Result<Arc<AppState>> {
 fn run() -> Result<()> {
     info!("Starting Wi-Fi Party KTV...");
 
-    // Setup application state
     let state = setup_state().context("Failed to setup application state")?;
 
-    // Create and start the Party (Audio & Network)
     let mut party = Party::<f32, 2, 48000>::new(state.clone());
     party.run().context("Failed to start Party")?;
 
     info!("Application setup complete. Audio pipelines are live.");
 
-    // Launch Dioxus UI with window configuration
-    // The party instance is kept alive on the stack while the UI runs.
     dioxus::LaunchBuilder::desktop()
         .with_cfg(
             dioxus::desktop::Config::new().with_window(

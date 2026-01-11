@@ -1,3 +1,7 @@
+//! Audio device I/O using cpal.
+//!
+//! Provides `AudioInput` for microphone capture and `AudioOutput` for speaker playback.
+
 use crate::audio::frame::AudioBuffer;
 use crate::audio::AudioSample;
 use crate::pipeline::{Sink, Source};

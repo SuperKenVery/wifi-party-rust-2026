@@ -1,17 +1,18 @@
-use anyhow::{Context, Result};
-use socket2::{Domain, Protocol, Socket, Type};
+//! Host management for multi-peer audio mixing.
+//!
+//! Manages per-host audio pipelines with jitter buffering and provides
+//! mixed output from all connected hosts.
+
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tracing::{debug, info, warn};
+use tracing::info;
 
-use super::{MULTICAST_ADDR, MULTICAST_PORT};
 use crate::audio::frame::AudioFrame;
 use crate::audio::AudioSample;
 use crate::pipeline::node::{jitter_buffer, JitterBufferConsumer, JitterBufferProducer};
-use crate::pipeline::Source;
-use crate::state::{AppState, ConnectionStatus, HostId, HostInfo};
+use crate::pipeline::{Sink, Source};
+use crate::state::{HostId, HostInfo};
 
 const HOST_TIMEOUT: Duration = Duration::from_secs(5);
 const JITTER_BUFFER_CAPACITY: usize = 16;
@@ -48,9 +49,11 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         }
     }
 
-    pub fn push_frame(&mut self, host_id: HostId, frame: AudioFrame<Sample, CHANNELS, SAMPLE_RATE>) {
-        use crate::pipeline::Sink;
-
+    pub fn push_frame(
+        &mut self,
+        host_id: HostId,
+        frame: AudioFrame<Sample, CHANNELS, SAMPLE_RATE>,
+    ) {
         let pipeline = self.pipelines.entry(host_id).or_insert_with(|| {
             info!("Creating pipeline for new host: {}", host_id.to_string());
             HostPipeline::new(host_id)
@@ -124,117 +127,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Default
 {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-pub struct NetworkReceiver<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    socket: std::net::UdpSocket,
-    state: Arc<AppState>,
-    pipeline_manager: Arc<Mutex<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>>,
-}
-
-impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
-    NetworkReceiver<Sample, CHANNELS, SAMPLE_RATE>
-{
-    pub fn new(
-        state: Arc<AppState>,
-        pipeline_manager: Arc<Mutex<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>>,
-    ) -> Result<Self> {
-        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
-            .context("Failed to create socket")?;
-
-        socket
-            .set_reuse_address(true)
-            .context("Failed to set reuse address")?;
-
-        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), MULTICAST_PORT);
-        socket
-            .bind(&bind_addr.into())
-            .context("Failed to bind socket")?;
-
-        let multicast_ip: Ipv4Addr = MULTICAST_ADDR
-            .parse()
-            .context("Invalid multicast address")?;
-
-        socket
-            .join_multicast_v4(&multicast_ip, &Ipv4Addr::UNSPECIFIED)
-            .context("Failed to join multicast group")?;
-
-        info!(
-            "Network receiver joined multicast group {}:{}",
-            MULTICAST_ADDR, MULTICAST_PORT
-        );
-
-        Ok(Self {
-            socket: socket.into(),
-            state,
-            pipeline_manager,
-        })
-    }
-}
-
-impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
-    NetworkReceiver<Sample, CHANNELS, SAMPLE_RATE>
-where
-    AudioFrame<Sample, CHANNELS, SAMPLE_RATE>: rkyv::Archive,
-    <AudioFrame<Sample, CHANNELS, SAMPLE_RATE> as rkyv::Archive>::Archived:
-        rkyv::Deserialize<AudioFrame<Sample, CHANNELS, SAMPLE_RATE>, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
-{
-    pub fn run(mut self) {
-        info!("Network receive thread started");
-
-        *self.state.connection_status.lock().unwrap() = ConnectionStatus::Connected;
-
-        let mut buf = [0u8; 65536];
-        let mut last_cleanup = Instant::now();
-
-        loop {
-            if let Err(e) = self.handle_packet(&mut buf) {
-                warn!("Error processing packet: {:?}", e);
-            }
-
-            if last_cleanup.elapsed() > Duration::from_secs(1) {
-                self.pipeline_manager.lock().unwrap().cleanup_stale_hosts();
-                last_cleanup = Instant::now();
-            }
-        }
-    }
-
-    fn handle_packet(&mut self, buf: &mut [u8]) -> Result<()> {
-        let (size, source_addr) = self
-            .socket
-            .recv_from(buf)
-            .context("Failed to receive UDP packet")?;
-
-        let received_data = &buf[..size];
-        let host_id = HostId::from(source_addr);
-
-        let frame: AudioFrame<Sample, CHANNELS, SAMPLE_RATE> =
-            unsafe { rkyv::from_bytes_unchecked(received_data) }
-                .map_err(|e| anyhow::anyhow!("Deserialization error: {:?}", e))?;
-
-        {
-            let local_host_id = self.state.local_host_id.lock().unwrap();
-            if let Some(local_id) = *local_host_id {
-                if host_id == local_id {
-                    return Ok(());
-                }
-            }
-        }
-
-        debug!(
-            "Receive packet from {:?}, seq num {}, is_v4: {}",
-            source_addr,
-            frame.sequence_number,
-            source_addr.is_ipv4()
-        );
-
-        self.pipeline_manager
-            .lock()
-            .unwrap()
-            .push_frame(host_id, frame);
-
-        Ok(())
     }
 }
 
