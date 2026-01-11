@@ -3,8 +3,9 @@ use crate::audio::AudioSample;
 use crate::pipeline::{Sink, Source};
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{BufferSize, SampleRate, StreamConfig, SupportedStreamConfig};
 use std::sync::{Arc, Mutex};
-use tracing::error;
+use tracing::{error, warn};
 
 pub struct AudioInput<S> {
     sink: Arc<Mutex<S>>,
@@ -30,24 +31,26 @@ impl<S> AudioInput<S> {
             .context("No input device available")?;
         let input_config = input_device.default_input_config()?;
 
-        if input_config.sample_rate().0 != SAMPLE_RATE
-            || input_config.channels() as usize != CHANNELS
-        {
-            error!(
-                "Default input device format {:?} does not match required format ({}ch @ {}Hz)",
-                input_config, CHANNELS, SAMPLE_RATE
-            );
-        }
+        let config = StreamConfig {
+            channels: CHANNELS as u16,
+            sample_rate: SampleRate(SAMPLE_RATE),
+            buffer_size: match input_config.buffer_size() {
+                cpal::SupportedBufferSize::Range { min, .. } => BufferSize::Fixed(*min),
+                cpal::SupportedBufferSize::Unknown => {
+                    warn!("Supported buffer size range unknown, using default");
+                    BufferSize::Default
+                }
+            },
+        };
 
         let sink = self.sink.clone();
         let stream = input_device.build_input_stream(
-            &input_config.config(),
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                let converted: Vec<Sample> = data.iter().map(|&s| Sample::convert_from(s)).collect();
-                if let Ok(frame) = AudioBuffer::<Sample, CHANNELS, SAMPLE_RATE>::new(converted) {
-                    if let Ok(mut sink) = sink.lock() {
-                        sink.push(frame);
-                    }
+            &config,
+            move |data: &[Sample], _: &cpal::InputCallbackInfo| {
+                let owned: Vec<Sample> = Vec::from(data);
+                if let Ok(frame) = AudioBuffer::<Sample, CHANNELS, SAMPLE_RATE>::new(owned) {
+                    let mut sink = sink.lock().unwrap();
+                    sink.push(frame);
                 }
             },
             |err| error!("An error occurred on the input audio stream: {}", err),

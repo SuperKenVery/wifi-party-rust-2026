@@ -1,51 +1,8 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 
-use crate::audio::jitter::HostJitterBuffer;
-
-pub struct JitterBufferMap {
-    buffers: Mutex<HashMap<HostId, HostJitterBuffer>>,
-}
-
-impl JitterBufferMap {
-    pub fn new() -> Self {
-        Self {
-            buffers: Mutex::new(HashMap::new()),
-        }
-    }
-
-    pub fn get_or_create(&self, host_id: HostId) -> Option<()> {
-        let mut buffers = self.buffers.lock().unwrap();
-        if !buffers.contains_key(&host_id) {
-            let buffer = HostJitterBuffer::new(48000, 2);
-            buffers.insert(host_id, buffer);
-        }
-        Some(())
-    }
-
-    pub fn push_frame(&self, host_id: HostId, frame: crate::audio::AudioFrame) {
-        let mut buffers = self.buffers.lock().unwrap();
-        if let Some(buffer) = buffers.get_mut(&host_id) {
-            buffer.push(frame);
-        }
-    }
-
-    pub fn pop_frame(&self, host_id: HostId) -> Option<Vec<i16>> {
-        let mut buffers = self.buffers.lock().unwrap();
-        if let Some(buffer) = buffers.get_mut(&host_id) {
-            buffer.pop()
-        } else {
-            None
-        }
-    }
-
-    pub fn remove(&self, host_id: &HostId) {
-        let mut buffers = self.buffers.lock().unwrap();
-        buffers.remove(host_id);
-    }
-}
+use crate::network::receive::HostPipelineManager;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HostId(SocketAddr);
@@ -150,8 +107,7 @@ pub enum ConnectionStatus {
 pub struct AppState {
     pub audio_config: Arc<Mutex<AudioConfig>>,
     pub network_config: Arc<Mutex<NetworkConfig>>,
-    pub active_hosts: Arc<Mutex<HashMap<HostId, HostInfo>>>,
-    pub jitter_buffers: Arc<JitterBufferMap>,
+    pub pipeline_manager: Arc<Mutex<HostPipelineManager>>,
     pub connection_status: Arc<Mutex<ConnectionStatus>>,
     pub mic_muted: Arc<AtomicBool>,
     pub mic_volume: Arc<Mutex<f32>>,
@@ -166,8 +122,7 @@ impl AppState {
         Self {
             audio_config: Arc::new(Mutex::new(AudioConfig::default())),
             network_config: Arc::new(Mutex::new(NetworkConfig::default())),
-            active_hosts: Arc::new(Mutex::new(HashMap::new())),
-            jitter_buffers: Arc::new(JitterBufferMap::new()),
+            pipeline_manager: Arc::new(Mutex::new(HostPipelineManager::new())),
             connection_status: Arc::new(Mutex::new(ConnectionStatus::Disconnected)),
             mic_muted: Arc::new(AtomicBool::new(false)),
             mic_volume: Arc::new(Mutex::new(1.0)),

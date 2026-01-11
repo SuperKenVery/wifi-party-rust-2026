@@ -25,9 +25,9 @@ pub fn App() -> Element {
                     connection_status.set(*status);
                 }
 
-                // Update active hosts
-                if let Ok(hosts) = state.active_hosts.lock() {
-                    active_hosts.set(hosts.values().cloned().collect());
+                // Update active hosts from pipeline manager
+                if let Ok(manager) = state.pipeline_manager.lock() {
+                    active_hosts.set(manager.get_host_infos());
                 }
 
                 // Update mic muted status
@@ -292,10 +292,8 @@ fn HostCard(host: HostInfo) -> Element {
     let on_volume_change = move |evt: Event<FormData>| {
         if let Ok(value_str) = evt.value().parse::<f32>() {
             let volume = value_str / 100.0;
-            if let Ok(mut hosts) = state_clone.active_hosts.lock() {
-                if let Some(host_info) = hosts.get_mut(&host_id) {
-                    host_info.volume = volume;
-                }
+            if let Ok(mut manager) = state_clone.pipeline_manager.lock() {
+                manager.update_host_volume(&host_id, volume);
             }
         }
     };

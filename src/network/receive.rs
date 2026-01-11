@@ -18,16 +18,16 @@ const JITTER_BUFFER_CAPACITY: usize = 16;
 struct HostPipeline {
     producer: JitterBufferProducer,
     consumer: JitterBufferConsumer,
-    last_seen: Instant,
+    info: HostInfo,
 }
 
 impl HostPipeline {
-    fn new() -> Self {
+    fn new(host_id: HostId) -> Self {
         let (producer, consumer) = jitter_buffer(JITTER_BUFFER_CAPACITY);
         Self {
             producer,
             consumer,
-            last_seen: Instant::now(),
+            info: HostInfo::new(host_id),
         }
     }
 }
@@ -48,9 +48,9 @@ impl HostPipelineManager {
 
         let pipeline = self.pipelines.entry(host_id).or_insert_with(|| {
             info!("Creating pipeline for new host: {}", host_id.to_string());
-            HostPipeline::new()
+            HostPipeline::new(host_id)
         });
-        pipeline.last_seen = Instant::now();
+        pipeline.info.last_seen = Instant::now();
         pipeline.producer.push(frame);
     }
 
@@ -85,7 +85,7 @@ impl HostPipelineManager {
     pub fn cleanup_stale_hosts(&mut self) {
         let now = Instant::now();
         self.pipelines.retain(|host_id, pipeline| {
-            let alive = now.duration_since(pipeline.last_seen) < HOST_TIMEOUT;
+            let alive = now.duration_since(pipeline.info.last_seen) < HOST_TIMEOUT;
             if !alive {
                 info!("Removing stale host pipeline: {}", host_id.to_string());
             }
@@ -95,6 +95,20 @@ impl HostPipelineManager {
 
     pub fn host_count(&self) -> usize {
         self.pipelines.len()
+    }
+
+    pub fn get_host_infos(&self) -> Vec<HostInfo> {
+        self.pipelines.values().map(|p| p.info.clone()).collect()
+    }
+
+    pub fn get_host_info(&self, host_id: &HostId) -> Option<HostInfo> {
+        self.pipelines.get(host_id).map(|p| p.info.clone())
+    }
+
+    pub fn update_host_volume(&mut self, host_id: &HostId, volume: f32) {
+        if let Some(pipeline) = self.pipelines.get_mut(host_id) {
+            pipeline.info.volume = volume;
+        }
     }
 }
 
@@ -194,19 +208,6 @@ impl NetworkReceiver {
             frame.sequence_number,
             source_addr.is_ipv4()
         );
-
-        {
-            let mut hosts = self.state.active_hosts.lock().unwrap();
-            hosts
-                .entry(host_id)
-                .and_modify(|info| {
-                    info.last_seen = Instant::now();
-                })
-                .or_insert_with(|| {
-                    info!("New host detected: {}", host_id.to_string());
-                    HostInfo::new(host_id)
-                });
-        }
 
         self.pipeline_manager
             .lock()
