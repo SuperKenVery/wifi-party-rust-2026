@@ -119,19 +119,6 @@ impl AudioFrame {
     pub fn deserialize(bytes: &[u8]) -> Result<Self> {
         rkyv::from_bytes::<AudioFrame, rkyv::rancor::Error>(bytes).context("Deserialization error")
     }
-
-    /// Validate the frame
-    pub fn validate(&self) -> bool {
-        // Basic validation checks
-        if self.samples.data().is_empty() {
-            return false;
-        }
-        // Check if samples length is valid for the channel count (2 for stereo)
-        if self.samples.data().len() % 2 != 0 {
-            return false;
-        }
-        true
-    }
 }
 
 #[cfg(test)]

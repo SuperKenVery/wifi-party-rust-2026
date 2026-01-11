@@ -179,10 +179,6 @@ impl NetworkReceiver {
         let frame = AudioFrame::deserialize(received_data)
             .context(format!("Failed to deserialize frame from {}", source_addr))?;
 
-        if !frame.validate() {
-            anyhow::bail!("Invalid frame from {}", source_addr);
-        }
-
         {
             let local_host_id = self.state.local_host_id.lock().unwrap();
             if let Some(local_id) = *local_host_id {

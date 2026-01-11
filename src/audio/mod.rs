@@ -4,7 +4,6 @@
 //! including microphone capture, mixing, and speaker playback.
 
 pub mod frame;
-pub mod jitter;
 pub mod sample;
 
 pub use frame::{AudioBuffer, AudioFrame};
