@@ -33,7 +33,7 @@ where
     type Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
     type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
 
-    fn process(&mut self, mut input: Self::Input) -> Option<Self::Output> {
+    fn process(&self, mut input: Self::Input) -> Option<Self::Output> {
         for sample in input.data_mut() {
             *sample = Sample::silence();
         }

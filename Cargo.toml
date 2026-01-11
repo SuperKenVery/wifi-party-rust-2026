@@ -2,7 +2,7 @@
 name = "wifi-party-rust"
 version = "0.1.0"
 authors = ["ken <39673849+SuperKenVery@users.noreply.github.com>"]
-edition = "2021"
+edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -12,7 +12,7 @@ cpal = "0.15"
 rkyv = "0.8"
 rtrb = "0.3"
 socket2 = "0.5"
-crossbeam-channel = "0.5"
+crossbeam = "0.8"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 tokio = { version = "1", features = ["full"] }

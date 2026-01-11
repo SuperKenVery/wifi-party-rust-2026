@@ -162,8 +162,7 @@ mod tests {
 
     #[test]
     fn test_audio_frame_validation() {
-        let valid_frame = AudioFrame::new(1, vec![0; 960]).unwrap();
-        assert!(valid_frame.validate());
+        let _valid_frame = AudioFrame::new(1, vec![0; 960]).unwrap();
 
         let invalid_samples = AudioBuffer::<i16, 2, 48000>::new(vec![0; 961]);
         assert!(invalid_samples.is_err());

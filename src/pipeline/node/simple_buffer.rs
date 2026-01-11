@@ -26,7 +26,7 @@ impl<T> Default for SimpleBuffer<T> {
 impl<T: Send> Sink for SimpleBuffer<T> {
     type Input = T;
 
-    fn push(&mut self, input: T) {
+    fn push(&self, input: T) {
         self.queue.lock().unwrap().push_back(input);
     }
 }
@@ -34,7 +34,7 @@ impl<T: Send> Sink for SimpleBuffer<T> {
 impl<T: Send> Source for SimpleBuffer<T> {
     type Output = T;
 
-    fn pull(&mut self) -> Option<T> {
+    fn pull(&self) -> Option<T> {
         self.queue.lock().unwrap().pop_front()
     }
 }

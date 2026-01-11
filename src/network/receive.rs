@@ -231,7 +231,7 @@ impl NetworkSource {
 impl Source for NetworkSource {
     type Output = AudioFrame;
 
-    fn pull(&mut self) -> Option<Self::Output> {
+    fn pull(&self) -> Option<Self::Output> {
         self.pipeline_manager.lock().unwrap().pull_and_mix()
     }
 }

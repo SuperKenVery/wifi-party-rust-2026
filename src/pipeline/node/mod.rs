@@ -30,27 +30,27 @@ pub use simple_buffer::SimpleBuffer;
 
 use crate::pipeline::{PullPipeline, PushPipeline};
 
-pub trait Node: Send {
+pub trait Node: Send + Sync {
     type Input;
     type Output;
 
-    fn process(&mut self, input: Self::Input) -> Option<Self::Output>;
+    fn process(&self, input: Self::Input) -> Option<Self::Output>;
 }
 
-pub trait Source: Send + Sized {
+pub trait Source: Send + Sync + Sized {
     type Output;
 
-    fn pull(&mut self) -> Option<Self::Output>;
+    fn pull(&self) -> Option<Self::Output>;
 
     fn pipe<N: Node<Input = Self::Output>>(self, node: N) -> PullPipeline<Self, N> {
         PullPipeline::new(self, node)
     }
 }
 
-pub trait Sink: Send + Sized {
+pub trait Sink: Send + Sync + Sized {
     type Input;
 
-    fn push(&mut self, input: Self::Input);
+    fn push(&self, input: Self::Input);
 
     fn pipe<N: Node<Output = Self::Input>>(self, node: N) -> PushPipeline<N, Self> {
         PushPipeline::new(node, self)

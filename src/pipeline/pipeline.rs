@@ -29,7 +29,7 @@ where
 {
     type Output = N::Output;
 
-    fn pull(&mut self) -> Option<Self::Output> {
+    fn pull(&self) -> Option<Self::Output> {
         let data = self.source.pull()?;
         self.node.process(data)
     }
@@ -59,7 +59,7 @@ where
 {
     type Input = N::Input;
 
-    fn push(&mut self, input: Self::Input) {
+    fn push(&self, input: Self::Input) {
         if let Some(output) = self.node.process(input) {
             self.sink.push(output);
         }

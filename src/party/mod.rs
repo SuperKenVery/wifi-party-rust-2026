@@ -8,7 +8,7 @@ use crate::pipeline::{Node, Sink, Source};
 use crate::state::AppState;
 use anyhow::Result;
 use std::marker::PhantomData;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::info;
 
@@ -16,14 +16,14 @@ use self::audio::{AudioInput, AudioOutput};
 use self::network::NetworkNode;
 
 pub struct Encoder<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    sequence_number: u64,
+    sequence_number: AtomicU64,
     _marker: PhantomData<Sample>,
 }
 
 impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Encoder<Sample, CHANNELS, SAMPLE_RATE> {
     pub fn new() -> Self {
         Self {
-            sequence_number: 0,
+            sequence_number: AtomicU64::new(0),
             _marker: PhantomData,
         }
     }
@@ -45,15 +45,15 @@ where
     type Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
     type Output = AudioFrame;
 
-    fn process(&mut self, input: Self::Input) -> Option<Self::Output> {
+    fn process(&self, input: Self::Input) -> Option<Self::Output> {
         let samples: Vec<i16> = input
             .data()
             .iter()
             .map(|&s| i16::convert_from(s))
             .collect();
 
-        self.sequence_number += 1;
-        AudioFrame::new(self.sequence_number, samples).ok()
+        let seq = self.sequence_number.fetch_add(1, Ordering::Relaxed) + 1;
+        AudioFrame::new(seq, samples).ok()
     }
 }
 
@@ -85,7 +85,7 @@ where
     type Input = AudioFrame;
     type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
 
-    fn process(&mut self, input: Self::Input) -> Option<Self::Output> {
+    fn process(&self, input: Self::Input) -> Option<Self::Output> {
         let samples: Vec<Sample> = input
             .samples
             .data()
@@ -116,7 +116,7 @@ where
 {
     type Input = T;
 
-    fn push(&mut self, input: Self::Input) {
+    fn push(&self, input: Self::Input) {
         self.a.push(input.clone());
         self.b.push(input);
     }
@@ -140,7 +140,7 @@ where
 {
     type Input = T;
 
-    fn push(&mut self, input: Self::Input) {
+    fn push(&self, input: Self::Input) {
         if self.enabled.load(Ordering::Relaxed) {
             self.sink.push(input);
         }
@@ -174,7 +174,7 @@ where
 {
     type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
 
-    fn pull(&mut self) -> Option<Self::Output> {
+    fn pull(&self) -> Option<Self::Output> {
         match (self.a.pull(), self.b.pull()) {
             (Some(a), Some(b)) => {
                 let mixed: Vec<Sample> = a

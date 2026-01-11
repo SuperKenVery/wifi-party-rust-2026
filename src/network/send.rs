@@ -73,7 +73,7 @@ impl NetworkSender {
 impl Sink for NetworkSender {
     type Input = AudioFrame;
 
-    fn push(&mut self, input: Self::Input) {
+    fn push(&self, input: Self::Input) {
         self.send_frame(&input);
     }
 }

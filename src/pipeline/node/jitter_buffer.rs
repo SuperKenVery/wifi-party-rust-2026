@@ -5,14 +5,9 @@
 
 use super::{Sink, Source};
 use crate::audio::frame::AudioFrame;
-use std::cell::UnsafeCell;
-use std::mem::MaybeUninit;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use crossbeam::atomic::AtomicCell;
 use std::sync::Arc;
-
-const SLOT_EMPTY: u8 = 0;
-const SLOT_WRITING: u8 = 1;
-const SLOT_READY: u8 = 2;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[repr(align(64))]
 struct CachePadded<T>(T);
@@ -31,28 +26,48 @@ impl<T> std::ops::Deref for CachePadded<T> {
 }
 
 struct Slot {
-    state: AtomicU8,
+    has_data: std::sync::atomic::AtomicBool,
     stored_seq: AtomicU64,
-    data: UnsafeCell<MaybeUninit<AudioFrame>>,
+    data: AtomicCell<Option<Box<AudioFrame>>>,
 }
 
 impl Slot {
     fn new() -> Self {
         Self {
-            state: AtomicU8::new(SLOT_EMPTY),
+            has_data: std::sync::atomic::AtomicBool::new(false),
             stored_seq: AtomicU64::new(0),
-            data: UnsafeCell::new(MaybeUninit::uninit()),
+            data: AtomicCell::new(None),
         }
     }
-}
 
-unsafe impl Send for Slot {}
-unsafe impl Sync for Slot {}
+    fn write(&self, seq: u64, frame: AudioFrame) {
+        self.data.swap(Some(Box::new(frame)));
+        self.stored_seq.store(seq, Ordering::Release);
+        self.has_data.store(true, Ordering::Release);
+    }
+
+    fn stored_seq(&self) -> Option<u64> {
+        if self.has_data.load(Ordering::Acquire) {
+            Some(self.stored_seq.load(Ordering::Acquire))
+        } else {
+            None
+        }
+    }
+
+    fn take(&self, expected_seq: u64) -> Option<AudioFrame> {
+        if self.stored_seq()? != expected_seq {
+            return None;
+        }
+        self.has_data.store(false, Ordering::Release);
+        self.data.swap(None).map(|b| *b)
+    }
+}
 
 struct JitterBufferInner {
     slots: Box<[Slot]>,
     capacity: usize,
     read_seq: CachePadded<AtomicU64>,
+    write_seq: CachePadded<AtomicU64>,
 }
 
 impl JitterBufferInner {
@@ -62,6 +77,7 @@ impl JitterBufferInner {
             slots: slots.into_boxed_slice(),
             capacity,
             read_seq: CachePadded::new(AtomicU64::new(0)),
+            write_seq: CachePadded::new(AtomicU64::new(0)),
         }
     }
 
@@ -70,111 +86,62 @@ impl JitterBufferInner {
     }
 }
 
-impl Drop for JitterBufferInner {
-    fn drop(&mut self) {
-        for slot in self.slots.iter() {
-            if slot.state.load(Ordering::Acquire) == SLOT_READY {
-                unsafe {
-                    (*slot.data.get()).assume_init_drop();
-                }
-            }
-        }
-    }
-}
-
 pub struct JitterBufferProducer {
     inner: Arc<JitterBufferInner>,
 }
 
+/// Single-consumer end of the jitter buffer.
+/// 
+/// This type is `Sync` to allow wrapping in `Arc` for use in audio callbacks,
+/// but it is designed for single-consumer use. Only one thread should call
+/// `pull()` at a time - concurrent calls may result in missed frames.
 pub struct JitterBufferConsumer {
     inner: Arc<JitterBufferInner>,
-    cached_read_seq: u64,
 }
-
-unsafe impl Send for JitterBufferProducer {}
-unsafe impl Send for JitterBufferConsumer {}
 
 pub fn jitter_buffer(capacity: usize) -> (JitterBufferProducer, JitterBufferConsumer) {
     let inner = Arc::new(JitterBufferInner::new(capacity));
     let producer = JitterBufferProducer {
         inner: inner.clone(),
     };
-    let consumer = JitterBufferConsumer {
-        inner,
-        cached_read_seq: 0,
-    };
+    let consumer = JitterBufferConsumer { inner };
     (producer, consumer)
 }
 
 impl Sink for JitterBufferProducer {
     type Input = AudioFrame;
 
-    fn push(&mut self, input: AudioFrame) {
+    fn push(&self, input: AudioFrame) {
         let seq = input.sequence_number;
-        let read_seq = self.inner.read_seq.load(Ordering::Acquire);
-
-        if seq < read_seq {
-            return;
-        }
-
         let slot_idx = self.inner.slot_index(seq);
         let slot = &self.inner.slots[slot_idx];
 
-        loop {
-            let state = slot.state.load(Ordering::Acquire);
+        // Ignore if older than read position
+        if seq < self.inner.read_seq.load(Ordering::Acquire) {
+            return;
+        }
 
-            match state {
-                SLOT_EMPTY => {
-                    if slot
-                        .state
-                        .compare_exchange_weak(
-                            SLOT_EMPTY,
-                            SLOT_WRITING,
-                            Ordering::AcqRel,
-                            Ordering::Relaxed,
-                        )
-                        .is_ok()
-                    {
-                        unsafe {
-                            (*slot.data.get()).write(input);
-                        }
-                        slot.stored_seq.store(seq, Ordering::Release);
-                        slot.state.store(SLOT_READY, Ordering::Release);
-                        return;
-                    }
-                }
-                SLOT_READY => {
-                    let stored = slot.stored_seq.load(Ordering::Acquire);
-                    if stored == seq {
-                        return;
-                    }
-                    if stored < seq && stored < read_seq {
-                        if slot
-                            .state
-                            .compare_exchange_weak(
-                                SLOT_READY,
-                                SLOT_WRITING,
-                                Ordering::AcqRel,
-                                Ordering::Relaxed,
-                            )
-                            .is_ok()
-                        {
-                            unsafe {
-                                (*slot.data.get()).assume_init_drop();
-                                (*slot.data.get()).write(input);
-                            }
-                            slot.stored_seq.store(seq, Ordering::Release);
-                            slot.state.store(SLOT_READY, Ordering::Release);
-                            return;
-                        }
-                    } else {
-                        return;
-                    }
-                }
-                SLOT_WRITING => {
-                    std::hint::spin_loop();
-                }
-                _ => unreachable!(),
+        // Ignore if already written newer frame
+        if let Some(previous_written_seq) = slot.stored_seq()
+            && previous_written_seq >= seq
+        {
+            return;
+        }
+
+        slot.write(seq, input);
+
+        loop {
+            let current_write_seq = self.inner.write_seq.load(Ordering::Acquire);
+            if seq <= current_write_seq {
+                break;
+            }
+            if self
+                .inner
+                .write_seq
+                .compare_exchange_weak(current_write_seq, seq, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                break;
             }
         }
     }
@@ -183,41 +150,30 @@ impl Sink for JitterBufferProducer {
 impl Source for JitterBufferConsumer {
     type Output = AudioFrame;
 
-    fn pull(&mut self) -> Option<AudioFrame> {
+    fn pull(&self) -> Option<AudioFrame> {
         let read_seq = self.inner.read_seq.load(Ordering::Acquire);
-        self.cached_read_seq = read_seq;
-
         let slot_idx = self.inner.slot_index(read_seq);
         let slot = &self.inner.slots[slot_idx];
 
-        let state = slot.state.load(Ordering::Acquire);
-        if state != SLOT_READY {
-            return None;
-        }
-
-        let stored = slot.stored_seq.load(Ordering::Acquire);
-        if stored != read_seq {
-            return None;
-        }
-
-        let frame = unsafe { (*slot.data.get()).assume_init_read() };
-        slot.state.store(SLOT_EMPTY, Ordering::Release);
+        let frame = slot.take(read_seq)?;
         self.inner.read_seq.store(read_seq + 1, Ordering::Release);
-        self.cached_read_seq = read_seq + 1;
-
         Some(frame)
     }
 }
 
 impl JitterBufferConsumer {
-    pub fn skip(&mut self) {
-        let read_seq = self.inner.read_seq.load(Ordering::Acquire);
-        self.inner.read_seq.store(read_seq + 1, Ordering::Release);
-        self.cached_read_seq = read_seq + 1;
+    pub fn skip(&self) {
+        self.inner.read_seq.fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn next_expected_seq(&self) -> u64 {
-        self.cached_read_seq
+        self.inner.read_seq.load(Ordering::Acquire)
+    }
+
+    pub fn latency(&self) -> u64 {
+        let write_seq = self.inner.write_seq.load(Ordering::Acquire);
+        let read_seq = self.inner.read_seq.load(Ordering::Acquire);
+        write_seq.saturating_sub(read_seq)
     }
 }
 
@@ -231,7 +187,7 @@ mod tests {
 
     #[test]
     fn test_basic_push_pull() {
-        let (mut producer, mut consumer) = jitter_buffer(8);
+        let (producer, consumer) = jitter_buffer(8);
 
         producer.push(make_frame(0));
         producer.push(make_frame(1));
@@ -245,7 +201,7 @@ mod tests {
 
     #[test]
     fn test_out_of_order() {
-        let (mut producer, mut consumer) = jitter_buffer(8);
+        let (producer, consumer) = jitter_buffer(8);
 
         producer.push(make_frame(2));
         producer.push(make_frame(0));
@@ -258,7 +214,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_ignored() {
-        let (mut producer, mut consumer) = jitter_buffer(8);
+        let (producer, consumer) = jitter_buffer(8);
 
         producer.push(make_frame(0));
         producer.push(make_frame(0));
@@ -270,7 +226,7 @@ mod tests {
 
     #[test]
     fn test_late_packet_ignored() {
-        let (mut producer, mut consumer) = jitter_buffer(8);
+        let (producer, consumer) = jitter_buffer(8);
 
         producer.push(make_frame(0));
         producer.push(make_frame(1));
@@ -285,7 +241,7 @@ mod tests {
 
     #[test]
     fn test_hole_returns_none() {
-        let (mut producer, mut consumer) = jitter_buffer(8);
+        let (producer, consumer) = jitter_buffer(8);
 
         producer.push(make_frame(1));
         producer.push(make_frame(2));
@@ -300,7 +256,7 @@ mod tests {
 
     #[test]
     fn test_skip_hole() {
-        let (mut producer, mut consumer) = jitter_buffer(8);
+        let (producer, consumer) = jitter_buffer(8);
 
         producer.push(make_frame(1));
         producer.push(make_frame(2));
@@ -309,5 +265,41 @@ mod tests {
         consumer.skip();
         assert_eq!(consumer.pull().unwrap().sequence_number, 1);
         assert_eq!(consumer.pull().unwrap().sequence_number, 2);
+    }
+
+    #[test]
+    fn test_overwrite_old_data() {
+        let (producer, consumer) = jitter_buffer(8);
+
+        producer.push(make_frame(0));
+        assert_eq!(consumer.pull().unwrap().sequence_number, 0);
+
+        for i in 1..=7 {
+            producer.push(make_frame(i));
+        }
+
+        producer.push(make_frame(9));
+
+        assert_eq!(consumer.latency(), 8);
+    }
+
+    #[test]
+    fn test_latency_tracking() {
+        let (producer, consumer) = jitter_buffer(8);
+
+        assert_eq!(consumer.latency(), 0);
+
+        producer.push(make_frame(0));
+        producer.push(make_frame(1));
+        producer.push(make_frame(2));
+
+        assert_eq!(consumer.latency(), 2);
+
+        consumer.pull();
+        assert_eq!(consumer.latency(), 1);
+
+        consumer.pull();
+        consumer.pull();
+        assert_eq!(consumer.latency(), 0);
     }
 }

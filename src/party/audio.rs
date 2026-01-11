@@ -3,26 +3,26 @@ use crate::audio::AudioSample;
 use crate::pipeline::{Sink, Source};
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{BufferSize, SampleRate, StreamConfig, SupportedStreamConfig};
-use std::sync::{Arc, Mutex};
+use cpal::{BufferSize, SampleRate, StreamConfig};
+use std::sync::Arc;
 use tracing::{error, warn};
 
 pub struct AudioInput<S> {
-    sink: Arc<Mutex<S>>,
+    sink: Arc<S>,
     stream: Option<cpal::Stream>,
 }
 
 impl<S> AudioInput<S> {
     pub fn new(sink: S) -> Self {
         Self {
-            sink: Arc::new(Mutex::new(sink)),
+            sink: Arc::new(sink),
             stream: None,
         }
     }
 
     pub fn start<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>(&mut self) -> Result<()>
     where
-        Sample: AudioSample,
+        Sample: AudioSample + cpal::SizedSample,
         S: Sink<Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> + 'static,
     {
         let host = cpal::default_host();
@@ -49,7 +49,6 @@ impl<S> AudioInput<S> {
             move |data: &[Sample], _: &cpal::InputCallbackInfo| {
                 let owned: Vec<Sample> = Vec::from(data);
                 if let Ok(frame) = AudioBuffer::<Sample, CHANNELS, SAMPLE_RATE>::new(owned) {
-                    let mut sink = sink.lock().unwrap();
                     sink.push(frame);
                 }
             },
@@ -63,14 +62,14 @@ impl<S> AudioInput<S> {
 }
 
 pub struct AudioOutput<S> {
-    source: Arc<Mutex<S>>,
+    source: Arc<S>,
     stream: Option<cpal::Stream>,
 }
 
 impl<S> AudioOutput<S> {
     pub fn new(source: S) -> Self {
         Self {
-            source: Arc::new(Mutex::new(source)),
+            source: Arc::new(source),
             stream: None,
         }
     }
@@ -90,16 +89,10 @@ impl<S> AudioOutput<S> {
         let stream = output_device.build_output_stream(
             &output_config.config(),
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                if let Ok(mut source) = source.lock() {
-                    if let Some(frame) = source.pull() {
-                        for (i, sample) in frame.data().iter().enumerate() {
-                            if i < data.len() {
-                                data[i] = f32::convert_from(*sample);
-                            }
-                        }
-                    } else {
-                        for sample in data {
-                            *sample = 0.0;
+                if let Some(frame) = source.pull() {
+                    for (i, sample) in frame.data().iter().enumerate() {
+                        if i < data.len() {
+                            data[i] = f32::convert_from(*sample);
                         }
                     }
                 } else {
