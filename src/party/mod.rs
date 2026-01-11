@@ -1,15 +1,15 @@
 pub mod audio;
 pub mod network;
 
-use crate::audio::frame::AudioBuffer;
-use crate::audio::{AudioFrame, AudioSample};
+use crate::audio::frame::{AudioBuffer, AudioFrame};
+use crate::audio::AudioSample;
+use crate::network::receive::HostPipelineManager;
 use crate::pipeline::node::SimpleBuffer;
 use crate::pipeline::{Node, Sink, Source};
 use crate::state::AppState;
 use anyhow::Result;
-use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tracing::info;
 
 use self::audio::{AudioInput, AudioOutput};
@@ -17,14 +17,14 @@ use self::network::NetworkNode;
 
 pub struct Encoder<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     sequence_number: AtomicU64,
-    _marker: PhantomData<Sample>,
+    _marker: std::marker::PhantomData<Sample>,
 }
 
 impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Encoder<Sample, CHANNELS, SAMPLE_RATE> {
     pub fn new() -> Self {
         Self {
             sequence_number: AtomicU64::new(0),
-            _marker: PhantomData,
+            _marker: std::marker::PhantomData,
         }
     }
 }
@@ -43,28 +43,22 @@ where
     Sample: AudioSample,
 {
     type Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
-    type Output = AudioFrame;
+    type Output = AudioFrame<Sample, CHANNELS, SAMPLE_RATE>;
 
     fn process(&self, input: Self::Input) -> Option<Self::Output> {
-        let samples: Vec<i16> = input
-            .data()
-            .iter()
-            .map(|&s| i16::convert_from(s))
-            .collect();
-
         let seq = self.sequence_number.fetch_add(1, Ordering::Relaxed) + 1;
-        AudioFrame::new(seq, samples).ok()
+        AudioFrame::new(seq, input.into_inner()).ok()
     }
 }
 
 pub struct Decoder<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    _marker: PhantomData<Sample>,
+    _marker: std::marker::PhantomData<Sample>,
 }
 
 impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Decoder<Sample, CHANNELS, SAMPLE_RATE> {
     pub fn new() -> Self {
         Self {
-            _marker: PhantomData,
+            _marker: std::marker::PhantomData,
         }
     }
 }
@@ -82,18 +76,11 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Node
 where
     Sample: AudioSample,
 {
-    type Input = AudioFrame;
+    type Input = AudioFrame<Sample, CHANNELS, SAMPLE_RATE>;
     type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
 
     fn process(&self, input: Self::Input) -> Option<Self::Output> {
-        let samples: Vec<Sample> = input
-            .samples
-            .data()
-            .iter()
-            .map(|&s| Sample::convert_from(s))
-            .collect();
-
-        AudioBuffer::new(samples).ok()
+        AudioBuffer::new(input.samples.into_inner()).ok()
     }
 }
 
@@ -150,7 +137,7 @@ where
 pub struct MixingSource<A, B, Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     a: A,
     b: B,
-    _marker: PhantomData<Sample>,
+    _marker: std::marker::PhantomData<Sample>,
 }
 
 impl<A, B, Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
@@ -160,7 +147,7 @@ impl<A, B, Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         Self {
             a,
             b,
-            _marker: PhantomData,
+            _marker: std::marker::PhantomData,
         }
     }
 }
@@ -195,26 +182,39 @@ where
     }
 }
 
-pub struct Party {
+pub struct Party<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     state: Arc<AppState>,
-    network_node: NetworkNode,
+    network_node: NetworkNode<Sample, CHANNELS, SAMPLE_RATE>,
+    pipeline_manager: Arc<Mutex<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>>,
 }
 
-impl Party {
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    Party<Sample, CHANNELS, SAMPLE_RATE>
+{
     pub fn new(state: Arc<AppState>) -> Self {
         Self {
             state,
             network_node: NetworkNode::new(),
+            pipeline_manager: Arc::new(Mutex::new(HostPipelineManager::new())),
         }
     }
+}
 
-    pub fn run<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>(&mut self) -> Result<()>
-    where
-        Sample: AudioSample + Clone,
-    {
+impl<Sample: AudioSample + Clone, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    Party<Sample, CHANNELS, SAMPLE_RATE>
+where
+    AudioFrame<Sample, CHANNELS, SAMPLE_RATE>:
+        for<'a> rkyv::Serialize<rkyv::api::high::HighSerializer<rkyv::util::AlignedVec, rkyv::ser::allocator::ArenaHandle<'a>, rkyv::rancor::Error>>,
+    AudioFrame<Sample, CHANNELS, SAMPLE_RATE>: rkyv::Archive,
+    <AudioFrame<Sample, CHANNELS, SAMPLE_RATE> as rkyv::Archive>::Archived:
+        rkyv::Deserialize<AudioFrame<Sample, CHANNELS, SAMPLE_RATE>, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
+{
+    pub fn run(&mut self) -> Result<()> {
         info!("Starting Party pipelines...");
 
-        let (network_sink, network_source) = self.network_node.start(self.state.clone())?;
+        let (network_sink, network_source) = self
+            .network_node
+            .start(self.pipeline_manager.clone(), self.state.clone())?;
 
         let loopback_buffer: SimpleBuffer<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> =
             SimpleBuffer::new();
@@ -227,7 +227,8 @@ impl Party {
 
         let _audio_input: AudioInput<_> = AudioInput::new(mic_sink);
 
-        let network_to_speaker = network_source.pipe(Decoder::<Sample, CHANNELS, SAMPLE_RATE>::new());
+        let network_to_speaker =
+            network_source.pipe(Decoder::<Sample, CHANNELS, SAMPLE_RATE>::new());
         let speaker_source: MixingSource<_, _, Sample, CHANNELS, SAMPLE_RATE> =
             MixingSource::new(network_to_speaker, loopback_buffer);
 

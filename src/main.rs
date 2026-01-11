@@ -44,8 +44,8 @@ fn run() -> Result<()> {
     let state = setup_state().context("Failed to setup application state")?;
 
     // Create and start the Party (Audio & Network)
-    let mut party = Party::new(state.clone());
-    party.run::<f32, 2, 48000>().context("Failed to start Party")?;
+    let mut party = Party::<f32, 2, 48000>::new(state.clone());
+    party.run().context("Failed to start Party")?;
 
     info!("Application setup complete. Audio pipelines are live.");
 

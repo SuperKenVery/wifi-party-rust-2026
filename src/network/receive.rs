@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 use super::{MULTICAST_ADDR, MULTICAST_PORT};
-use crate::audio::AudioFrame;
+use crate::audio::frame::AudioFrame;
+use crate::audio::AudioSample;
 use crate::pipeline::node::{jitter_buffer, JitterBufferConsumer, JitterBufferProducer};
 use crate::pipeline::Source;
 use crate::state::{AppState, ConnectionStatus, HostId, HostInfo};
@@ -15,13 +16,15 @@ use crate::state::{AppState, ConnectionStatus, HostId, HostInfo};
 const HOST_TIMEOUT: Duration = Duration::from_secs(5);
 const JITTER_BUFFER_CAPACITY: usize = 16;
 
-struct HostPipeline {
-    producer: JitterBufferProducer,
-    consumer: JitterBufferConsumer,
+struct HostPipeline<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    producer: JitterBufferProducer<Sample, CHANNELS, SAMPLE_RATE>,
+    consumer: JitterBufferConsumer<Sample, CHANNELS, SAMPLE_RATE>,
     info: HostInfo,
 }
 
-impl HostPipeline {
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    HostPipeline<Sample, CHANNELS, SAMPLE_RATE>
+{
     fn new(host_id: HostId) -> Self {
         let (producer, consumer) = jitter_buffer(JITTER_BUFFER_CAPACITY);
         Self {
@@ -32,18 +35,20 @@ impl HostPipeline {
     }
 }
 
-pub struct HostPipelineManager {
-    pipelines: HashMap<HostId, HostPipeline>,
+pub struct HostPipelineManager<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    pipelines: HashMap<HostId, HostPipeline<Sample, CHANNELS, SAMPLE_RATE>>,
 }
 
-impl HostPipelineManager {
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>
+{
     pub fn new() -> Self {
         Self {
             pipelines: HashMap::new(),
         }
     }
 
-    pub fn push_frame(&mut self, host_id: HostId, frame: AudioFrame) {
+    pub fn push_frame(&mut self, host_id: HostId, frame: AudioFrame<Sample, CHANNELS, SAMPLE_RATE>) {
         use crate::pipeline::Sink;
 
         let pipeline = self.pipelines.entry(host_id).or_insert_with(|| {
@@ -54,8 +59,8 @@ impl HostPipelineManager {
         pipeline.producer.push(frame);
     }
 
-    pub fn pull_and_mix(&mut self) -> Option<AudioFrame> {
-        let mut mixed_samples: Option<Vec<i16>> = None;
+    pub fn pull_and_mix(&mut self) -> Option<AudioFrame<Sample, CHANNELS, SAMPLE_RATE>> {
+        let mut mixed_samples: Option<Vec<Sample>> = None;
         let mut result_seq = 0u64;
         let mut result_timestamp = 0u64;
 
@@ -71,7 +76,9 @@ impl HostPipelineManager {
                     Some(mixed) => {
                         for (i, sample) in frame.samples.data().iter().enumerate() {
                             if i < mixed.len() {
-                                mixed[i] = mixed[i].saturating_add(*sample);
+                                let sum =
+                                    mixed[i].to_f64_normalized() + sample.to_f64_normalized();
+                                mixed[i] = Sample::from_f64_normalized(sum);
                             }
                         }
                     }
@@ -112,22 +119,26 @@ impl HostPipelineManager {
     }
 }
 
-impl Default for HostPipelineManager {
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Default
+    for HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>
+{
     fn default() -> Self {
         Self::new()
     }
 }
 
-pub struct NetworkReceiver {
+pub struct NetworkReceiver<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     socket: std::net::UdpSocket,
     state: Arc<AppState>,
-    pipeline_manager: Arc<Mutex<HostPipelineManager>>,
+    pipeline_manager: Arc<Mutex<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>>,
 }
 
-impl NetworkReceiver {
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    NetworkReceiver<Sample, CHANNELS, SAMPLE_RATE>
+{
     pub fn new(
         state: Arc<AppState>,
-        pipeline_manager: Arc<Mutex<HostPipelineManager>>,
+        pipeline_manager: Arc<Mutex<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>>,
     ) -> Result<Self> {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
             .context("Failed to create socket")?;
@@ -160,7 +171,15 @@ impl NetworkReceiver {
             pipeline_manager,
         })
     }
+}
 
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    NetworkReceiver<Sample, CHANNELS, SAMPLE_RATE>
+where
+    AudioFrame<Sample, CHANNELS, SAMPLE_RATE>: rkyv::Archive,
+    <AudioFrame<Sample, CHANNELS, SAMPLE_RATE> as rkyv::Archive>::Archived:
+        rkyv::Deserialize<AudioFrame<Sample, CHANNELS, SAMPLE_RATE>, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
+{
     pub fn run(mut self) {
         info!("Network receive thread started");
 
@@ -190,8 +209,9 @@ impl NetworkReceiver {
         let received_data = &buf[..size];
         let host_id = HostId::from(source_addr);
 
-        let frame = AudioFrame::deserialize(received_data)
-            .context(format!("Failed to deserialize frame from {}", source_addr))?;
+        let frame: AudioFrame<Sample, CHANNELS, SAMPLE_RATE> =
+            unsafe { rkyv::from_bytes_unchecked(received_data) }
+                .map_err(|e| anyhow::anyhow!("Deserialization error: {:?}", e))?;
 
         {
             let local_host_id = self.state.local_host_id.lock().unwrap();
@@ -218,18 +238,24 @@ impl NetworkReceiver {
     }
 }
 
-pub struct NetworkSource {
-    pipeline_manager: Arc<Mutex<HostPipelineManager>>,
+pub struct NetworkSource<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    pipeline_manager: Arc<Mutex<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>>,
 }
 
-impl NetworkSource {
-    pub fn new(pipeline_manager: Arc<Mutex<HostPipelineManager>>) -> Self {
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    NetworkSource<Sample, CHANNELS, SAMPLE_RATE>
+{
+    pub fn new(
+        pipeline_manager: Arc<Mutex<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>>,
+    ) -> Self {
         Self { pipeline_manager }
     }
 }
 
-impl Source for NetworkSource {
-    type Output = AudioFrame;
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Source
+    for NetworkSource<Sample, CHANNELS, SAMPLE_RATE>
+{
+    type Output = AudioFrame<Sample, CHANNELS, SAMPLE_RATE>;
 
     fn pull(&self) -> Option<Self::Output> {
         self.pipeline_manager.lock().unwrap().pull_and_mix()

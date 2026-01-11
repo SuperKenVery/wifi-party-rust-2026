@@ -5,6 +5,7 @@
 
 use super::{Sink, Source};
 use crate::audio::frame::AudioFrame;
+use crate::audio::AudioSample;
 use crossbeam::atomic::AtomicCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,13 +26,13 @@ impl<T> std::ops::Deref for CachePadded<T> {
     }
 }
 
-struct Slot {
+struct Slot<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     has_data: std::sync::atomic::AtomicBool,
     stored_seq: AtomicU64,
-    data: AtomicCell<Option<Box<AudioFrame>>>,
+    data: AtomicCell<Option<Box<AudioFrame<Sample, CHANNELS, SAMPLE_RATE>>>>,
 }
 
-impl Slot {
+impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Slot<Sample, CHANNELS, SAMPLE_RATE> {
     fn new() -> Self {
         Self {
             has_data: std::sync::atomic::AtomicBool::new(false),
@@ -40,7 +41,7 @@ impl Slot {
         }
     }
 
-    fn write(&self, seq: u64, frame: AudioFrame) {
+    fn write(&self, seq: u64, frame: AudioFrame<Sample, CHANNELS, SAMPLE_RATE>) {
         self.data.swap(Some(Box::new(frame)));
         self.stored_seq.store(seq, Ordering::Release);
         self.has_data.store(true, Ordering::Release);
@@ -54,7 +55,7 @@ impl Slot {
         }
     }
 
-    fn take(&self, expected_seq: u64) -> Option<AudioFrame> {
+    fn take(&self, expected_seq: u64) -> Option<AudioFrame<Sample, CHANNELS, SAMPLE_RATE>> {
         if self.stored_seq()? != expected_seq {
             return None;
         }
@@ -63,16 +64,19 @@ impl Slot {
     }
 }
 
-struct JitterBufferInner {
-    slots: Box<[Slot]>,
+struct JitterBufferInner<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    slots: Box<[Slot<Sample, CHANNELS, SAMPLE_RATE>]>,
     capacity: usize,
     read_seq: CachePadded<AtomicU64>,
     write_seq: CachePadded<AtomicU64>,
 }
 
-impl JitterBufferInner {
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    JitterBufferInner<Sample, CHANNELS, SAMPLE_RATE>
+{
     fn new(capacity: usize) -> Self {
-        let slots: Vec<Slot> = (0..capacity).map(|_| Slot::new()).collect();
+        let slots: Vec<Slot<Sample, CHANNELS, SAMPLE_RATE>> =
+            (0..capacity).map(|_| Slot::new()).collect();
         Self {
             slots: slots.into_boxed_slice(),
             capacity,
@@ -86,20 +90,20 @@ impl JitterBufferInner {
     }
 }
 
-pub struct JitterBufferProducer {
-    inner: Arc<JitterBufferInner>,
+pub struct JitterBufferProducer<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    inner: Arc<JitterBufferInner<Sample, CHANNELS, SAMPLE_RATE>>,
 }
 
-/// Single-consumer end of the jitter buffer.
-/// 
-/// This type is `Sync` to allow wrapping in `Arc` for use in audio callbacks,
-/// but it is designed for single-consumer use. Only one thread should call
-/// `pull()` at a time - concurrent calls may result in missed frames.
-pub struct JitterBufferConsumer {
-    inner: Arc<JitterBufferInner>,
+pub struct JitterBufferConsumer<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    inner: Arc<JitterBufferInner<Sample, CHANNELS, SAMPLE_RATE>>,
 }
 
-pub fn jitter_buffer(capacity: usize) -> (JitterBufferProducer, JitterBufferConsumer) {
+pub fn jitter_buffer<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>(
+    capacity: usize,
+) -> (
+    JitterBufferProducer<Sample, CHANNELS, SAMPLE_RATE>,
+    JitterBufferConsumer<Sample, CHANNELS, SAMPLE_RATE>,
+) {
     let inner = Arc::new(JitterBufferInner::new(capacity));
     let producer = JitterBufferProducer {
         inner: inner.clone(),
@@ -108,20 +112,20 @@ pub fn jitter_buffer(capacity: usize) -> (JitterBufferProducer, JitterBufferCons
     (producer, consumer)
 }
 
-impl Sink for JitterBufferProducer {
-    type Input = AudioFrame;
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Sink
+    for JitterBufferProducer<Sample, CHANNELS, SAMPLE_RATE>
+{
+    type Input = AudioFrame<Sample, CHANNELS, SAMPLE_RATE>;
 
-    fn push(&self, input: AudioFrame) {
+    fn push(&self, input: AudioFrame<Sample, CHANNELS, SAMPLE_RATE>) {
         let seq = input.sequence_number;
         let slot_idx = self.inner.slot_index(seq);
         let slot = &self.inner.slots[slot_idx];
 
-        // Ignore if older than read position
         if seq < self.inner.read_seq.load(Ordering::Acquire) {
             return;
         }
 
-        // Ignore if already written newer frame
         if let Some(previous_written_seq) = slot.stored_seq()
             && previous_written_seq >= seq
         {
@@ -147,10 +151,12 @@ impl Sink for JitterBufferProducer {
     }
 }
 
-impl Source for JitterBufferConsumer {
-    type Output = AudioFrame;
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Source
+    for JitterBufferConsumer<Sample, CHANNELS, SAMPLE_RATE>
+{
+    type Output = AudioFrame<Sample, CHANNELS, SAMPLE_RATE>;
 
-    fn pull(&self) -> Option<AudioFrame> {
+    fn pull(&self) -> Option<AudioFrame<Sample, CHANNELS, SAMPLE_RATE>> {
         let read_seq = self.inner.read_seq.load(Ordering::Acquire);
         let slot_idx = self.inner.slot_index(read_seq);
         let slot = &self.inner.slots[slot_idx];
@@ -161,7 +167,9 @@ impl Source for JitterBufferConsumer {
     }
 }
 
-impl JitterBufferConsumer {
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    JitterBufferConsumer<Sample, CHANNELS, SAMPLE_RATE>
+{
     pub fn skip(&self) {
         self.inner.read_seq.fetch_add(1, Ordering::AcqRel);
     }
@@ -181,13 +189,13 @@ impl JitterBufferConsumer {
 mod tests {
     use super::*;
 
-    fn make_frame(seq: u64) -> AudioFrame {
+    fn make_frame(seq: u64) -> AudioFrame<i16, 2, 48000> {
         AudioFrame::new(seq, vec![0i16; 960]).unwrap()
     }
 
     #[test]
     fn test_basic_push_pull() {
-        let (producer, consumer) = jitter_buffer(8);
+        let (producer, consumer) = jitter_buffer::<i16, 2, 48000>(8);
 
         producer.push(make_frame(0));
         producer.push(make_frame(1));
@@ -201,7 +209,7 @@ mod tests {
 
     #[test]
     fn test_out_of_order() {
-        let (producer, consumer) = jitter_buffer(8);
+        let (producer, consumer) = jitter_buffer::<i16, 2, 48000>(8);
 
         producer.push(make_frame(2));
         producer.push(make_frame(0));
@@ -214,7 +222,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_ignored() {
-        let (producer, consumer) = jitter_buffer(8);
+        let (producer, consumer) = jitter_buffer::<i16, 2, 48000>(8);
 
         producer.push(make_frame(0));
         producer.push(make_frame(0));
@@ -226,7 +234,7 @@ mod tests {
 
     #[test]
     fn test_late_packet_ignored() {
-        let (producer, consumer) = jitter_buffer(8);
+        let (producer, consumer) = jitter_buffer::<i16, 2, 48000>(8);
 
         producer.push(make_frame(0));
         producer.push(make_frame(1));
@@ -241,7 +249,7 @@ mod tests {
 
     #[test]
     fn test_hole_returns_none() {
-        let (producer, consumer) = jitter_buffer(8);
+        let (producer, consumer) = jitter_buffer::<i16, 2, 48000>(8);
 
         producer.push(make_frame(1));
         producer.push(make_frame(2));
@@ -256,7 +264,7 @@ mod tests {
 
     #[test]
     fn test_skip_hole() {
-        let (producer, consumer) = jitter_buffer(8);
+        let (producer, consumer) = jitter_buffer::<i16, 2, 48000>(8);
 
         producer.push(make_frame(1));
         producer.push(make_frame(2));
@@ -269,7 +277,7 @@ mod tests {
 
     #[test]
     fn test_overwrite_old_data() {
-        let (producer, consumer) = jitter_buffer(8);
+        let (producer, consumer) = jitter_buffer::<i16, 2, 48000>(8);
 
         producer.push(make_frame(0));
         assert_eq!(consumer.pull().unwrap().sequence_number, 0);
@@ -285,7 +293,7 @@ mod tests {
 
     #[test]
     fn test_latency_tracking() {
-        let (producer, consumer) = jitter_buffer(8);
+        let (producer, consumer) = jitter_buffer::<i16, 2, 48000>(8);
 
         assert_eq!(consumer.latency(), 0);
 

@@ -1,18 +1,23 @@
 use anyhow::{Context, Result};
 use socket2::{Domain, Protocol, Socket, Type};
+use std::marker::PhantomData;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tracing::{info, warn};
 
 use super::{MULTICAST_ADDR, MULTICAST_PORT, TTL};
-use crate::audio::AudioFrame;
+use crate::audio::frame::AudioFrame;
+use crate::audio::AudioSample;
 use crate::pipeline::Sink;
 
-pub struct NetworkSender {
+pub struct NetworkSender<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     socket: Socket,
     multicast_addr: SocketAddr,
+    _marker: PhantomData<Sample>,
 }
 
-impl NetworkSender {
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    NetworkSender<Sample, CHANNELS, SAMPLE_RATE>
+{
     pub fn new() -> Result<Self> {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
             .context("Failed to create socket")?;
@@ -39,11 +44,19 @@ impl NetworkSender {
         Ok(Self {
             socket,
             multicast_addr,
+            _marker: PhantomData,
         })
     }
+}
 
-    fn send_frame(&self, frame: &AudioFrame) {
-        match frame.serialize() {
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    NetworkSender<Sample, CHANNELS, SAMPLE_RATE>
+where
+    AudioFrame<Sample, CHANNELS, SAMPLE_RATE>:
+        for<'a> rkyv::Serialize<rkyv::api::high::HighSerializer<rkyv::util::AlignedVec, rkyv::ser::allocator::ArenaHandle<'a>, rkyv::rancor::Error>>,
+{
+    fn send_frame(&self, frame: &AudioFrame<Sample, CHANNELS, SAMPLE_RATE>) {
+        match rkyv::to_bytes::<rkyv::rancor::Error>(frame) {
             Ok(serialized) => {
                 match self.socket.send_to(&serialized, &self.multicast_addr.into()) {
                     Ok(bytes_sent) => {
@@ -70,8 +83,13 @@ impl NetworkSender {
     }
 }
 
-impl Sink for NetworkSender {
-    type Input = AudioFrame;
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Sink
+    for NetworkSender<Sample, CHANNELS, SAMPLE_RATE>
+where
+    AudioFrame<Sample, CHANNELS, SAMPLE_RATE>:
+        for<'a> rkyv::Serialize<rkyv::api::high::HighSerializer<rkyv::util::AlignedVec, rkyv::ser::allocator::ArenaHandle<'a>, rkyv::rancor::Error>>,
+{
+    type Input = AudioFrame<Sample, CHANNELS, SAMPLE_RATE>;
 
     fn push(&self, input: Self::Input) {
         self.send_frame(&input);

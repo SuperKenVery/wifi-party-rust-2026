@@ -2,8 +2,6 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 
-use crate::network::receive::HostPipelineManager;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HostId(SocketAddr);
 
@@ -107,7 +105,6 @@ pub enum ConnectionStatus {
 pub struct AppState {
     pub audio_config: Arc<Mutex<AudioConfig>>,
     pub network_config: Arc<Mutex<NetworkConfig>>,
-    pub pipeline_manager: Arc<Mutex<HostPipelineManager>>,
     pub connection_status: Arc<Mutex<ConnectionStatus>>,
     pub mic_muted: Arc<AtomicBool>,
     pub mic_volume: Arc<Mutex<f32>>,
@@ -115,6 +112,7 @@ pub struct AppState {
     pub loopback_enabled: Arc<AtomicBool>,
     pub sequence_number: Arc<AtomicU64>,
     pub local_host_id: Arc<Mutex<Option<HostId>>>,
+    pub host_infos: Arc<Mutex<Vec<HostInfo>>>,
 }
 
 impl AppState {
@@ -122,7 +120,6 @@ impl AppState {
         Self {
             audio_config: Arc::new(Mutex::new(AudioConfig::default())),
             network_config: Arc::new(Mutex::new(NetworkConfig::default())),
-            pipeline_manager: Arc::new(Mutex::new(HostPipelineManager::new())),
             connection_status: Arc::new(Mutex::new(ConnectionStatus::Disconnected)),
             mic_muted: Arc::new(AtomicBool::new(false)),
             mic_volume: Arc::new(Mutex::new(1.0)),
@@ -130,6 +127,7 @@ impl AppState {
             loopback_enabled: Arc::new(AtomicBool::new(false)),
             sequence_number: Arc::new(AtomicU64::new(0)),
             local_host_id: Arc::new(Mutex::new(None)),
+            host_infos: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }

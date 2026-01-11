@@ -76,7 +76,7 @@ impl<S> AudioOutput<S> {
 
     pub fn start<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>(&mut self) -> Result<()>
     where
-        Sample: AudioSample,
+        Sample: AudioSample + cpal::SizedSample,
         S: Source<Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> + 'static,
     {
         let host = cpal::default_host();
@@ -85,19 +85,31 @@ impl<S> AudioOutput<S> {
             .context("No output device available")?;
         let output_config = output_device.default_output_config()?;
 
+        let config = StreamConfig {
+            channels: CHANNELS as u16,
+            sample_rate: SampleRate(SAMPLE_RATE),
+            buffer_size: match output_config.buffer_size() {
+                cpal::SupportedBufferSize::Range { min, .. } => BufferSize::Fixed(*min),
+                cpal::SupportedBufferSize::Unknown => {
+                    warn!("Supported buffer size range unknown, using default");
+                    BufferSize::Default
+                }
+            },
+        };
+
         let source = self.source.clone();
         let stream = output_device.build_output_stream(
-            &output_config.config(),
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            &config,
+            move |data: &mut [Sample], _: &cpal::OutputCallbackInfo| {
                 if let Some(frame) = source.pull() {
                     for (i, sample) in frame.data().iter().enumerate() {
                         if i < data.len() {
-                            data[i] = f32::convert_from(*sample);
+                            data[i] = *sample;
                         }
                     }
                 } else {
                     for sample in data {
-                        *sample = 0.0;
+                        *sample = Sample::silence();
                     }
                 }
             },

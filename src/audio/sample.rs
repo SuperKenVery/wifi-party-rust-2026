@@ -1,15 +1,14 @@
-use num_traits::{Num, One, ToPrimitive, FromPrimitive, Bounded};
+use num_traits::{Bounded, FromPrimitive, Num, ToPrimitive};
+use rkyv::Archive;
 
-pub trait AudioSample: Num + Copy + Send + Sync + PartialOrd + ToPrimitive + FromPrimitive + Bounded + 'static {
+pub trait AudioSample:
+    Num + Copy + Send + Sync + PartialOrd + ToPrimitive + FromPrimitive + Bounded + Archive + 'static
+{
     fn silence() -> Self;
 
     fn to_f64_normalized(self) -> f64;
 
     fn from_f64_normalized(value: f64) -> Self;
-
-    fn convert_from<S: AudioSample>(sample: S) -> Self {
-        Self::from_f64_normalized(sample.to_f64_normalized())
-    }
 }
 
 impl AudioSample for f32 {
