@@ -4,16 +4,18 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::audio::frame::{AudioBuffer, AudioFrame};
 use crate::audio::AudioSample;
+use crate::audio::frame::{AudioBuffer, AudioFrame};
 use crate::pipeline::Node;
 
-pub struct Encoder<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+pub struct FramePacker<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     sequence_number: AtomicU64,
     _marker: std::marker::PhantomData<Sample>,
 }
 
-impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Encoder<Sample, CHANNELS, SAMPLE_RATE> {
+impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    FramePacker<Sample, CHANNELS, SAMPLE_RATE>
+{
     pub fn new() -> Self {
         Self {
             sequence_number: AtomicU64::new(0),
@@ -23,7 +25,7 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Encoder<Sample, CHAN
 }
 
 impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Default
-    for Encoder<Sample, CHANNELS, SAMPLE_RATE>
+    for FramePacker<Sample, CHANNELS, SAMPLE_RATE>
 {
     fn default() -> Self {
         Self::new()
@@ -31,7 +33,7 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Default
 }
 
 impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Node
-    for Encoder<Sample, CHANNELS, SAMPLE_RATE>
+    for FramePacker<Sample, CHANNELS, SAMPLE_RATE>
 where
     Sample: AudioSample,
 {
@@ -44,11 +46,13 @@ where
     }
 }
 
-pub struct Decoder<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+pub struct FrameUnpacker<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     _marker: std::marker::PhantomData<Sample>,
 }
 
-impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Decoder<Sample, CHANNELS, SAMPLE_RATE> {
+impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    FrameUnpacker<Sample, CHANNELS, SAMPLE_RATE>
+{
     pub fn new() -> Self {
         Self {
             _marker: std::marker::PhantomData,
@@ -57,7 +61,7 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Decoder<Sample, CHAN
 }
 
 impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Default
-    for Decoder<Sample, CHANNELS, SAMPLE_RATE>
+    for FrameUnpacker<Sample, CHANNELS, SAMPLE_RATE>
 {
     fn default() -> Self {
         Self::new()
@@ -65,7 +69,7 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Default
 }
 
 impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Node
-    for Decoder<Sample, CHANNELS, SAMPLE_RATE>
+    for FrameUnpacker<Sample, CHANNELS, SAMPLE_RATE>
 where
     Sample: AudioSample,
 {

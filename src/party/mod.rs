@@ -10,11 +10,11 @@
 pub mod codec;
 pub mod combinator;
 pub mod host;
-pub mod network_node;
+pub mod network;
 pub mod party;
 
-pub use codec::{Decoder, Encoder};
+pub use codec::{FramePacker, FrameUnpacker};
 pub use combinator::{LoopbackSwitch, MixingSource, Tee};
 pub use host::{HostPipelineManager, NetworkSource};
-pub use network_node::NetworkNode;
+pub use network::NetworkNode;
 pub use party::Party;

@@ -25,7 +25,7 @@
 pub mod jitter_buffer;
 pub mod simple_buffer;
 
-pub use jitter_buffer::{jitter_buffer, JitterBufferConsumer, JitterBufferProducer};
+pub use jitter_buffer::{JitterBufferConsumer, JitterBufferProducer, jitter_buffer};
 pub use simple_buffer::SimpleBuffer;
 
 use crate::pipeline::{PullPipeline, PushPipeline};
@@ -42,7 +42,7 @@ pub trait Source: Send + Sync + Sized {
 
     fn pull(&self) -> Option<Self::Output>;
 
-    fn pipe<N: Node<Input = Self::Output>>(self, node: N) -> PullPipeline<Self, N> {
+    fn give_data_to<N: Node<Input = Self::Output>>(self, node: N) -> PullPipeline<Self, N> {
         PullPipeline::new(self, node)
     }
 }
@@ -52,7 +52,7 @@ pub trait Sink: Send + Sync + Sized {
 
     fn push(&self, input: Self::Input);
 
-    fn pipe<N: Node<Output = Self::Input>>(self, node: N) -> PushPipeline<N, Self> {
+    fn get_data_from<N: Node<Output = Self::Input>>(self, node: N) -> PushPipeline<N, Self> {
         PushPipeline::new(node, self)
     }
 }
