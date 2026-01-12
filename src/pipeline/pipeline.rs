@@ -7,7 +7,7 @@ use crate::pipeline::node::{Node, Sink, Source};
 
 /// A pull-based pipeline that chains a source with a processing node.
 ///
-/// Created by calling [`Source::pipe`] on a source. The resulting pipeline
+/// Created by calling [`Source::give_data_to`] on a source. The resulting pipeline
 /// also implements [`Source`], allowing further chaining.
 ///
 /// Data flows from source through the node when [`Source::pull`] is called.
@@ -37,7 +37,7 @@ where
 
 /// A push-based pipeline that chains a processing node with a sink.
 ///
-/// Created by calling [`Sink::pipe`] on a sink. The resulting pipeline
+/// Created by calling [`Sink::get_data_from`] on a sink. The resulting pipeline
 /// also implements [`Sink`], allowing further chaining.
 ///
 /// Data flows through the node into the sink when [`Sink::push`] is called.

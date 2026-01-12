@@ -1,3 +1,18 @@
+//! Wi-Fi Party - Local network audio sharing application.
+//!
+//! This application enables real-time audio sharing between devices on the same
+//! local network using UDP multicast. Each participant can hear audio from all
+//! other participants mixed together.
+//!
+//! # Crate Structure
+//!
+//! - [`audio`] - Audio data types ([`AudioBuffer`](audio::AudioBuffer), [`AudioFrame`](audio::AudioFrame))
+//! - [`pipeline`] - Generic data processing pipeline framework
+//! - [`io`] - Hardware I/O (microphone, speaker, network)
+//! - [`party`] - Audio sharing orchestration and mixing
+//! - [`state`] - Application state and configuration
+//! - [`ui`] - User interface
+
 mod audio;
 mod io;
 mod party;

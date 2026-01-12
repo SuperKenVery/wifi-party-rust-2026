@@ -2,12 +2,12 @@
 //!
 //! Provides utilities for splitting, switching, and mixing audio streams.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::audio::frame::AudioBuffer;
 use crate::audio::AudioSample;
-use crate::pipeline::{Sink, Source};
+use crate::audio::frame::AudioBuffer;
+use crate::pipeline::{Node, Sink, Source};
 
 pub struct Tee<A, B> {
     a: A,
@@ -34,27 +34,33 @@ where
     }
 }
 
-pub struct LoopbackSwitch<S> {
-    sink: S,
+pub struct LoopbackSwitch<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     enabled: Arc<AtomicBool>,
+    _marker: std::marker::PhantomData<Sample>,
 }
 
-impl<S> LoopbackSwitch<S> {
-    pub fn new(sink: S, enabled: Arc<AtomicBool>) -> Self {
-        Self { sink, enabled }
+impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    LoopbackSwitch<Sample, CHANNELS, SAMPLE_RATE>
+{
+    pub fn new(enabled: Arc<AtomicBool>) -> Self {
+        Self {
+            enabled,
+            _marker: std::marker::PhantomData,
+        }
     }
 }
 
-impl<T, S> Sink for LoopbackSwitch<S>
-where
-    T: Send,
-    S: Sink<Input = T>,
+impl<Sample: Send + Sync, const CHANNELS: usize, const SAMPLE_RATE: u32> Node
+    for LoopbackSwitch<Sample, CHANNELS, SAMPLE_RATE>
 {
-    type Input = T;
+    type Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
+    type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
 
-    fn push(&self, input: Self::Input) {
-        if self.enabled.load(Ordering::Relaxed) {
-            self.sink.push(input);
+    fn process(&self, input: Self::Input) -> Option<Self::Output> {
+        if self.enabled.load(Ordering::Acquire) {
+            Some(input)
+        } else {
+            None
         }
     }
 }

@@ -1,7 +1,26 @@
 //! Host management for multi-peer audio mixing.
 //!
-//! Manages per-host audio pipelines with jitter buffering and provides
-//! mixed output from all connected hosts.
+//! This module manages audio pipelines for multiple remote hosts (peers) and provides
+//! mixed output combining all their audio streams.
+//!
+//! # Architecture
+//!
+//! Each connected host gets its own [`JitterBuffer`] to handle network jitter and
+//! packet reordering. When audio is requested, frames from all hosts are pulled
+//! and mixed together into a single output stream.
+//!
+//! ```text
+//! Host A ──► JitterBuffer A ──┐
+//!                             │
+//! Host B ──► JitterBuffer B ──┼──► Mixer ──► Mixed Output
+//!                             │
+//! Host C ──► JitterBuffer C ──┘
+//! ```
+//!
+//! # Components
+//!
+//! - [`HostPipelineManager`] - Manages per-host jitter buffers and mixing
+//! - [`NetworkSource`] - A [`Source`] that pulls mixed audio from all hosts
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -10,7 +29,7 @@ use tracing::info;
 
 use crate::audio::frame::AudioFrame;
 use crate::audio::AudioSample;
-use crate::pipeline::node::{jitter_buffer, JitterBufferConsumer, JitterBufferProducer};
+use crate::pipeline::node::JitterBuffer;
 use crate::pipeline::{Sink, Source};
 use crate::state::{HostId, HostInfo};
 
@@ -18,8 +37,7 @@ const HOST_TIMEOUT: Duration = Duration::from_secs(5);
 const JITTER_BUFFER_CAPACITY: usize = 16;
 
 struct HostPipeline<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    producer: JitterBufferProducer<Sample, CHANNELS, SAMPLE_RATE>,
-    consumer: JitterBufferConsumer<Sample, CHANNELS, SAMPLE_RATE>,
+    jitter_buffer: JitterBuffer<Sample, CHANNELS, SAMPLE_RATE>,
     info: HostInfo,
 }
 
@@ -27,15 +45,28 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     HostPipeline<Sample, CHANNELS, SAMPLE_RATE>
 {
     fn new(host_id: HostId) -> Self {
-        let (producer, consumer) = jitter_buffer(JITTER_BUFFER_CAPACITY);
         Self {
-            producer,
-            consumer,
+            jitter_buffer: JitterBuffer::new(JITTER_BUFFER_CAPACITY),
             info: HostInfo::new(host_id),
         }
     }
 }
 
+/// Manages audio pipelines for multiple remote hosts.
+///
+/// Each host has its own jitter buffer to compensate for network delay and packet
+/// reordering. The manager handles:
+///
+/// - Creating pipelines for new hosts on first packet
+/// - Routing incoming frames to the correct host's buffer
+/// - Mixing audio from all hosts into a single output stream
+/// - Cleaning up stale hosts that haven't sent data recently
+///
+/// # Thread Safety
+///
+/// This struct is typically wrapped in `Arc<Mutex<...>>` and shared between:
+/// - The network receiver thread (pushes frames)
+/// - The audio output thread (pulls mixed frames via [`NetworkSource`])
 pub struct HostPipelineManager<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     pipelines: HashMap<HostId, HostPipeline<Sample, CHANNELS, SAMPLE_RATE>>,
 }
@@ -49,6 +80,9 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         }
     }
 
+    /// Pushes an audio frame from a specific host into its jitter buffer.
+    ///
+    /// If this is the first frame from this host, a new pipeline is created.
     pub fn push_frame(
         &mut self,
         host_id: HostId,
@@ -59,16 +93,20 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             HostPipeline::new(host_id)
         });
         pipeline.info.last_seen = Instant::now();
-        pipeline.producer.push(frame);
+        pipeline.jitter_buffer.push(frame);
     }
 
+    /// Pulls one frame from each host's jitter buffer and mixes them together.
+    ///
+    /// Returns `None` if no hosts have data available. The mixing is done by
+    /// summing normalized sample values from all hosts.
     pub fn pull_and_mix(&mut self) -> Option<AudioFrame<Sample, CHANNELS, SAMPLE_RATE>> {
         let mut mixed_samples: Option<Vec<Sample>> = None;
         let mut result_seq = 0u64;
         let mut result_timestamp = 0u64;
 
         for pipeline in self.pipelines.values_mut() {
-            if let Some(frame) = pipeline.consumer.pull() {
+            if let Some(frame) = pipeline.jitter_buffer.pull() {
                 result_seq = result_seq.max(frame.sequence_number);
                 result_timestamp = result_timestamp.max(frame.timestamp);
 
@@ -92,6 +130,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         mixed_samples.and_then(|samples| AudioFrame::new(result_seq, samples).ok())
     }
 
+    /// Removes hosts that haven't sent data within the timeout period.
     pub fn cleanup_stale_hosts(&mut self) {
         let now = Instant::now();
         self.pipelines.retain(|host_id, pipeline| {
@@ -130,6 +169,13 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Default
     }
 }
 
+/// A [`Source`] that provides mixed audio from all connected hosts.
+///
+/// Each call to [`pull()`](Source::pull) returns a single audio frame that combines
+/// audio from all hosts managed by the underlying [`HostPipelineManager`].
+/// Per-host jitter buffering is applied before mixing.
+///
+/// Returns `None` when no hosts have data available.
 pub struct NetworkSource<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     pipeline_manager: Arc<Mutex<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>>,
 }

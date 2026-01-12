@@ -1,11 +1,31 @@
-//! Party orchestration and domain logic.
+//! Audio sharing orchestration.
 //!
-//! This module coordinates the audio sharing functionality:
-//! - `host` - Per-host pipeline management and mixing
-//! - `codec` - Audio frame encoding/decoding
-//! - `combinator` - Pipeline routing utilities (tee, switch, mix)
-//! - `network_node` - Network transport orchestration
-//! - `party` - Main orchestrator
+//! This module coordinates the complete audio sharing pipeline, connecting
+//! microphone input, network transport, and speaker output.
+//!
+//! # Architecture
+//!
+//! ```text
+//! ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+//! │  Microphone │ ──► │ FramePacker │ ──► │NetworkSender│ ──► Network
+//! └─────────────┘     └─────────────┘     └─────────────┘
+//!        │
+//!        └──► Loopback (optional) ──┐
+//!                                   │
+//! Network ──► ┌─────────────────┐   │   ┌─────────────┐
+//!             │HostPipelineManager│ ──┼─► │   Speaker   │
+//!             │  (per-host jitter │   │   └─────────────┘
+//!             │   bufs + mixing)  │ ◄─┘
+//!             └─────────────────┘
+//! ```
+//!
+//! # Submodules
+//!
+//! - [`party`] - Main [`Party`] orchestrator that wires everything together
+//! - [`network`] - [`NetworkNode`] for managing network send/receive
+//! - [`host`] - [`HostPipelineManager`] for per-host jitter buffering and mixing
+//! - [`codec`] - Frame packing/unpacking between [`AudioBuffer`](crate::audio::AudioBuffer) and [`AudioFrame`](crate::audio::AudioFrame)
+//! - [`combinator`] - Pipeline routing utilities (tee, switch, mix)
 
 pub mod codec;
 pub mod combinator;

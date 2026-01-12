@@ -1,7 +1,16 @@
+//! Application state and configuration.
+//!
+//! This module contains shared state types used across the application:
+//!
+//! - [`AppState`] - Global application state (configs, connection status, etc.)
+//! - [`HostId`] / [`HostInfo`] - Remote peer identification and metadata
+//! - [`AudioConfig`] / [`NetworkConfig`] - Configuration structures
+
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 
+/// Unique identifier for a remote host, derived from their socket address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HostId(SocketAddr);
 

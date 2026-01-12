@@ -25,7 +25,7 @@
 pub mod jitter_buffer;
 pub mod simple_buffer;
 
-pub use jitter_buffer::{JitterBufferConsumer, JitterBufferProducer, jitter_buffer};
+pub use jitter_buffer::JitterBuffer;
 pub use simple_buffer::SimpleBuffer;
 
 use crate::pipeline::{PullPipeline, PushPipeline};

@@ -64,15 +64,18 @@ where
         let loopback_buffer: SimpleBuffer<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> =
             SimpleBuffer::new();
 
-        let loopback_sink =
-            LoopbackSwitch::new(loopback_buffer.clone(), self.state.loopback_enabled.clone());
+        // Mic -> FramePacker -> NetworkSink
+        //     -> LoopbackSwitch -> loopback_buffer
+        let _audio_input = AudioInput::new(Tee::new(
+            network_sink.get_data_from(FramePacker::<Sample, CHANNELS, SAMPLE_RATE>::new()),
+            loopback_buffer.clone().get_data_from(
+                LoopbackSwitch::<Sample, CHANNELS, SAMPLE_RATE>::new(
+                    self.state.loopback_enabled.clone(),
+                ),
+            ),
+        ));
 
-        let mic_to_network =
-            network_sink.get_data_from(FramePacker::<Sample, CHANNELS, SAMPLE_RATE>::new());
-        let mic_sink = Tee::new(mic_to_network, loopback_sink);
-
-        let _audio_input: AudioInput<_> = AudioInput::new(mic_sink);
-
+        // Network (with per-host jitter buffers) -> FrameUnpacker -> MixingSource -> Speaker
         let network_to_speaker =
             network_source.give_data_to(FrameUnpacker::<Sample, CHANNELS, SAMPLE_RATE>::new());
         let speaker_source: MixingSource<_, _, Sample, CHANNELS, SAMPLE_RATE> =

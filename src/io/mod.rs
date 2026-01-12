@@ -1,11 +1,10 @@
-//! Hardware I/O implementations.
+//! Hardware and network I/O.
 //!
-//! This module contains implementations that interact with hardware and OS resources:
-//! - Audio devices (microphone capture, speaker playback) via cpal
-//! - Network sockets (UDP multicast send/receive)
+//! This module provides concrete [`Sink`](crate::pipeline::Sink)/[`Source`](crate::pipeline::Source)
+//! implementations that interface with the outside world:
 //!
-//! These are concrete `Sink`/`Source` implementations that bridge the pipeline
-//! framework with real-world I/O.
+//! - [`AudioInput`] / [`AudioOutput`] - Microphone capture and speaker playback via cpal
+//! - [`NetworkSender`] / [`NetworkReceiver`] - UDP multicast for audio frame transport
 
 pub mod audio;
 pub mod network;
