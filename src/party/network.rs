@@ -51,17 +51,20 @@
 //! - Mixing audio from multiple peers into a single stream
 
 use std::marker::PhantomData;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use anyhow::Result;
-use tracing::error;
+use anyhow::{Context, Result};
+use socket2::{Domain, Protocol, Socket, Type};
+use tracing::info;
 
 use crate::audio::AudioSample;
 use crate::audio::frame::AudioFrame;
-use crate::io::{NetworkReceiver, NetworkSender};
+use crate::io::{NetworkReceiver, NetworkSender, MULTICAST_ADDR, MULTICAST_PORT, TTL};
 use crate::pipeline::{Sink, Source};
 use crate::state::AppState;
+use crate::ui::get_local_ip;
 
 use super::host::{HostPipelineManager, NetworkSource};
 
@@ -124,21 +127,76 @@ where
         pipeline_manager: Arc<Mutex<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>>,
         state: Arc<AppState>,
     ) -> Result<(
-        impl Sink<Input = AudioFrame<Sample, CHANNELS, SAMPLE_RATE>>,
-        impl Source<Output = AudioFrame<Sample, CHANNELS, SAMPLE_RATE>>,
+        impl Sink<Input = AudioFrame<Sample, CHANNELS, SAMPLE_RATE>> + 'static,
+        impl Source<Output = AudioFrame<Sample, CHANNELS, SAMPLE_RATE>> + 'static,
     )> {
-        let sender = NetworkSender::<Sample, CHANNELS, SAMPLE_RATE>::new()?;
+        let multicast_ip: Ipv4Addr = MULTICAST_ADDR
+            .parse()
+            .context("Invalid multicast address")?;
+        let multicast_addr = SocketAddr::new(IpAddr::V4(multicast_ip), MULTICAST_PORT);
+
+        // Create shared socket for both sending and receiving
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
+            .context("Failed to create socket")?;
+        socket
+            .set_reuse_address(true)
+            .context("Failed to set reuse address")?;
+        socket
+            .set_nonblocking(true)
+            .context("Failed to set non-blocking")?;
+        socket
+            .set_multicast_ttl_v4(TTL)
+            .context("Failed to set multicast TTL")?;
+        socket
+            .set_multicast_loop_v4(false)
+            .context("Failed to disable multicast loop")?;
+
+        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), MULTICAST_PORT);
+        socket
+            .bind(&bind_addr.into())
+            .context("Failed to bind socket")?;
+        socket
+            .join_multicast_v4(&multicast_ip, &Ipv4Addr::UNSPECIFIED)
+            .context("Failed to join multicast group")?;
+
+        let socket: UdpSocket = socket.into();
+
+        info!(
+            "Network socket initialized for multicast group {}:{}",
+            MULTICAST_ADDR, MULTICAST_PORT
+        );
+
+        // Clone socket for sender (keeps non-blocking for audio thread)
+        let send_socket = socket
+            .try_clone()
+            .context("Failed to clone socket for sender")?;
+
+        let sender = NetworkSender::<Sample, CHANNELS, SAMPLE_RATE>::new(send_socket, multicast_addr);
+
+        // Receiver socket should be blocking (it runs in its own thread)
+        socket
+            .set_nonblocking(false)
+            .context("Failed to set receiver socket to blocking")?;
+
+        // Get local IPs for filtering out our own packets
+        let local_ips = match get_local_ip() {
+            Ok(host_id) => vec![host_id.as_socket_addr().ip()],
+            Err(e) => {
+                info!("Could not determine local IP for self-filtering: {}", e);
+                vec![]
+            }
+        };
 
         let pipeline_manager_clone = pipeline_manager.clone();
         let state_clone = state.clone();
         let receiver_handle = thread::spawn(move || {
-            match NetworkReceiver::<Sample, CHANNELS, SAMPLE_RATE>::new(
+            let receiver = NetworkReceiver::<Sample, CHANNELS, SAMPLE_RATE>::new(
+                socket,
                 state_clone,
                 pipeline_manager_clone,
-            ) {
-                Ok(receiver) => receiver.run(),
-                Err(e) => error!("Failed to start network receiver: {}", e),
-            }
+                local_ips,
+            );
+            receiver.run();
         });
 
         self._receiver_handle = Some(receiver_handle);

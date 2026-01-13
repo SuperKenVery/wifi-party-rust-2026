@@ -20,9 +20,8 @@
 //! - TTL: `1` (local network only)
 
 use anyhow::{Context, Result};
-use socket2::{Domain, Protocol, Socket, Type};
 use std::marker::PhantomData;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -48,7 +47,7 @@ pub const TTL: u32 = 1;
 /// Send failures are logged but don't propagate errors - audio streaming
 /// continues even if individual packets are lost (UDP is unreliable by design).
 pub struct NetworkSender<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    socket: Socket,
+    socket: UdpSocket,
     multicast_addr: SocketAddr,
     _marker: PhantomData<Sample>,
 }
@@ -56,34 +55,21 @@ pub struct NetworkSender<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> 
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     NetworkSender<Sample, CHANNELS, SAMPLE_RATE>
 {
-    pub fn new() -> Result<Self> {
-        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
-            .context("Failed to create socket")?;
-
-        socket
-            .set_nonblocking(true)
-            .context("Failed to set non-blocking")?;
-
-        socket
-            .set_multicast_ttl_v4(TTL)
-            .context("Failed to set multicast TTL")?;
-
-        let multicast_ip: Ipv4Addr = MULTICAST_ADDR
-            .parse()
-            .context("Invalid multicast address")?;
-
-        let multicast_addr = SocketAddr::new(IpAddr::V4(multicast_ip), MULTICAST_PORT);
-
+    /// Creates a new NetworkSender using the provided UDP socket.
+    ///
+    /// The caller is responsible for configuring the socket appropriately
+    /// (e.g., setting non-blocking mode, multicast TTL).
+    pub fn new(socket: UdpSocket, multicast_addr: SocketAddr) -> Self {
         info!(
-            "Network sender initialized for {}:{}",
-            MULTICAST_ADDR, MULTICAST_PORT
+            "Network sender initialized for {:?}",
+            multicast_addr
         );
 
-        Ok(Self {
+        Self {
             socket,
             multicast_addr,
             _marker: PhantomData,
-        })
+        }
     }
 }
 
@@ -101,10 +87,7 @@ where
     fn send_frame(&self, frame: &AudioFrame<Sample, CHANNELS, SAMPLE_RATE>) {
         match rkyv::to_bytes::<rkyv::rancor::Error>(frame) {
             Ok(serialized) => {
-                match self
-                    .socket
-                    .send_to(&serialized, &self.multicast_addr.into())
-                {
+                match self.socket.send_to(&serialized, self.multicast_addr) {
                     Ok(bytes_sent) => {
                         if bytes_sent != serialized.len() {
                             warn!("Partial send: {} of {} bytes", bytes_sent, serialized.len());
@@ -149,53 +132,41 @@ where
 /// continuously listening for UDP multicast packets. Each received frame is:
 ///
 /// 1. Deserialized from `rkyv` format
-/// 2. Filtered (packets from self are ignored)
+/// 2. Filtered (packets from self are ignored based on source IP)
 /// 3. Dispatched to the appropriate host's jitter buffer via [`HostPipelineManager`]
 ///
 /// The receiver also periodically cleans up stale host pipelines.
 pub struct NetworkReceiver<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    socket: std::net::UdpSocket,
+    socket: UdpSocket,
     state: Arc<AppState>,
     pipeline_manager: Arc<Mutex<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>>,
+    local_ips: Vec<std::net::IpAddr>,
 }
 
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     NetworkReceiver<Sample, CHANNELS, SAMPLE_RATE>
 {
+    /// Creates a new NetworkReceiver using the provided UDP socket.
+    ///
+    /// The caller is responsible for configuring the socket appropriately
+    /// (e.g., binding, joining multicast group, setting options).
+    ///
+    /// `local_ips` should contain all IP addresses of the local machine,
+    /// used to filter out packets originating from this device.
     pub fn new(
+        socket: UdpSocket,
         state: Arc<AppState>,
         pipeline_manager: Arc<Mutex<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>>,
-    ) -> Result<Self> {
-        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
-            .context("Failed to create socket")?;
+        local_ips: Vec<std::net::IpAddr>,
+    ) -> Self {
+        info!("Network receiver initialized, local IPs: {:?}", local_ips);
 
-        socket
-            .set_reuse_address(true)
-            .context("Failed to set reuse address")?;
-
-        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), MULTICAST_PORT);
-        socket
-            .bind(&bind_addr.into())
-            .context("Failed to bind socket")?;
-
-        let multicast_ip: Ipv4Addr = MULTICAST_ADDR
-            .parse()
-            .context("Invalid multicast address")?;
-
-        socket
-            .join_multicast_v4(&multicast_ip, &Ipv4Addr::UNSPECIFIED)
-            .context("Failed to join multicast group")?;
-
-        info!(
-            "Network receiver joined multicast group {}:{}",
-            MULTICAST_ADDR, MULTICAST_PORT
-        );
-
-        Ok(Self {
-            socket: socket.into(),
+        Self {
+            socket,
             state,
             pipeline_manager,
-        })
+            local_ips,
+        }
     }
 }
 
@@ -235,22 +206,17 @@ where
             .recv_from(buf)
             .context("Failed to receive UDP packet")?;
 
+        // Filter out packets from our own device (router may echo multicast back to us)
+        if self.local_ips.contains(&source_addr.ip()) {
+            return Ok(());
+        }
+
         let received_data = &buf[..size];
         let host_id = HostId::from(source_addr);
 
         let frame: AudioFrame<Sample, CHANNELS, SAMPLE_RATE> =
             unsafe { rkyv::from_bytes_unchecked(received_data) }
                 .map_err(|e| anyhow::anyhow!("Deserialization error: {:?}", e))?;
-
-        // Ignore packets from self
-        {
-            let local_host_id = self.state.local_host_id.lock().unwrap();
-            if let Some(local_id) = *local_host_id {
-                if host_id == local_id {
-                    return Ok(());
-                }
-            }
-        }
 
         debug!(
             "Receive packet from {:?}, seq num {}, is_v4: {}",

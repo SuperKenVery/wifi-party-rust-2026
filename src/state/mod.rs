@@ -120,7 +120,6 @@ pub struct AppState {
     pub mic_audio_level: Arc<Mutex<f32>>,
     pub loopback_enabled: Arc<AtomicBool>,
     pub sequence_number: Arc<AtomicU64>,
-    pub local_host_id: Arc<Mutex<Option<HostId>>>,
     pub host_infos: Arc<Mutex<Vec<HostInfo>>>,
 }
 
@@ -133,9 +132,8 @@ impl AppState {
             mic_muted: Arc::new(AtomicBool::new(false)),
             mic_volume: Arc::new(Mutex::new(1.0)),
             mic_audio_level: Arc::new(Mutex::new(0.0)),
-            loopback_enabled: Arc::new(AtomicBool::new(false)),
+            loopback_enabled: Arc::new(AtomicBool::new(true)),
             sequence_number: Arc::new(AtomicU64::new(0)),
-            local_host_id: Arc::new(Mutex::new(None)),
             host_infos: Arc::new(Mutex::new(Vec::new())),
         }
     }

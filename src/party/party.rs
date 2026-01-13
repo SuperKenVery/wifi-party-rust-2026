@@ -38,7 +38,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     }
 }
 
-impl<Sample: AudioSample + Clone, const CHANNELS: usize, const SAMPLE_RATE: u32>
+impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     Party<Sample, CHANNELS, SAMPLE_RATE>
 where
     AudioFrame<Sample, CHANNELS, SAMPLE_RATE>: for<'a> rkyv::Serialize<
@@ -66,7 +66,7 @@ where
 
         // Mic -> FramePacker -> NetworkSink
         //     -> LoopbackSwitch -> loopback_buffer
-        let _audio_input = AudioInput::new(Tee::new(
+        let mut audio_input = AudioInput::new(Tee::new(
             network_sink.get_data_from(FramePacker::<Sample, CHANNELS, SAMPLE_RATE>::new()),
             loopback_buffer.clone().get_data_from(
                 LoopbackSwitch::<Sample, CHANNELS, SAMPLE_RATE>::new(
@@ -74,6 +74,7 @@ where
                 ),
             ),
         ));
+        audio_input.start()?;
 
         // Network (with per-host jitter buffers) -> FrameUnpacker -> MixingSource -> Speaker
         let network_to_speaker =
@@ -81,7 +82,8 @@ where
         let speaker_source: MixingSource<_, _, Sample, CHANNELS, SAMPLE_RATE> =
             MixingSource::new(network_to_speaker, loopback_buffer);
 
-        let _audio_output: AudioOutput<_> = AudioOutput::new(speaker_source);
+        let mut audio_output: AudioOutput<_> = AudioOutput::new(speaker_source);
+        audio_output.start()?;
 
         info!("Party pipelines configured successfully");
 

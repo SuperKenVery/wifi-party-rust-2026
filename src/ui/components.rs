@@ -13,7 +13,6 @@ pub fn App() -> Element {
     let mut mic_volume = use_signal(|| 1.0f32);
     let mut mic_audio_level = use_signal(|| 0.0f32);
     let mut loopback_enabled = use_signal(|| false);
-    let mut local_host_id = use_signal(|| String::from("Unknown"));
 
     // Poll state periodically
     use_effect(move || {
@@ -51,13 +50,6 @@ pub fn App() -> Element {
                         .load(std::sync::atomic::Ordering::Relaxed),
                 );
 
-                // Update local host ID
-                if let Ok(id_opt) = state.local_host_id.lock() {
-                    if let Some(id) = *id_opt {
-                        local_host_id.set(id.to_string());
-                    }
-                }
-
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
         });
@@ -70,7 +62,6 @@ pub fn App() -> Element {
             // Header
             Header {
                 connection_status: connection_status(),
-                local_host_id: local_host_id(),
                 participant_count: active_hosts().len(),
             }
 
@@ -95,11 +86,7 @@ pub fn App() -> Element {
 
 #[allow(non_snake_case)]
 #[component]
-fn Header(
-    connection_status: ConnectionStatus,
-    local_host_id: String,
-    participant_count: usize,
-) -> Element {
+fn Header(connection_status: ConnectionStatus, participant_count: usize) -> Element {
     let status_text = match connection_status {
         ConnectionStatus::Connected => "Connected",
         ConnectionStatus::Disconnected => "Disconnected",
@@ -127,10 +114,7 @@ fn Header(
                     span { class: status_color, "{status_text}" }
                 }
 
-                div {
-                    span { class: "text-gray-400", "Host ID: " }
-                    span { class: "font-mono", "{local_host_id}" }
-                }
+
 
                 div {
                     span { class: "text-gray-400", "Participants: " }

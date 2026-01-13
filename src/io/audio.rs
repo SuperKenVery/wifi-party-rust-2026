@@ -2,14 +2,14 @@
 //!
 //! Provides `AudioInput` for microphone capture and `AudioOutput` for speaker playback.
 
-use crate::audio::frame::AudioBuffer;
 use crate::audio::AudioSample;
+use crate::audio::frame::AudioBuffer;
 use crate::pipeline::{Sink, Source};
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, SampleRate, StreamConfig};
 use std::sync::Arc;
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 pub struct AudioInput<S> {
     sink: Arc<S>,
@@ -34,6 +34,7 @@ impl<S> AudioInput<S> {
             .default_input_device()
             .context("No input device available")?;
         let input_config = input_device.default_input_config()?;
+        debug!("Default input config: {input_config:#?}");
 
         let config = StreamConfig {
             channels: CHANNELS as u16,
@@ -88,6 +89,7 @@ impl<S> AudioOutput<S> {
             .default_output_device()
             .context("No output device available")?;
         let output_config = output_device.default_output_config()?;
+        debug!("Default output config: {output_config:#?}");
 
         let config = StreamConfig {
             channels: CHANNELS as u16,
@@ -102,16 +104,20 @@ impl<S> AudioOutput<S> {
         };
 
         let source = self.source.clone();
+        debug!("Building output stream");
         let stream = output_device.build_output_stream(
             &config,
             move |data: &mut [Sample], _: &cpal::OutputCallbackInfo| {
+                debug!("AudioOutput: Callback called");
                 if let Some(frame) = source.pull() {
+                    debug!("AudioOutput: Pulled some data");
                     for (i, sample) in frame.data().iter().enumerate() {
                         if i < data.len() {
                             data[i] = *sample;
                         }
                     }
                 } else {
+                    debug!("AudioOutput: No data, silence");
                     for sample in data {
                         *sample = Sample::silence();
                     }

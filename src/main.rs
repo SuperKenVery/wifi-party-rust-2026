@@ -24,7 +24,7 @@ use anyhow::{Context, Result};
 use party::Party;
 use state::AppState;
 use std::sync::Arc;
-use tracing::{error, info, Level};
+use tracing::{Level, error, info};
 
 use crate::ui::get_local_ip;
 
@@ -37,23 +37,10 @@ fn main() {
     }
 }
 
-fn setup_state() -> Result<Arc<AppState>> {
-    let state = Arc::new(AppState::new());
-
-    if let Ok(local_ip) = get_local_ip() {
-        info!("Local IP address: {}", local_ip.to_string());
-        *state.local_host_id.lock().unwrap() = Some(local_ip);
-    } else {
-        error!("Failed to determine local IP address");
-    }
-
-    Ok(state)
-}
-
 fn run() -> Result<()> {
     info!("Starting Wi-Fi Party KTV...");
 
-    let state = setup_state().context("Failed to setup application state")?;
+    let state = Arc::new(AppState::new());
 
     let mut party = Party::<f32, 2, 48000>::new(state.clone());
     party.run().context("Failed to start Party")?;
