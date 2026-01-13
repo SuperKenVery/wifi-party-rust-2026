@@ -29,6 +29,7 @@ use tracing::info;
 
 use crate::audio::frame::AudioFrame;
 use crate::audio::AudioSample;
+use crate::pipeline::graph::{PipelineGraph, Inspectable};
 use crate::pipeline::node::JitterBuffer;
 use crate::pipeline::{Sink, Source};
 use crate::state::{HostId, HostInfo};
@@ -176,6 +177,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Default
 /// Per-host jitter buffering is applied before mixing.
 ///
 /// Returns `None` when no hosts have data available.
+#[derive(Clone)]
 pub struct NetworkSource<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     pipeline_manager: Arc<Mutex<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>>,
 }
@@ -190,12 +192,29 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     }
 }
 
+impl<Sample: Send + Sync, const CHANNELS: usize, const SAMPLE_RATE: u32> Inspectable
+    for NetworkSource<Sample, CHANNELS, SAMPLE_RATE>
+{
+    fn get_visual(&self, graph: &mut PipelineGraph) -> String {
+        let id = format!("{:p}", self);
+        let svg = format!(
+            r#"<div class="w-full h-full bg-indigo-900 border border-indigo-600 rounded flex flex-col items-center justify-center shadow-lg">
+                <div class="text-xs font-bold text-indigo-200">Net Source</div>
+            </div>"#
+        );
+        graph.add_node(id.clone(), svg);
+        id
+    }
+}
+
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Source
     for NetworkSource<Sample, CHANNELS, SAMPLE_RATE>
 {
     type Output = AudioFrame<Sample, CHANNELS, SAMPLE_RATE>;
 
     fn pull(&self) -> Option<Self::Output> {
-        self.pipeline_manager.lock().unwrap().pull_and_mix()
+        let mut manager = self.pipeline_manager.lock().unwrap();
+        manager.cleanup_stale_hosts();
+        manager.pull_and_mix()
     }
 }

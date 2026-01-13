@@ -1,5 +1,7 @@
+use crate::pipeline::graph::PipelineGraph;
 use crate::state::{AppState, ConnectionStatus, HostInfo};
 use dioxus::prelude::*;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[allow(non_snake_case)]
@@ -58,6 +60,11 @@ pub fn App() -> Element {
                     }
                 }
 
+                // Force graph redraw if needed (though graph structure is static, stats might update)
+                // In a real implementation we would have a separate signal for graph stats
+                // For now, let's just trigger a re-render if the graph lock is available
+                // (Note: This is a bit hacky, normally we'd clone specific stats)
+
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
         });
@@ -86,6 +93,9 @@ pub fn App() -> Element {
             ParticipantsSection {
                 hosts: active_hosts(),
             }
+
+            // Pipeline Visualization
+            PipelineVisualization {}
 
             // Statistics Panel
             StatisticsPanel {}
@@ -359,6 +369,183 @@ fn StatisticsPanel() -> Element {
                     div { class: "text-sm text-gray-400", "Jitter" }
                     div { class: "text-2xl font-bold", "2ms" }
                 }
+            }
+        }
+    }
+}
+
+#[allow(non_snake_case)]
+#[component]
+fn PipelineVisualization() -> Element {
+    let state_arc = use_context::<Arc<AppState>>();
+    
+    // We need to subscribe to graph updates. 
+    // Since graph is in Arc<Mutex<...>>, we can just poll it.
+    let mut graph_signal = use_signal(|| PipelineGraph::default());
+    
+    use_effect(move || {
+        let state = state_arc.clone();
+        spawn(async move {
+            loop {
+                // Update graph visualization
+                if let Ok(mut g) = state.pipeline_graph.lock() {
+                    g.clear();
+                    if let Ok(pipelines) = state.pipelines.lock() {
+                        for pipeline in pipelines.iter() {
+                            pipeline.get_visual(&mut g);
+                        }
+                    }
+                    graph_signal.set(g.clone());
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+        });
+    });
+
+    let graph = graph_signal();
+    
+    // Calculate positions using a layered layout (Topological Sort-ish)
+    let mut positions = HashMap::new();
+    let node_width = 120;
+    let node_height = 60;
+    let x_spacing = 200;
+    let y_spacing = 100;
+
+    // 1. Build Adjacency and In-Degree
+    let mut adj: HashMap<&String, Vec<&String>> = HashMap::new();
+    let mut in_degree: HashMap<&String, usize> = HashMap::new();
+    
+    for node in &graph.nodes {
+        in_degree.insert(&node.id, 0);
+        adj.insert(&node.id, Vec::new());
+    }
+    
+    for edge in &graph.edges {
+        adj.entry(&edge.from).or_default().push(&edge.to);
+        *in_degree.entry(&edge.to).or_insert(0) += 1;
+    }
+
+    // 2. Assign Layers
+    let mut layers: HashMap<&String, usize> = HashMap::new();
+    let mut queue = std::collections::VecDeque::new();
+    
+    // Initialize queue with sources (in-degree 0)
+    for (id, &deg) in &in_degree {
+        if deg == 0 {
+            queue.push_back((*id, 0));
+            layers.insert(*id, 0);
+        }
+    }
+    
+    // Fallback for cycles: if queue is empty but nodes exist, pick the first one
+    if queue.is_empty() && !graph.nodes.is_empty() {
+        if let Some(node) = graph.nodes.first() {
+             queue.push_back((&node.id, 0));
+             layers.insert(&node.id, 0);
+        }
+    }
+
+    // Process queue
+    let mut steps = 0;
+    while let Some((u, d)) = queue.pop_front() {
+        steps += 1;
+        if steps > 1000 { break; } // Safety break
+
+        if let Some(neighbors) = adj.get(u) {
+            for &v in neighbors {
+                let current_layer = *layers.get(v).unwrap_or(&0);
+                // If we found a longer path to v, push it further right
+                if d + 1 > current_layer {
+                    layers.insert(v, d + 1);
+                    queue.push_back((v, d + 1));
+                }
+            }
+        }
+    }
+    
+    // 3. Group by layer and sort for stability
+    let mut nodes_by_layer: HashMap<usize, Vec<&String>> = HashMap::new();
+    for node in &graph.nodes {
+        let l = *layers.get(&node.id).unwrap_or(&0);
+        nodes_by_layer.entry(l).or_default().push(&node.id);
+    }
+    
+    // 4. Assign Coordinates
+    for (layer, ids) in nodes_by_layer.iter_mut() {
+        ids.sort(); // Sort by ID for deterministic layout
+        for (idx, id) in ids.iter().enumerate() {
+            let x = layer * x_spacing + 50;
+            let y = idx * y_spacing + 50;
+            positions.insert((*id).clone(), (x, y));
+        }
+    }
+
+    // Generate edges
+    let edges = graph.edges.iter().map(|edge| {
+        if let (Some(&(x1, y1)), Some(&(x2, y2))) = (positions.get(&edge.from), positions.get(&edge.to)) {
+            // Calculate center points
+            let start_x = x1 + node_width / 2;
+            let start_y = y1 + node_height / 2;
+            let end_x = x2 + node_width / 2;
+            let end_y = y2 + node_height / 2;
+            
+            rsx! {
+                line {
+                    x1: "{start_x}",
+                    y1: "{start_y}",
+                    x2: "{end_x}",
+                    y2: "{end_y}",
+                    stroke: "#6B7280", // gray-500
+                    stroke_width: "2",
+                    marker_end: "url(#arrowhead)"
+                }
+            }
+        } else {
+            rsx! {}
+        }
+    });
+    
+    // Generate nodes
+    let nodes = graph.nodes.iter().map(|node| {
+        let (x, y) = positions.get(&node.id).unwrap_or(&(0, 0));
+        
+        rsx! {
+            g {
+                key: "{node.id}",
+                foreignObject {
+                    x: "{x}",
+                    y: "{y}",
+                    width: "{node_width}",
+                    height: "{node_height}",
+                    dangerous_inner_html: "{node.content}"
+                }
+            }
+        }
+    });
+
+    rsx! {
+        div {
+            class: "flex-1 bg-gray-900 p-4 rounded-lg shadow-inner overflow-hidden relative",
+            svg {
+                width: "100%",
+                height: "100%",
+                view_box: "0 0 800 600",
+                defs {
+                    marker {
+                        id: "arrowhead",
+                        marker_width: "10",
+                        marker_height: "7",
+                        ref_x: "10",
+                        ref_y: "3.5",
+                        orient: "auto",
+                        polygon {
+                            points: "0 0, 10 3.5, 0 7",
+                            fill: "#6B7280"
+                        }
+                    }
+                }
+                {edges}
+                {nodes}
             }
         }
     }

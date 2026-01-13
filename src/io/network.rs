@@ -30,6 +30,7 @@ use tracing::{debug, info, warn};
 use crate::audio::AudioSample;
 use crate::audio::frame::AudioFrame;
 use crate::party::host::HostPipelineManager;
+use crate::pipeline::graph::{PipelineGraph, Inspectable};
 use crate::pipeline::Sink;
 use crate::state::{AppState, ConnectionStatus, HostId};
 use std::sync::Mutex;
@@ -47,8 +48,9 @@ pub const TTL: u32 = 1;
 ///
 /// Send failures are logged but don't propagate errors - audio streaming
 /// continues even if individual packets are lost (UDP is unreliable by design).
+#[derive(Clone)]
 pub struct NetworkSender<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    socket: Socket,
+    socket: Arc<Socket>,
     multicast_addr: SocketAddr,
     _marker: PhantomData<Sample>,
 }
@@ -80,7 +82,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         );
 
         Ok(Self {
-            socket,
+            socket: Arc::new(socket),
             multicast_addr,
             _marker: PhantomData,
         })
@@ -122,6 +124,19 @@ where
                 warn!("Failed to serialize frame: {}", e);
             }
         }
+    }
+}
+
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Inspectable
+    for NetworkSender<Sample, CHANNELS, SAMPLE_RATE>
+{
+    fn get_visual(&self, graph: &mut PipelineGraph) -> String {
+        let id = format!("{:p}", self);
+        let svg = format!(
+            r#"<div class="node-base"><div class="node-header">Net Sender</div></div>"#
+        );
+        graph.add_node(id.clone(), svg);
+        id
     }
 }
 

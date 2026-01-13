@@ -12,7 +12,8 @@ use crate::audio::AudioSample;
 use crate::audio::frame::{AudioBuffer, AudioFrame};
 use crate::io::{AudioInput, AudioOutput};
 use crate::pipeline::node::SimpleBuffer;
-use crate::pipeline::{Sink, Source};
+use crate::pipeline::{Node, Sink, Source};
+use crate::pipeline::graph::Inspectable;
 use crate::state::AppState;
 
 use super::codec::{FramePacker, FrameUnpacker};
@@ -64,23 +65,34 @@ where
         let loopback_buffer: SimpleBuffer<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> =
             SimpleBuffer::new();
 
-        // Mic -> FramePacker -> NetworkSink
-        //     -> LoopbackSwitch -> loopback_buffer
-        let _audio_input = AudioInput::new(Tee::new(
-            network_sink.get_data_from(FramePacker::<Sample, CHANNELS, SAMPLE_RATE>::new()),
-            loopback_buffer.clone().get_data_from(
-                LoopbackSwitch::<Sample, CHANNELS, SAMPLE_RATE>::new(
-                    self.state.loopback_enabled.clone(),
-                ),
+        // Build Input Pipeline
+        let gain = crate::pipeline::effect::Gain::<Sample, CHANNELS, SAMPLE_RATE>::new(Sample::from_f64_normalized(0.8));
+        let packer_pipeline = network_sink
+            .get_data_from(FramePacker::<Sample, CHANNELS, SAMPLE_RATE>::new())
+            .get_data_from(gain.clone());
+        
+        let loopback_pipeline = loopback_buffer.clone().get_data_from(
+            LoopbackSwitch::<Sample, CHANNELS, SAMPLE_RATE>::new(
+                self.state.loopback_enabled.clone(),
             ),
-        ));
+        );
+        let input_tee = Tee::new(packer_pipeline, loopback_pipeline);
 
-        // Network (with per-host jitter buffers) -> FrameUnpacker -> MixingSource -> Speaker
+        // Build Output Pipeline
         let network_to_speaker =
             network_source.give_data_to(FrameUnpacker::<Sample, CHANNELS, SAMPLE_RATE>::new());
         let speaker_source: MixingSource<_, _, Sample, CHANNELS, SAMPLE_RATE> =
             MixingSource::new(network_to_speaker, loopback_buffer);
 
+        // Store pipelines for visualization
+        {
+            let mut pipelines = self.state.pipelines.lock().unwrap();
+            pipelines.push(Arc::new(input_tee.clone()));
+            pipelines.push(Arc::new(speaker_source.clone()));
+        }
+        
+        // Spawn Pipeline Tasks
+        let _audio_input = AudioInput::new(input_tee);
         let _audio_output: AudioOutput<_> = AudioOutput::new(speaker_source);
 
         info!("Party pipelines configured successfully");

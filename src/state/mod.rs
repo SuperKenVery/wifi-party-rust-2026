@@ -6,6 +6,7 @@
 //! - [`HostId`] / [`HostInfo`] - Remote peer identification and metadata
 //! - [`AudioConfig`] / [`NetworkConfig`] - Configuration structures
 
+use crate::pipeline::graph::{PipelineGraph, Inspectable};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
@@ -122,6 +123,9 @@ pub struct AppState {
     pub sequence_number: Arc<AtomicU64>,
     pub local_host_id: Arc<Mutex<Option<HostId>>>,
     pub host_infos: Arc<Mutex<Vec<HostInfo>>>,
+    pub pipeline_graph: Arc<Mutex<PipelineGraph>>,
+    // Store active pipelines for visualization
+    pub pipelines: Arc<Mutex<Vec<Arc<dyn Inspectable>>>>,
 }
 
 impl AppState {
@@ -137,6 +141,8 @@ impl AppState {
             sequence_number: Arc::new(AtomicU64::new(0)),
             local_host_id: Arc::new(Mutex::new(None)),
             host_infos: Arc::new(Mutex::new(Vec::new())),
+            pipeline_graph: Arc::new(Mutex::new(PipelineGraph::new())),
+            pipelines: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }

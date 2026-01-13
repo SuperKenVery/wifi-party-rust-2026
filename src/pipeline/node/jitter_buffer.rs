@@ -6,6 +6,7 @@
 use super::{Sink, Source};
 use crate::audio::frame::AudioFrame;
 use crate::audio::AudioSample;
+use crate::pipeline::graph::{PipelineGraph, Inspectable};
 use crossbeam::atomic::AtomicCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -112,6 +113,22 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         let write_seq = self.write_seq.load(Ordering::Acquire);
         let read_seq = self.read_seq.load(Ordering::Acquire);
         write_seq.saturating_sub(read_seq)
+    }
+}
+
+impl<Sample: Send + Sync, const CHANNELS: usize, const SAMPLE_RATE: u32> Inspectable
+    for JitterBuffer<Sample, CHANNELS, SAMPLE_RATE>
+{
+    fn get_visual(&self, graph: &mut PipelineGraph) -> String {
+        let id = format!("{:p}", self);
+        // We could show queue length here if we had access to it easily without locking
+        let svg = format!(
+            r#"<div class="w-full h-full bg-orange-900 border border-orange-600 rounded flex flex-col items-center justify-center shadow-lg">
+                <div class="text-xs font-bold text-orange-200">Jitter Buf</div>
+            </div>"#
+        );
+        graph.add_node(id.clone(), svg);
+        id
     }
 }
 

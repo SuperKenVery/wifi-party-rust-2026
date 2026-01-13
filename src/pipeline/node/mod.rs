@@ -28,16 +28,17 @@ pub mod simple_buffer;
 pub use jitter_buffer::JitterBuffer;
 pub use simple_buffer::SimpleBuffer;
 
+use crate::pipeline::graph::{PipelineGraph, Inspectable};
 use crate::pipeline::{PullPipeline, PushPipeline};
 
-pub trait Node: Send + Sync {
+pub trait Node: Send + Sync + Inspectable {
     type Input;
     type Output;
 
     fn process(&self, input: Self::Input) -> Option<Self::Output>;
 }
 
-pub trait Source: Send + Sync + Sized {
+pub trait Source: Send + Sync + Sized + Inspectable {
     type Output;
 
     fn pull(&self) -> Option<Self::Output>;
@@ -47,7 +48,7 @@ pub trait Source: Send + Sync + Sized {
     }
 }
 
-pub trait Sink: Send + Sync + Sized {
+pub trait Sink: Send + Sync + Sized + Inspectable {
     type Input;
 
     fn push(&self, input: Self::Input);

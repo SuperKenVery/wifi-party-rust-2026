@@ -3,6 +3,7 @@
 //! This module provides [`PullPipeline`] and [`PushPipeline`] which are used
 //! to compose nodes into processing chains.
 
+use crate::pipeline::graph::{PipelineGraph, Inspectable};
 use crate::pipeline::node::{Node, Sink, Source};
 
 /// A pull-based pipeline that chains a source with a processing node.
@@ -11,6 +12,7 @@ use crate::pipeline::node::{Node, Sink, Source};
 /// also implements [`Source`], allowing further chaining.
 ///
 /// Data flows from source through the node when [`Source::pull`] is called.
+#[derive(Clone)]
 pub struct PullPipeline<S, N> {
     source: S,
     node: N,
@@ -35,12 +37,26 @@ where
     }
 }
 
+impl<S, N> Inspectable for PullPipeline<S, N>
+where
+    S: Source,
+    N: Node<Input = S::Output>,
+{
+    fn get_visual(&self, graph: &mut PipelineGraph) -> String {
+        let source_id = self.source.get_visual(graph);
+        let node_id = self.node.get_visual(graph);
+        graph.add_edge(source_id, node_id.clone(), None);
+        node_id
+    }
+}
+
 /// A push-based pipeline that chains a processing node with a sink.
 ///
 /// Created by calling [`Sink::get_data_from`] on a sink. The resulting pipeline
 /// also implements [`Sink`], allowing further chaining.
 ///
 /// Data flows through the node into the sink when [`Sink::push`] is called.
+#[derive(Clone)]
 pub struct PushPipeline<N, S> {
     node: N,
     sink: S,
@@ -63,5 +79,18 @@ where
         if let Some(output) = self.node.process(input) {
             self.sink.push(output);
         }
+    }
+}
+
+impl<N, S> Inspectable for PushPipeline<N, S>
+where
+    N: Node,
+    S: Sink<Input = N::Output>,
+{
+    fn get_visual(&self, graph: &mut PipelineGraph) -> String {
+        let node_id = self.node.get_visual(graph);
+        let sink_id = self.sink.get_visual(graph);
+        graph.add_edge(node_id.clone(), sink_id, None);
+        node_id
     }
 }

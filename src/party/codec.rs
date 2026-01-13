@@ -6,10 +6,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::audio::AudioSample;
 use crate::audio::frame::{AudioBuffer, AudioFrame};
+use crate::pipeline::graph::{PipelineGraph, Inspectable};
 use crate::pipeline::Node;
 
+#[derive(Clone)]
 pub struct FramePacker<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    sequence_number: AtomicU64,
+    sequence_number: std::sync::Arc<AtomicU64>,
     _marker: std::marker::PhantomData<Sample>,
 }
 
@@ -18,7 +20,7 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 {
     pub fn new() -> Self {
         Self {
-            sequence_number: AtomicU64::new(0),
+            sequence_number: std::sync::Arc::new(AtomicU64::new(0)),
             _marker: std::marker::PhantomData,
         }
     }
@@ -29,6 +31,21 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Default
 {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<Sample: Send + Sync, const CHANNELS: usize, const SAMPLE_RATE: u32> Inspectable
+    for FramePacker<Sample, CHANNELS, SAMPLE_RATE>
+{
+    fn get_visual(&self, graph: &mut PipelineGraph) -> String {
+        let id = format!("{:p}", self);
+        let svg = format!(
+            r#"<div class="w-full h-full bg-blue-900 border border-blue-600 rounded flex flex-col items-center justify-center shadow-lg">
+                <div class="text-xs font-bold text-blue-200">Packer</div>
+            </div>"#
+        );
+        graph.add_node(id.clone(), svg);
+        id
     }
 }
 
@@ -46,6 +63,7 @@ where
     }
 }
 
+#[derive(Clone)]
 pub struct FrameUnpacker<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     _marker: std::marker::PhantomData<Sample>,
 }
@@ -65,6 +83,21 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Default
 {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<Sample: Send + Sync, const CHANNELS: usize, const SAMPLE_RATE: u32> Inspectable
+    for FrameUnpacker<Sample, CHANNELS, SAMPLE_RATE>
+{
+    fn get_visual(&self, graph: &mut PipelineGraph) -> String {
+        let id = format!("{:p}", self);
+        let svg = format!(
+            r#"<div class="w-full h-full bg-blue-900 border border-blue-600 rounded flex flex-col items-center justify-center shadow-lg">
+                <div class="text-xs font-bold text-blue-200">Unpacker</div>
+            </div>"#
+        );
+        graph.add_node(id.clone(), svg);
+        id
     }
 }
 

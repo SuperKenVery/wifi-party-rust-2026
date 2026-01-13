@@ -29,8 +29,10 @@
 //! - [`pipeline`] - Pipeline composition types
 
 pub mod effect;
+pub mod graph;
 pub mod node;
 pub mod pipeline;
 
+pub use graph::{PipelineGraph, Inspectable};
 pub use node::{Node, Sink, Source};
 pub use pipeline::{PullPipeline, PushPipeline};

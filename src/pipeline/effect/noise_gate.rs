@@ -2,6 +2,7 @@
 
 use crate::audio::frame::AudioBuffer;
 use crate::audio::sample::AudioSample;
+use crate::pipeline::graph::{PipelineGraph, Inspectable};
 use crate::pipeline::Node;
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -42,7 +43,22 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     }
 }
 
-impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Node
+impl<Sample: Send + Sync, const CHANNELS: usize, const SAMPLE_RATE: u32> Inspectable
+    for NoiseGate<Sample, CHANNELS, SAMPLE_RATE>
+{
+    fn get_visual(&self, graph: &mut PipelineGraph) -> String {
+        let id = format!("{:p}", self);
+        let svg = format!(
+            r#"<div class="w-full h-full bg-gray-700 border border-gray-500 rounded flex flex-col items-center justify-center shadow-lg">
+                <div class="text-xs font-bold text-gray-200">Noise Gate</div>
+            </div>"#
+        );
+        graph.add_node(id.clone(), svg);
+        id
+    }
+}
+
+impl<Sample: Send + Sync, const CHANNELS: usize, const SAMPLE_RATE: u32> Node
     for NoiseGate<Sample, CHANNELS, SAMPLE_RATE>
 where
     Sample: AudioSample,

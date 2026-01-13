@@ -124,8 +124,8 @@ where
         pipeline_manager: Arc<Mutex<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>>,
         state: Arc<AppState>,
     ) -> Result<(
-        impl Sink<Input = AudioFrame<Sample, CHANNELS, SAMPLE_RATE>>,
-        impl Source<Output = AudioFrame<Sample, CHANNELS, SAMPLE_RATE>>,
+        NetworkSender<Sample, CHANNELS, SAMPLE_RATE>,
+        NetworkSource<Sample, CHANNELS, SAMPLE_RATE>,
     )> {
         let sender = NetworkSender::<Sample, CHANNELS, SAMPLE_RATE>::new()?;
 

@@ -7,8 +7,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::audio::AudioSample;
 use crate::audio::frame::AudioBuffer;
+use crate::pipeline::graph::{PipelineGraph, Inspectable};
 use crate::pipeline::{Node, Sink, Source};
 
+#[derive(Clone)]
 pub struct Tee<A, B> {
     a: A,
     b: B,
@@ -17,6 +19,26 @@ pub struct Tee<A, B> {
 impl<A, B> Tee<A, B> {
     pub fn new(a: A, b: B) -> Self {
         Self { a, b }
+    }
+}
+
+impl<A: Inspectable, B: Inspectable> Inspectable for Tee<A, B> {
+    fn get_visual(&self, graph: &mut PipelineGraph) -> String {
+        let id = format!("{:p}", self);
+        let svg = format!(
+            r#"<div class="w-full h-full bg-yellow-900 border border-yellow-600 rounded flex flex-col items-center justify-center shadow-lg">
+                <div class="text-xs font-bold text-yellow-200">Tee</div>
+            </div>"#
+        );
+        graph.add_node(id.clone(), svg);
+        
+        let a_id = self.a.get_visual(graph);
+        let b_id = self.b.get_visual(graph);
+        
+        graph.add_edge(id.clone(), a_id, None);
+        graph.add_edge(id.clone(), b_id, None);
+        
+        id
     }
 }
 
@@ -34,6 +56,7 @@ where
     }
 }
 
+#[derive(Clone)]
 pub struct LoopbackSwitch<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     enabled: Arc<AtomicBool>,
     _marker: std::marker::PhantomData<Sample>,
@@ -47,6 +70,27 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             enabled,
             _marker: std::marker::PhantomData,
         }
+    }
+}
+
+impl<Sample: Send + Sync, const CHANNELS: usize, const SAMPLE_RATE: u32> Inspectable
+    for LoopbackSwitch<Sample, CHANNELS, SAMPLE_RATE>
+{
+    fn get_visual(&self, graph: &mut PipelineGraph) -> String {
+        let id = format!("{:p}", self);
+        let active = self.enabled.load(std::sync::atomic::Ordering::Relaxed);
+        let status = if active { "ON" } else { "OFF" };
+        let color = if active { "#10B981" } else { "#EF4444" };
+        
+        let svg = format!(
+            r#"<div class="w-full h-full bg-purple-900 border border-purple-600 rounded flex flex-col items-center justify-center shadow-lg">
+                <div class="text-xs font-bold text-purple-200 mb-1">Loopback</div>
+                <div class="text-xs font-bold" style="color: {}">{}</div>
+            </div>"#,
+            color, status
+        );
+        graph.add_node(id.clone(), svg);
+        id
     }
 }
 
@@ -65,6 +109,7 @@ impl<Sample: Send + Sync, const CHANNELS: usize, const SAMPLE_RATE: u32> Node
     }
 }
 
+#[derive(Clone)]
 pub struct MixingSource<A, B, Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     a: A,
     b: B,
@@ -80,6 +125,28 @@ impl<A, B, Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             b,
             _marker: std::marker::PhantomData,
         }
+    }
+}
+
+impl<A: Inspectable, B: Inspectable, Sample: Send + Sync, const CHANNELS: usize, const SAMPLE_RATE: u32> Inspectable
+    for MixingSource<A, B, Sample, CHANNELS, SAMPLE_RATE>
+{
+    fn get_visual(&self, graph: &mut PipelineGraph) -> String {
+        let id = format!("{:p}", self);
+        let svg = format!(
+            r#"<div class="w-full h-full bg-yellow-900 border border-yellow-600 rounded flex flex-col items-center justify-center shadow-lg">
+                <div class="text-xs font-bold text-yellow-200">Mixer</div>
+            </div>"#
+        );
+        graph.add_node(id.clone(), svg);
+        
+        let a_id = self.a.get_visual(graph);
+        let b_id = self.b.get_visual(graph);
+        
+        graph.add_edge(a_id, id.clone(), None);
+        graph.add_edge(b_id, id.clone(), None);
+        
+        id
     }
 }
 

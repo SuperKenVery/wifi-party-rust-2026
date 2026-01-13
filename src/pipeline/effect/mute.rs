@@ -2,6 +2,7 @@
 
 use crate::audio::frame::AudioBuffer;
 use crate::audio::sample::AudioSample;
+use crate::pipeline::graph::{PipelineGraph, Inspectable};
 use crate::pipeline::Node;
 
 /// Silences all samples.
@@ -25,7 +26,22 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Mute<Sample, CHANNEL
     }
 }
 
-impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Node
+impl<Sample: Send + Sync, const CHANNELS: usize, const SAMPLE_RATE: u32> Inspectable
+    for Mute<Sample, CHANNELS, SAMPLE_RATE>
+{
+    fn get_visual(&self, graph: &mut PipelineGraph) -> String {
+        let id = format!("{:p}", self);
+        let svg = format!(
+            r#"<div class="w-full h-full bg-red-900 border border-red-600 rounded flex flex-col items-center justify-center shadow-lg">
+                <div class="text-xs font-bold text-red-200">Mute</div>
+            </div>"#
+        );
+        graph.add_node(id.clone(), svg);
+        id
+    }
+}
+
+impl<Sample: Send + Sync, const CHANNELS: usize, const SAMPLE_RATE: u32> Node
     for Mute<Sample, CHANNELS, SAMPLE_RATE>
 where
     Sample: AudioSample,
