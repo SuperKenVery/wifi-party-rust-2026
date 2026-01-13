@@ -24,6 +24,7 @@ pub struct Party<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     state: Arc<AppState>,
     network_node: NetworkNode<Sample, CHANNELS, SAMPLE_RATE>,
     pipeline_manager: Arc<Mutex<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>>,
+    _audio_streams: Vec<cpal::Stream>,
 }
 
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
@@ -34,6 +35,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             state,
             network_node: NetworkNode::new(),
             pipeline_manager: Arc::new(Mutex::new(HostPipelineManager::new())),
+            _audio_streams: Vec::new(),
         }
     }
 }
@@ -66,7 +68,7 @@ where
 
         // Mic -> FramePacker -> NetworkSink
         //     -> LoopbackSwitch -> loopback_buffer
-        let mut audio_input = AudioInput::new(Tee::new(
+        let audio_input = AudioInput::new(Tee::new(
             network_sink.get_data_from(FramePacker::<Sample, CHANNELS, SAMPLE_RATE>::new()),
             loopback_buffer.clone().get_data_from(
                 LoopbackSwitch::<Sample, CHANNELS, SAMPLE_RATE>::new(
@@ -74,7 +76,7 @@ where
                 ),
             ),
         ));
-        audio_input.start()?;
+        let input_stream = audio_input.start()?;
 
         // Network (with per-host jitter buffers) -> FrameUnpacker -> MixingSource -> Speaker
         let network_to_speaker =
@@ -82,8 +84,10 @@ where
         let speaker_source: MixingSource<_, _, Sample, CHANNELS, SAMPLE_RATE> =
             MixingSource::new(network_to_speaker, loopback_buffer);
 
-        let mut audio_output: AudioOutput<_> = AudioOutput::new(speaker_source);
-        audio_output.start()?;
+        let audio_output: AudioOutput<_> = AudioOutput::new(speaker_source);
+        let output_stream = audio_output.start()?;
+
+        self._audio_streams = vec![input_stream, output_stream];
 
         info!("Party pipelines configured successfully");
 

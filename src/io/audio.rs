@@ -13,18 +13,18 @@ use tracing::{debug, error, warn};
 
 pub struct AudioInput<S> {
     sink: Arc<S>,
-    stream: Option<cpal::Stream>,
 }
 
 impl<S> AudioInput<S> {
     pub fn new(sink: S) -> Self {
         Self {
             sink: Arc::new(sink),
-            stream: None,
         }
     }
 
-    pub fn start<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>(&mut self) -> Result<()>
+    pub fn start<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>(
+        self,
+    ) -> Result<cpal::Stream>
     where
         Sample: AudioSample + cpal::SizedSample,
         S: Sink<Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> + 'static,
@@ -48,7 +48,7 @@ impl<S> AudioInput<S> {
             },
         };
 
-        let sink = self.sink.clone();
+        let sink = self.sink;
         let stream = input_device.build_input_stream(
             &config,
             move |data: &[Sample], _: &cpal::InputCallbackInfo| {
@@ -61,25 +61,24 @@ impl<S> AudioInput<S> {
             None,
         )?;
         stream.play()?;
-        self.stream = Some(stream);
-        Ok(())
+        Ok(stream)
     }
 }
 
 pub struct AudioOutput<S> {
     source: Arc<S>,
-    stream: Option<cpal::Stream>,
 }
 
 impl<S> AudioOutput<S> {
     pub fn new(source: S) -> Self {
         Self {
             source: Arc::new(source),
-            stream: None,
         }
     }
 
-    pub fn start<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>(&mut self) -> Result<()>
+    pub fn start<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>(
+        self,
+    ) -> Result<cpal::Stream>
     where
         Sample: AudioSample + cpal::SizedSample,
         S: Source<Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> + 'static,
@@ -103,21 +102,18 @@ impl<S> AudioOutput<S> {
             },
         };
 
-        let source = self.source.clone();
+        let source = self.source;
         debug!("Building output stream");
         let stream = output_device.build_output_stream(
             &config,
             move |data: &mut [Sample], _: &cpal::OutputCallbackInfo| {
-                debug!("AudioOutput: Callback called");
                 if let Some(frame) = source.pull() {
-                    debug!("AudioOutput: Pulled some data");
                     for (i, sample) in frame.data().iter().enumerate() {
                         if i < data.len() {
                             data[i] = *sample;
                         }
                     }
                 } else {
-                    debug!("AudioOutput: No data, silence");
                     for sample in data {
                         *sample = Sample::silence();
                     }
@@ -127,7 +123,6 @@ impl<S> AudioOutput<S> {
             None,
         )?;
         stream.play()?;
-        self.stream = Some(stream);
-        Ok(())
+        Ok(stream)
     }
 }
