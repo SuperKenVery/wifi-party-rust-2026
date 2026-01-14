@@ -22,9 +22,10 @@
 //! - [`HostPipelineManager`] - Manages per-host jitter buffers and mixing
 //! - [`NetworkSource`] - A [`Source`] that pulls mixed audio from all hosts
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use dashmap::DashMap;
 use tracing::info;
 
 use crate::audio::frame::AudioFrame;
@@ -64,11 +65,12 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 ///
 /// # Thread Safety
 ///
-/// This struct is typically wrapped in `Arc<Mutex<...>>` and shared between:
+/// Uses [`DashMap`] internally for lock-free concurrent access. Can be shared
+/// directly via `Arc<HostPipelineManager>` between:
 /// - The network receiver thread (pushes frames)
 /// - The audio output thread (pulls mixed frames via [`NetworkSource`])
 pub struct HostPipelineManager<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    pipelines: HashMap<HostId, HostPipeline<Sample, CHANNELS, SAMPLE_RATE>>,
+    pipelines: DashMap<HostId, HostPipeline<Sample, CHANNELS, SAMPLE_RATE>>,
 }
 
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
@@ -76,19 +78,15 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 {
     pub fn new() -> Self {
         Self {
-            pipelines: HashMap::new(),
+            pipelines: DashMap::new(),
         }
     }
 
     /// Pushes an audio frame from a specific host into its jitter buffer.
     ///
     /// If this is the first frame from this host, a new pipeline is created.
-    pub fn push_frame(
-        &mut self,
-        host_id: HostId,
-        frame: AudioFrame<Sample, CHANNELS, SAMPLE_RATE>,
-    ) {
-        let pipeline = self.pipelines.entry(host_id).or_insert_with(|| {
+    pub fn push_frame(&self, host_id: HostId, frame: AudioFrame<Sample, CHANNELS, SAMPLE_RATE>) {
+        let mut pipeline = self.pipelines.entry(host_id).or_insert_with(|| {
             info!("Creating pipeline for new host: {}", host_id.to_string());
             HostPipeline::new(host_id)
         });
@@ -100,12 +98,12 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     ///
     /// Returns `None` if no hosts have data available. The mixing is done by
     /// summing normalized sample values from all hosts.
-    pub fn pull_and_mix(&mut self) -> Option<AudioFrame<Sample, CHANNELS, SAMPLE_RATE>> {
+    pub fn pull_and_mix(&self) -> Option<AudioFrame<Sample, CHANNELS, SAMPLE_RATE>> {
         let mut mixed_samples: Option<Vec<Sample>> = None;
         let mut result_seq = 0u64;
         let mut result_timestamp = 0u64;
 
-        for pipeline in self.pipelines.values_mut() {
+        for pipeline in self.pipelines.iter_mut() {
             if let Some(frame) = pipeline.jitter_buffer.pull() {
                 result_seq = result_seq.max(frame.sequence_number);
                 result_timestamp = result_timestamp.max(frame.timestamp);
@@ -131,7 +129,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     }
 
     /// Removes hosts that haven't sent data within the timeout period.
-    pub fn cleanup_stale_hosts(&mut self) {
+    pub fn cleanup_stale_hosts(&self) {
         let now = Instant::now();
         self.pipelines.retain(|host_id, pipeline| {
             let alive = now.duration_since(pipeline.info.last_seen) < HOST_TIMEOUT;
@@ -147,15 +145,15 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     }
 
     pub fn get_host_infos(&self) -> Vec<HostInfo> {
-        self.pipelines.values().map(|p| p.info.clone()).collect()
+        self.pipelines.iter().map(|p| p.info.clone()).collect()
     }
 
     pub fn get_host_info(&self, host_id: &HostId) -> Option<HostInfo> {
         self.pipelines.get(host_id).map(|p| p.info.clone())
     }
 
-    pub fn update_host_volume(&mut self, host_id: &HostId, volume: f32) {
-        if let Some(pipeline) = self.pipelines.get_mut(host_id) {
+    pub fn update_host_volume(&self, host_id: &HostId, volume: f32) {
+        if let Some(mut pipeline) = self.pipelines.get_mut(host_id) {
             pipeline.info.volume = volume;
         }
     }
@@ -177,15 +175,13 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Default
 ///
 /// Returns `None` when no hosts have data available.
 pub struct NetworkSource<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    pipeline_manager: Arc<Mutex<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>>,
+    pipeline_manager: Arc<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>,
 }
 
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     NetworkSource<Sample, CHANNELS, SAMPLE_RATE>
 {
-    pub fn new(
-        pipeline_manager: Arc<Mutex<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>>,
-    ) -> Self {
+    pub fn new(pipeline_manager: Arc<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>) -> Self {
         Self { pipeline_manager }
     }
 }
@@ -196,6 +192,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Source
     type Output = AudioFrame<Sample, CHANNELS, SAMPLE_RATE>;
 
     fn pull(&self) -> Option<Self::Output> {
-        self.pipeline_manager.lock().unwrap().pull_and_mix()
+        self.pipeline_manager.pull_and_mix()
     }
 }

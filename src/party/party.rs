@@ -3,7 +3,7 @@
 //! Coordinates audio capture, network transport, and playback into a complete
 //! audio sharing pipeline.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::Result;
 use tracing::info;
@@ -23,7 +23,7 @@ use super::network::NetworkNode;
 pub struct Party<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     state: Arc<AppState>,
     network_node: NetworkNode<Sample, CHANNELS, SAMPLE_RATE>,
-    pipeline_manager: Arc<Mutex<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>>,
+    pipeline_manager: Arc<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>,
     _audio_streams: Vec<cpal::Stream>,
 }
 
@@ -34,7 +34,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         Self {
             state,
             network_node: NetworkNode::new(),
-            pipeline_manager: Arc::new(Mutex::new(HostPipelineManager::new())),
+            pipeline_manager: Arc::new(HostPipelineManager::new()),
             _audio_streams: Vec::new(),
         }
     }

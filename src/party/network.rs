@@ -52,7 +52,7 @@
 
 use std::marker::PhantomData;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 
 use anyhow::{Context, Result};
@@ -124,7 +124,7 @@ where
     ///   with per-host jitter buffering already applied.
     pub fn start(
         &mut self,
-        pipeline_manager: Arc<Mutex<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>>,
+        pipeline_manager: Arc<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>,
         state: Arc<AppState>,
     ) -> Result<(
         impl Sink<Input = AudioFrame<Sample, CHANNELS, SAMPLE_RATE>> + 'static,

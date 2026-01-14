@@ -31,7 +31,6 @@ use crate::audio::frame::AudioFrame;
 use crate::party::host::HostPipelineManager;
 use crate::pipeline::Sink;
 use crate::state::{AppState, ConnectionStatus, HostId};
-use std::sync::Mutex;
 
 pub const MULTICAST_ADDR: &str = "239.255.43.2";
 pub const MULTICAST_PORT: u16 = 7667;
@@ -139,7 +138,7 @@ where
 pub struct NetworkReceiver<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     socket: UdpSocket,
     state: Arc<AppState>,
-    pipeline_manager: Arc<Mutex<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>>,
+    pipeline_manager: Arc<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>,
     local_ips: Vec<std::net::IpAddr>,
 }
 
@@ -156,7 +155,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     pub fn new(
         socket: UdpSocket,
         state: Arc<AppState>,
-        pipeline_manager: Arc<Mutex<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>>,
+        pipeline_manager: Arc<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>,
         local_ips: Vec<std::net::IpAddr>,
     ) -> Self {
         info!("Network receiver initialized, local IPs: {:?}", local_ips);
@@ -194,7 +193,7 @@ where
             }
 
             if last_cleanup.elapsed() > Duration::from_secs(1) {
-                self.pipeline_manager.lock().unwrap().cleanup_stale_hosts();
+                self.pipeline_manager.cleanup_stale_hosts();
                 last_cleanup = Instant::now();
             }
         }
@@ -225,10 +224,7 @@ where
             source_addr.is_ipv4()
         );
 
-        self.pipeline_manager
-            .lock()
-            .unwrap()
-            .push_frame(host_id, frame);
+        self.pipeline_manager.push_frame(host_id, frame);
 
         Ok(())
     }
