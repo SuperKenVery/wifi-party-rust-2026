@@ -26,8 +26,6 @@ use state::AppState;
 use std::sync::Arc;
 use tracing::{Level, error, info};
 
-use crate::ui::get_local_ip;
-
 fn main() {
     dioxus::logger::init(Level::DEBUG).expect("failed to init logger");
 

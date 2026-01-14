@@ -10,4 +10,4 @@ pub mod audio;
 pub mod network;
 
 pub use audio::{AudioInput, AudioOutput};
-pub use network::{NetworkReceiver, NetworkSender, MULTICAST_ADDR, MULTICAST_PORT, TTL};
+pub use network::{get_local_ip, NetworkReceiver, NetworkSender, MULTICAST_ADDR, MULTICAST_PORT, TTL};

@@ -1,23 +1,13 @@
-use anyhow::{Context, Result};
-use std::net::UdpSocket;
+//! User interface components.
+//!
+//! This module provides the Dioxus-based UI for the application:
+//!
+//! - [`app`] - Main application entry point
+//! - [`sidebar`] - Left sidebar with audio controls and status
+//! - [`participants`] - Main content area showing connected hosts
 
-use crate::state::HostId;
+mod app;
+mod participants;
+mod sidebar;
 
-pub mod components;
-pub use components::*;
-
-/// Get the local IP address by creating a socket
-/// This doesn't actually send any data, just queries the local routing table
-pub fn get_local_ip() -> Result<HostId> {
-    // Create a UDP socket and connect to a multicast address
-    // This doesn't send any data, but tells us which interface would be used
-    let socket = UdpSocket::bind("0.0.0.0:0").context("Failed to create socket")?;
-
-    socket
-        .connect("239.255.43.2:7667")
-        .context("Failed to connect socket")?;
-
-    let local_addr = socket.local_addr().context("Failed to get local address")?;
-
-    Ok(HostId::from(local_addr))
-}
+pub use app::App;

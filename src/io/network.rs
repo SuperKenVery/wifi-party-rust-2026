@@ -4,6 +4,7 @@
 //!
 //! - [`NetworkSender`] - Broadcasts audio frames to all peers via UDP multicast
 //! - [`NetworkReceiver`] - Receives frames from peers and dispatches to per-host pipelines
+//! - [`get_local_ip`] - Utility to discover local IP address for multicast
 //!
 //! # Protocol
 //!
@@ -228,4 +229,20 @@ where
 
         Ok(())
     }
+}
+
+/// Get the local IP address by creating a socket.
+///
+/// This doesn't actually send any data, just queries the local routing table
+/// to determine which interface would be used for multicast traffic.
+pub fn get_local_ip() -> Result<HostId> {
+    let socket = UdpSocket::bind("0.0.0.0:0").context("Failed to create socket")?;
+
+    socket
+        .connect(format!("{}:{}", MULTICAST_ADDR, MULTICAST_PORT))
+        .context("Failed to connect socket")?;
+
+    let local_addr = socket.local_addr().context("Failed to get local address")?;
+
+    Ok(HostId::from(local_addr))
 }

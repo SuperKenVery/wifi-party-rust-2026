@@ -64,7 +64,7 @@ use crate::audio::frame::AudioFrame;
 use crate::io::{NetworkReceiver, NetworkSender, MULTICAST_ADDR, MULTICAST_PORT, TTL};
 use crate::pipeline::{Sink, Source};
 use crate::state::AppState;
-use crate::ui::get_local_ip;
+use crate::io::get_local_ip;
 
 use super::host::{HostPipelineManager, NetworkSource};
 
