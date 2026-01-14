@@ -11,7 +11,7 @@ pub fn App() -> Element {
     let mut active_hosts = use_signal(|| Vec::<HostInfo>::new());
     let mut mic_muted = use_signal(|| false);
     let mut mic_volume = use_signal(|| 1.0f32);
-    let mut mic_audio_level = use_signal(|| 0.0f32);
+    let mut mic_audio_level = use_signal(|| 0u32);
     let mut loopback_enabled = use_signal(|| false);
 
     // Poll state periodically
@@ -38,10 +38,8 @@ pub fn App() -> Element {
                 }
 
                 // Update mic audio level
-                if let Ok(level) = state.mic_audio_level.lock() {
-                    let new_level = *level;
-                    mic_audio_level.set(new_level);
-                }
+                let level = state.mic_audio_level.load(std::sync::atomic::Ordering::Relaxed);
+                mic_audio_level.set(level);
 
                 // Update loopback status
                 loopback_enabled.set(
@@ -130,7 +128,7 @@ fn Header(connection_status: ConnectionStatus, participant_count: usize) -> Elem
 fn SelfAudioSection(
     mic_muted: bool,
     mic_volume: f32,
-    mic_audio_level: f32,
+    mic_audio_level: u32,
     loopback_enabled: bool,
 ) -> Element {
     let state_arc = use_context::<Arc<AppState>>();
@@ -221,13 +219,13 @@ fn SelfAudioSection(
                 class: "mt-4",
                 label {
                     class: "block text-sm mb-2",
-                    "🎤 Microphone Level: {(mic_audio_level * 100.0) as i32}%"
+                    "🎤 Microphone Level: {mic_audio_level}%"
                 }
                 div {
                     class: "relative w-full h-6 bg-gray-700 rounded-lg overflow-hidden border border-gray-600",
                     div {
                         class: "absolute h-full bg-gradient-to-r from-green-500 via-yellow-500 to-red-500 transition-all duration-100",
-                        style: "width: {(mic_audio_level * 100.0).min(100.0)}%",
+                        style: "width: {mic_audio_level}%",
                     }
                 }
             }

@@ -11,6 +11,7 @@ use tracing::info;
 use crate::audio::AudioSample;
 use crate::audio::frame::{AudioBuffer, AudioFrame};
 use crate::io::{AudioInput, AudioOutput};
+use crate::pipeline::effect::LevelMeter;
 use crate::pipeline::node::SimpleBuffer;
 use crate::pipeline::{Sink, Source};
 use crate::state::AppState;
@@ -66,16 +67,20 @@ where
         let loopback_buffer: SimpleBuffer<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> =
             SimpleBuffer::new();
 
-        // Mic -> FramePacker -> NetworkSink
-        //     -> LoopbackSwitch -> loopback_buffer
-        let audio_input = AudioInput::new(Tee::new(
+        // Mic -> LevelMeter -> Tee -> FramePacker -> NetworkSink
+        //                         -> LoopbackSwitch -> loopback_buffer
+        let mic_sink = Tee::new(
             network_sink.get_data_from(FramePacker::<Sample, CHANNELS, SAMPLE_RATE>::new()),
             loopback_buffer.clone().get_data_from(
                 LoopbackSwitch::<Sample, CHANNELS, SAMPLE_RATE>::new(
                     self.state.loopback_enabled.clone(),
                 ),
             ),
+        )
+        .get_data_from(LevelMeter::<Sample, CHANNELS, SAMPLE_RATE>::new(
+            self.state.mic_audio_level.clone(),
         ));
+        let audio_input = AudioInput::new(mic_sink);
         let input_stream = audio_input.start()?;
 
         // Network (with per-host jitter buffers) -> FrameUnpacker -> MixingSource -> Speaker

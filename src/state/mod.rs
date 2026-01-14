@@ -7,7 +7,7 @@
 //! - [`AudioConfig`] / [`NetworkConfig`] - Configuration structures
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex};
 
 /// Unique identifier for a remote host, derived from their socket address.
@@ -117,7 +117,7 @@ pub struct AppState {
     pub connection_status: Arc<Mutex<ConnectionStatus>>,
     pub mic_muted: Arc<AtomicBool>,
     pub mic_volume: Arc<Mutex<f32>>,
-    pub mic_audio_level: Arc<Mutex<f32>>,
+    pub mic_audio_level: Arc<AtomicU32>,
     pub loopback_enabled: Arc<AtomicBool>,
     pub sequence_number: Arc<AtomicU64>,
     pub host_infos: Arc<Mutex<Vec<HostInfo>>>,
@@ -131,7 +131,7 @@ impl AppState {
             connection_status: Arc::new(Mutex::new(ConnectionStatus::Disconnected)),
             mic_muted: Arc::new(AtomicBool::new(false)),
             mic_volume: Arc::new(Mutex::new(1.0)),
-            mic_audio_level: Arc::new(Mutex::new(0.0)),
+            mic_audio_level: Arc::new(AtomicU32::new(0)),
             loopback_enabled: Arc::new(AtomicBool::new(true)),
             sequence_number: Arc::new(AtomicU64::new(0)),
             host_infos: Arc::new(Mutex::new(Vec::new())),
