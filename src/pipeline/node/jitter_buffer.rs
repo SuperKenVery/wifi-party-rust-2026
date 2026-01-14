@@ -4,10 +4,11 @@
 //! using a slot-based design where each slot is indexed by sequence number.
 
 use super::{Sink, Source};
-use crate::audio::frame::AudioFrame;
 use crate::audio::AudioSample;
+use crate::audio::frame::AudioFrame;
 use crossbeam::atomic::AtomicCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use tracing::debug;
 
 #[repr(align(64))]
 struct CachePadded<T>(T);
@@ -121,12 +122,20 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Sink
     type Input = AudioFrame<Sample, CHANNELS, SAMPLE_RATE>;
 
     fn push(&self, input: AudioFrame<Sample, CHANNELS, SAMPLE_RATE>) {
+        debug!(
+            "JitterBuffer {:p}: Being pushed, data len={}, seq={}, read_seq={}",
+            self,
+            input.samples.data().len(),
+            input.sequence_number,
+            self.read_seq.load(Ordering::Acquire)
+        );
         let seq = input.sequence_number;
         let slot_idx = self.slot_index(seq);
         let slot = &self.slots[slot_idx];
 
         // Drop late packets
         if seq < self.read_seq.load(Ordering::Acquire) {
+            debug!("Seq already read, skip");
             return;
         }
 
@@ -134,6 +143,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Sink
         if let Some(previous_written_seq) = slot.stored_seq()
             && previous_written_seq >= seq
         {
+            debug!("Seq < last read, skip");
             return;
         }
 
@@ -150,6 +160,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Sink
                 .compare_exchange_weak(current_write_seq, seq, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
+                debug!("Wrote data");
                 break;
             }
         }
@@ -166,8 +177,15 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Source
         let slot_idx = self.slot_index(read_seq);
         let slot = &self.slots[slot_idx];
 
-        let frame = slot.take(read_seq)?;
+        let Some(frame) = slot.take(read_seq) else {
+            debug!("Jitter buffer {:p}: returning None", self);
+            return None;
+        };
         self.read_seq.store(read_seq + 1, Ordering::Release);
+        debug!(
+            "Jitter buffer {:p}: returning frame with sequence number {}",
+            self, frame.sequence_number
+        );
         Some(frame)
     }
 }

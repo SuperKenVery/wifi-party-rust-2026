@@ -108,11 +108,9 @@ impl<S> AudioOutput<S> {
             &config,
             move |data: &mut [Sample], _: &cpal::OutputCallbackInfo| {
                 if let Some(frame) = source.pull() {
-                    for (i, sample) in frame.data().iter().enumerate() {
-                        if i < data.len() {
-                            data[i] = *sample;
-                        }
-                    }
+                    let src = frame.data();
+                    let len = src.len().min(data.len());
+                    data[..len].copy_from_slice(&src[..len]);
                 } else {
                     for sample in data {
                         *sample = Sample::silence();
