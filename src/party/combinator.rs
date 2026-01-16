@@ -35,14 +35,15 @@ where
     }
 }
 
-pub struct LoopbackSwitch<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+/// Conditionally passes or blocks audio based on an AtomicBool flag.
+/// Passes audio when flag is true, blocks when false.
+/// When it's disabled, downstream get no data at all, not even silence data.
+pub struct Switch<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     enabled: Arc<AtomicBool>,
     _marker: std::marker::PhantomData<Sample>,
 }
 
-impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
-    LoopbackSwitch<Sample, CHANNELS, SAMPLE_RATE>
-{
+impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Switch<Sample, CHANNELS, SAMPLE_RATE> {
     pub fn new(enabled: Arc<AtomicBool>) -> Self {
         Self {
             enabled,
@@ -52,7 +53,7 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 }
 
 impl<Sample: Send + Sync, const CHANNELS: usize, const SAMPLE_RATE: u32> Node
-    for LoopbackSwitch<Sample, CHANNELS, SAMPLE_RATE>
+    for Switch<Sample, CHANNELS, SAMPLE_RATE>
 {
     type Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
     type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;

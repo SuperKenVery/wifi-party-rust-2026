@@ -8,7 +8,7 @@ use std::sync::Arc;
 #[component]
 pub fn Sidebar(
     connection_status: ConnectionStatus,
-    mic_muted: bool,
+    mic_enabled: bool,
     mic_volume: f32,
     mic_audio_level: u32,
     loopback_enabled: bool,
@@ -59,7 +59,7 @@ pub fn Sidebar(
                 class: "flex-1 overflow-y-auto px-8 py-4 space-y-8",
                 
                 SelfAudioControls {
-                    mic_muted: mic_muted,
+                    mic_enabled: mic_enabled,
                     mic_volume: mic_volume,
                     mic_audio_level: mic_audio_level,
                     loopback_enabled: loopback_enabled,
@@ -79,17 +79,17 @@ pub fn Sidebar(
 #[allow(non_snake_case)]
 #[component]
 fn SelfAudioControls(
-    mic_muted: bool,
+    mic_enabled: bool,
     mic_volume: f32,
     mic_audio_level: u32,
     loopback_enabled: bool,
 ) -> Element {
     let state_arc = use_context::<Arc<AppState>>();
     
-    let state_mute = state_arc.clone();
-    let on_mute_toggle = move |_| {
-        let current = state_mute.mic_muted.load(std::sync::atomic::Ordering::Relaxed);
-        state_mute.mic_muted.store(!current, std::sync::atomic::Ordering::Relaxed);
+    let state_mic = state_arc.clone();
+    let on_mic_toggle = move |_| {
+        let current = state_mic.mic_enabled.load(std::sync::atomic::Ordering::Relaxed);
+        state_mic.mic_enabled.store(!current, std::sync::atomic::Ordering::Relaxed);
     };
 
     let state_vol = state_arc.clone();
@@ -122,12 +122,12 @@ fn SelfAudioControls(
                 button {
                     class: format!(
                         "p-4 rounded-2xl flex flex-col items-center justify-center gap-2 transition-all duration-200 border {}", 
-                        if mic_muted { "bg-rose-500/10 border-rose-500/50 text-rose-400 hover:bg-rose-500/20" } 
-                        else { "bg-emerald-500/10 border-emerald-500/50 text-emerald-400 hover:bg-emerald-500/20" }
+                        if mic_enabled { "bg-emerald-500/10 border-emerald-500/50 text-emerald-400 hover:bg-emerald-500/20" }
+                        else { "bg-rose-500/10 border-rose-500/50 text-rose-400 hover:bg-rose-500/20" }
                     ),
-                    onclick: on_mute_toggle,
-                    div { class: "text-2xl", if mic_muted { "🔇" } else { "🎙️" } }
-                    span { class: "text-xs font-bold", if mic_muted { "Muted" } else { "Active" } }
+                    onclick: on_mic_toggle,
+                    div { class: "text-2xl", if mic_enabled { "🎙️" } else { "🔇" } }
+                    span { class: "text-xs font-bold", if mic_enabled { "Active" } else { "Muted" } }
                 }
 
                 button {

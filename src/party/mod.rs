@@ -34,7 +34,7 @@ pub mod network;
 pub mod party;
 
 pub use codec::{FramePacker, FrameUnpacker};
-pub use combinator::{LoopbackSwitch, MixingSource, Tee};
+pub use combinator::{MixingSource, Switch, Tee};
 pub use host::{HostPipelineManager, NetworkSource};
 pub use network::NetworkNode;
 pub use party::Party;

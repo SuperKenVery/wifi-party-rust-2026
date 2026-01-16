@@ -17,7 +17,7 @@ use crate::pipeline::{Sink, Source};
 use crate::state::AppState;
 
 use super::codec::{FramePacker, FrameUnpacker};
-use super::combinator::{LoopbackSwitch, MixingSource, Tee};
+use super::combinator::{MixingSource, Switch, Tee};
 use super::host::HostPipelineManager;
 use super::network::NetworkNode;
 
@@ -66,16 +66,17 @@ where
 
         let loopback_buffer: SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE> = SimpleBuffer::new();
 
-        // Mic -> LevelMeter -> Tee -> FramePacker -> NetworkSink
-        //                         -> LoopbackSwitch -> loopback_buffer
+        // Mic -> LevelMeter -> MicSwitch -> Tee -> FramePacker -> NetworkSink
+        //                                      -> LoopbackSwitch -> loopback_buffer
         let mic_sink = Tee::new(
             network_sink.get_data_from(FramePacker::<Sample, CHANNELS, SAMPLE_RATE>::new()),
             loopback_buffer.clone().get_data_from(
-                LoopbackSwitch::<Sample, CHANNELS, SAMPLE_RATE>::new(
-                    self.state.loopback_enabled.clone(),
-                ),
+                Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(self.state.loopback_enabled.clone()),
             ),
         )
+        .get_data_from(Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(
+            self.state.mic_enabled.clone(),
+        ))
         .get_data_from(LevelMeter::<Sample, CHANNELS, SAMPLE_RATE>::new(
             self.state.mic_audio_level.clone(),
         ));

@@ -13,7 +13,7 @@ pub fn App() -> Element {
 
     let mut connection_status = use_signal(|| ConnectionStatus::Disconnected);
     let mut active_hosts = use_signal(|| Vec::<HostInfo>::new());
-    let mut mic_muted = use_signal(|| false);
+    let mut mic_enabled = use_signal(|| false);
     let mut mic_volume = use_signal(|| 1.0f32);
     let mut mic_audio_level = use_signal(|| 0u32);
     let mut loopback_enabled = use_signal(|| false);
@@ -31,7 +31,7 @@ pub fn App() -> Element {
                     active_hosts.set(infos.clone());
                 }
 
-                mic_muted.set(state.mic_muted.load(std::sync::atomic::Ordering::Relaxed));
+                mic_enabled.set(state.mic_enabled.load(std::sync::atomic::Ordering::Relaxed));
 
                 if let Ok(vol) = state.mic_volume.lock() {
                     mic_volume.set(*vol);
@@ -63,7 +63,7 @@ pub fn App() -> Element {
 
             Sidebar {
                 connection_status: connection_status(),
-                mic_muted: mic_muted(),
+                mic_enabled: mic_enabled(),
                 mic_volume: mic_volume(),
                 mic_audio_level: mic_audio_level(),
                 loopback_enabled: loopback_enabled(),
