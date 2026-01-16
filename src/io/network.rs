@@ -60,10 +60,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     /// The caller is responsible for configuring the socket appropriately
     /// (e.g., setting non-blocking mode, multicast TTL).
     pub fn new(socket: UdpSocket, multicast_addr: SocketAddr) -> Self {
-        info!(
-            "Network sender initialized for {:?}",
-            multicast_addr
-        );
+        info!("Network sender initialized for {:?}", multicast_addr);
 
         Self {
             socket,
@@ -86,21 +83,19 @@ where
 {
     fn send_frame(&self, frame: &AudioFrame<Sample, CHANNELS, SAMPLE_RATE>) {
         match rkyv::to_bytes::<rkyv::rancor::Error>(frame) {
-            Ok(serialized) => {
-                match self.socket.send_to(&serialized, self.multicast_addr) {
-                    Ok(bytes_sent) => {
-                        if bytes_sent != serialized.len() {
-                            warn!("Partial send: {} of {} bytes", bytes_sent, serialized.len());
-                        }
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        warn!("Socket would block, dropping frame");
-                    }
-                    Err(e) => {
-                        warn!("Failed to send packet: {}", e);
+            Ok(serialized) => match self.socket.send_to(&serialized, self.multicast_addr) {
+                Ok(bytes_sent) => {
+                    if bytes_sent != serialized.len() {
+                        warn!("Partial send: {} of {} bytes", bytes_sent, serialized.len());
                     }
                 }
-            }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    warn!("Socket would block, dropping frame");
+                }
+                Err(e) => {
+                    warn!("Failed to send packet: {}", e);
+                }
+            },
             Err(e) => {
                 warn!("Failed to serialize frame: {}", e);
             }
@@ -217,13 +212,6 @@ where
         let frame: AudioFrame<Sample, CHANNELS, SAMPLE_RATE> =
             unsafe { rkyv::from_bytes_unchecked(received_data) }
                 .map_err(|e| anyhow::anyhow!("Deserialization error: {:?}", e))?;
-
-        debug!(
-            "Receive packet from {:?}, seq num {}, is_v4: {}",
-            source_addr,
-            frame.sequence_number,
-            source_addr.is_ipv4()
-        );
 
         self.pipeline_manager.push_frame(host_id, frame);
 

@@ -40,7 +40,7 @@ pub trait Node: Send + Sync {
 pub trait Source: Send + Sync + Sized {
     type Output;
 
-    fn pull(&self) -> Option<Self::Output>;
+    fn pull(&self, len: usize) -> Option<Self::Output>;
 
     fn give_data_to<N: Node<Input = Self::Output>>(self, node: N) -> PullPipeline<Self, N> {
         PullPipeline::new(self, node)

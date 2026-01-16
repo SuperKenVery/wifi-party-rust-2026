@@ -29,8 +29,8 @@ where
 {
     type Output = N::Output;
 
-    fn pull(&self) -> Option<Self::Output> {
-        let data = self.source.pull()?;
+    fn pull(&self, len: usize) -> Option<Self::Output> {
+        let data = self.source.pull(len)?;
         self.node.process(data)
     }
 }

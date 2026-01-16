@@ -93,8 +93,8 @@ where
 {
     type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
 
-    fn pull(&self) -> Option<Self::Output> {
-        match (self.a.pull(), self.b.pull()) {
+    fn pull(&self, len: usize) -> Option<Self::Output> {
+        match (self.a.pull(len), self.b.pull(len)) {
             (Some(a), Some(b)) => {
                 let mixed: Vec<Sample> = a
                     .data()

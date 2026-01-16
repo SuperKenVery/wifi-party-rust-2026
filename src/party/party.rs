@@ -64,8 +64,7 @@ where
             .network_node
             .start(self.pipeline_manager.clone(), self.state.clone())?;
 
-        let loopback_buffer: SimpleBuffer<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> =
-            SimpleBuffer::new();
+        let loopback_buffer: SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE> = SimpleBuffer::new();
 
         // Mic -> LevelMeter -> Tee -> FramePacker -> NetworkSink
         //                         -> LoopbackSwitch -> loopback_buffer

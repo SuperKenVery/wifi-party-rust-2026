@@ -36,11 +36,16 @@ impl<S> AudioInput<S> {
         let input_config = input_device.default_input_config()?;
         debug!("Default input config: {input_config:#?}");
 
+        const MIN_BUFFER_MS: u32 = 3;
+        let min_buffer_size = SAMPLE_RATE * MIN_BUFFER_MS / 1000;
+
         let config = StreamConfig {
             channels: CHANNELS as u16,
             sample_rate: SampleRate(SAMPLE_RATE),
             buffer_size: match input_config.buffer_size() {
-                cpal::SupportedBufferSize::Range { min, .. } => BufferSize::Fixed(*min),
+                cpal::SupportedBufferSize::Range { min, .. } => {
+                    BufferSize::Fixed((*min).max(min_buffer_size))
+                }
                 cpal::SupportedBufferSize::Unknown => {
                     warn!("Supported buffer size range unknown, using default");
                     BufferSize::Default
@@ -107,7 +112,7 @@ impl<S> AudioOutput<S> {
         let stream = output_device.build_output_stream(
             &config,
             move |data: &mut [Sample], _: &cpal::OutputCallbackInfo| {
-                if let Some(frame) = source.pull() {
+                if let Some(frame) = source.pull(data.len()) {
                     let src = frame.data();
                     let len = src.len().min(data.len());
                     data[..len].copy_from_slice(&src[..len]);

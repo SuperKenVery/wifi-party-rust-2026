@@ -57,14 +57,14 @@ use std::thread;
 
 use anyhow::{Context, Result};
 use socket2::{Domain, Protocol, Socket, Type};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::audio::AudioSample;
 use crate::audio::frame::AudioFrame;
-use crate::io::{NetworkReceiver, NetworkSender, MULTICAST_ADDR, MULTICAST_PORT, TTL};
+use crate::io::get_local_ip;
+use crate::io::{MULTICAST_ADDR, MULTICAST_PORT, NetworkReceiver, NetworkSender, TTL};
 use crate::pipeline::{Sink, Source};
 use crate::state::AppState;
-use crate::io::get_local_ip;
 
 use super::host::{HostPipelineManager, NetworkSource};
 
@@ -155,9 +155,36 @@ where
         socket
             .bind(&bind_addr.into())
             .context("Failed to bind socket")?;
-        socket
-            .join_multicast_v4(&multicast_ip, &Ipv4Addr::UNSPECIFIED)
-            .context("Failed to join multicast group")?;
+
+        // Join multicast group on all available IPv4 interfaces
+        // Errors are expected for loopback, virtual interfaces, or already-joined interfaces
+        match if_addrs::get_if_addrs() {
+            Ok(interfaces) => {
+                for iface in interfaces {
+                    if let if_addrs::IfAddr::V4(v4) = &iface.addr {
+                        match socket.join_multicast_v4(&multicast_ip, &v4.ip) {
+                            Ok(()) => info!(
+                                "Joined multicast group on interface {} ({})",
+                                iface.name, v4.ip
+                            ),
+                            Err(e) => warn!(
+                                "Failed to join multicast on {} ({}): {}",
+                                iface.name, v4.ip, e
+                            ),
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to enumerate network interfaces: {}, joining on default interface only",
+                    e
+                );
+                socket
+                    .join_multicast_v4(&multicast_ip, &Ipv4Addr::UNSPECIFIED)
+                    .context("Failed to join multicast group")?;
+            }
+        }
 
         let socket: UdpSocket = socket.into();
 
@@ -171,7 +198,8 @@ where
             .try_clone()
             .context("Failed to clone socket for sender")?;
 
-        let sender = NetworkSender::<Sample, CHANNELS, SAMPLE_RATE>::new(send_socket, multicast_addr);
+        let sender =
+            NetworkSender::<Sample, CHANNELS, SAMPLE_RATE>::new(send_socket, multicast_addr);
 
         // Receiver socket should be blocking (it runs in its own thread)
         socket

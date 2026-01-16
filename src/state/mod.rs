@@ -129,7 +129,7 @@ impl AppState {
             audio_config: Arc::new(Mutex::new(AudioConfig::default())),
             network_config: Arc::new(Mutex::new(NetworkConfig::default())),
             connection_status: Arc::new(Mutex::new(ConnectionStatus::Disconnected)),
-            mic_muted: Arc::new(AtomicBool::new(false)),
+            mic_muted: Arc::new(AtomicBool::new(true)),
             mic_volume: Arc::new(Mutex::new(1.0)),
             mic_audio_level: Arc::new(AtomicU32::new(0)),
             loopback_enabled: Arc::new(AtomicBool::new(true)),

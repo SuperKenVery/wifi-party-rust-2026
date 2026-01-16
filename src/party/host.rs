@@ -28,14 +28,14 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use tracing::info;
 
-use crate::audio::frame::AudioFrame;
 use crate::audio::AudioSample;
+use crate::audio::frame::AudioFrame;
 use crate::pipeline::node::JitterBuffer;
 use crate::pipeline::{Sink, Source};
 use crate::state::{HostId, HostInfo};
 
 const HOST_TIMEOUT: Duration = Duration::from_secs(5);
-const JITTER_BUFFER_CAPACITY: usize = 16;
+const JITTER_BUFFER_CAPACITY: usize = 64;
 
 struct HostPipeline<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     jitter_buffer: JitterBuffer<Sample, CHANNELS, SAMPLE_RATE>,
@@ -94,38 +94,37 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         pipeline.jitter_buffer.push(frame);
     }
 
-    /// Pulls one frame from each host's jitter buffer and mixes them together.
+    /// Pulls `len` samples from each host's jitter buffer and mixes them together.
     ///
     /// Returns `None` if no hosts have data available. The mixing is done by
     /// summing normalized sample values from all hosts.
-    pub fn pull_and_mix(&self) -> Option<AudioFrame<Sample, CHANNELS, SAMPLE_RATE>> {
-        let mut mixed_samples: Option<Vec<Sample>> = None;
+    ///
+    /// The returned AudioFrame will contain exactly `len` samples (padded with silence
+    /// if any host returns fewer samples).
+    pub fn pull_and_mix(&self, len: usize) -> Option<AudioFrame<Sample, CHANNELS, SAMPLE_RATE>> {
+        let mut mixed: Vec<f64> = vec![0.0; len];
+        let mut has_data = false;
         let mut result_seq = 0u64;
-        let mut result_timestamp = 0u64;
 
         for pipeline in self.pipelines.iter_mut() {
-            if let Some(frame) = pipeline.jitter_buffer.pull() {
+            if let Some(frame) = pipeline.jitter_buffer.pull(len) {
+                has_data = true;
                 result_seq = result_seq.max(frame.sequence_number);
-                result_timestamp = result_timestamp.max(frame.timestamp);
 
-                match &mut mixed_samples {
-                    None => {
-                        mixed_samples = Some(frame.samples.data().to_vec());
-                    }
-                    Some(mixed) => {
-                        for (i, sample) in frame.samples.data().iter().enumerate() {
-                            if i < mixed.len() {
-                                let sum =
-                                    mixed[i].to_f64_normalized() + sample.to_f64_normalized();
-                                mixed[i] = Sample::from_f64_normalized(sum);
-                            }
-                        }
+                for (i, sample) in frame.samples.data().iter().enumerate() {
+                    if i < len {
+                        mixed[i] += sample.to_f64_normalized();
                     }
                 }
             }
         }
 
-        mixed_samples.and_then(|samples| AudioFrame::new(result_seq, samples).ok())
+        if !has_data {
+            return None;
+        }
+
+        let samples: Vec<Sample> = mixed.into_iter().map(Sample::from_f64_normalized).collect();
+        AudioFrame::new(result_seq, samples).ok()
     }
 
     /// Removes hosts that haven't sent data within the timeout period.
@@ -191,7 +190,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Source
 {
     type Output = AudioFrame<Sample, CHANNELS, SAMPLE_RATE>;
 
-    fn pull(&self) -> Option<Self::Output> {
-        self.pipeline_manager.pull_and_mix()
+    fn pull(&self, len: usize) -> Option<Self::Output> {
+        self.pipeline_manager.pull_and_mix(len)
     }
 }

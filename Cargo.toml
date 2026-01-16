@@ -21,6 +21,7 @@ anyhow = "1.0.100"
 neteq = { version = "0.8", default-features = false }
 num-traits = "0.2.19"
 dashmap = "6.1.0"
+if-addrs = "0.13"
 
 [features]
 default = ["desktop"]
