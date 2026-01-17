@@ -1,8 +1,45 @@
 //! Sidebar components for audio controls and status display.
 
+use crate::party::PartyConfig;
 use crate::state::AppState;
+use cpal::traits::{DeviceTrait, HostTrait};
+use cpal::{Device, DeviceId};
 use dioxus::prelude::*;
+use std::net::Ipv4Addr;
 use std::sync::Arc;
+
+fn get_input_devices() -> Vec<Device> {
+    cpal::default_host()
+        .input_devices()
+        .map(|d| d.collect())
+        .unwrap_or_default()
+}
+
+fn get_output_devices() -> Vec<Device> {
+    cpal::default_host()
+        .output_devices()
+        .map(|d| d.collect())
+        .unwrap_or_default()
+}
+
+fn get_network_interfaces() -> Vec<if_addrs::Interface> {
+    if_addrs::get_if_addrs()
+        .map(|ifaces| {
+            ifaces
+                .into_iter()
+                .filter(|i| matches!(i.addr, if_addrs::IfAddr::V4(ref v) if !v.ip.is_loopback()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[allow(deprecated)]
+fn device_display_name(device: &Device) -> String {
+    match device.description() {
+        Ok(desc) => desc.name().to_string(),
+        Err(_) => String::from("Unknown"),
+    }
+}
 
 #[allow(non_snake_case)]
 #[component]
@@ -36,7 +73,7 @@ pub fn Sidebar(
 
             div {
                 class: "flex-1 overflow-y-auto px-8 py-4 space-y-8",
-                
+
                 SelfAudioControls {
                     mic_enabled: mic_enabled,
                     mic_volume: mic_volume,
@@ -45,6 +82,8 @@ pub fn Sidebar(
                     system_audio_enabled: system_audio_enabled,
                     system_audio_level: system_audio_level,
                 }
+
+                DeviceSettings {}
             }
 
             div {
@@ -66,11 +105,15 @@ fn SelfAudioControls(
     system_audio_level: u32,
 ) -> Element {
     let state_arc = use_context::<Arc<AppState>>();
-    
+
     let state_mic = state_arc.clone();
     let on_mic_toggle = move |_| {
-        let current = state_mic.mic_enabled.load(std::sync::atomic::Ordering::Relaxed);
-        state_mic.mic_enabled.store(!current, std::sync::atomic::Ordering::Relaxed);
+        let current = state_mic
+            .mic_enabled
+            .load(std::sync::atomic::Ordering::Relaxed);
+        state_mic
+            .mic_enabled
+            .store(!current, std::sync::atomic::Ordering::Relaxed);
     };
 
     let state_vol = state_arc.clone();
@@ -84,20 +127,28 @@ fn SelfAudioControls(
 
     let state_loop = state_arc.clone();
     let on_loopback_toggle = move |_| {
-        let current = state_loop.loopback_enabled.load(std::sync::atomic::Ordering::Relaxed);
-        state_loop.loopback_enabled.store(!current, std::sync::atomic::Ordering::Relaxed);
+        let current = state_loop
+            .loopback_enabled
+            .load(std::sync::atomic::Ordering::Relaxed);
+        state_loop
+            .loopback_enabled
+            .store(!current, std::sync::atomic::Ordering::Relaxed);
     };
 
     let state_sys = state_arc.clone();
     let on_system_audio_toggle = move |_| {
-        let current = state_sys.system_audio_enabled.load(std::sync::atomic::Ordering::Relaxed);
-        state_sys.system_audio_enabled.store(!current, std::sync::atomic::Ordering::Relaxed);
+        let current = state_sys
+            .system_audio_enabled
+            .load(std::sync::atomic::Ordering::Relaxed);
+        state_sys
+            .system_audio_enabled
+            .store(!current, std::sync::atomic::Ordering::Relaxed);
     };
 
     rsx! {
         div {
             class: "space-y-6",
-            
+
             div {
                 class: "text-xs font-bold text-slate-500 uppercase tracking-wider mb-4",
                 "Audio Settings"
@@ -105,11 +156,10 @@ fn SelfAudioControls(
 
             div {
                 class: "grid grid-cols-3 gap-3",
-                
-                // Mic toggle button
+
                 button {
                     class: format!(
-                        "p-4 rounded-2xl flex flex-col items-center justify-center gap-2 transition-all duration-200 border {}", 
+                        "p-4 rounded-2xl flex flex-col items-center justify-center gap-2 transition-all duration-200 border {}",
                         if mic_enabled { "bg-emerald-500/10 border-emerald-500/50 text-emerald-400 hover:bg-emerald-500/20" }
                         else { "bg-rose-500/10 border-rose-500/50 text-rose-400 hover:bg-rose-500/20" }
                     ),
@@ -118,11 +168,10 @@ fn SelfAudioControls(
                     span { class: "text-xs font-bold", if mic_enabled { "Mic On" } else { "Mic Off" } }
                 }
 
-                // Loopback toggle button
                 button {
                     class: format!(
-                        "p-4 rounded-2xl flex flex-col items-center justify-center gap-2 transition-all duration-200 border {}", 
-                        if loopback_enabled { "bg-indigo-500/10 border-indigo-500/50 text-indigo-400 hover:bg-indigo-500/20" } 
+                        "p-4 rounded-2xl flex flex-col items-center justify-center gap-2 transition-all duration-200 border {}",
+                        if loopback_enabled { "bg-indigo-500/10 border-indigo-500/50 text-indigo-400 hover:bg-indigo-500/20" }
                         else { "bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700 hover:text-slate-300" }
                     ),
                     onclick: on_loopback_toggle,
@@ -130,11 +179,10 @@ fn SelfAudioControls(
                     span { class: "text-xs font-bold", if loopback_enabled { "Loopback" } else { "No Loop" } }
                 }
 
-                // System audio toggle button
                 button {
                     class: format!(
-                        "p-4 rounded-2xl flex flex-col items-center justify-center gap-2 transition-all duration-200 border {}", 
-                        if system_audio_enabled { "bg-purple-500/10 border-purple-500/50 text-purple-400 hover:bg-purple-500/20" } 
+                        "p-4 rounded-2xl flex flex-col items-center justify-center gap-2 transition-all duration-200 border {}",
+                        if system_audio_enabled { "bg-purple-500/10 border-purple-500/50 text-purple-400 hover:bg-purple-500/20" }
                         else { "bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700 hover:text-slate-300" }
                     ),
                     onclick: on_system_audio_toggle,
@@ -192,6 +240,179 @@ fn SelfAudioControls(
                         class: "absolute inset-0 bg-slate-800 transition-all duration-75",
                         style: "left: {system_audio_level}%",
                     }
+                }
+            }
+        }
+    }
+}
+
+#[allow(non_snake_case)]
+#[component]
+fn DeviceSelector(
+    label: &'static str,
+    options: Vec<(String, String)>,
+    selected: String,
+    on_change: EventHandler<String>,
+) -> Element {
+    rsx! {
+        div {
+            label {
+                class: "block text-xs text-slate-400 mb-1",
+                "{label}"
+            }
+            select {
+                class: "w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-indigo-500 transition-colors",
+                value: "{selected}",
+                onchange: move |evt| on_change.call(evt.value()),
+                for (value, display) in options.iter() {
+                    option {
+                        value: "{value}",
+                        selected: *value == selected,
+                        "{display}"
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[allow(non_snake_case)]
+#[component]
+fn DeviceSettings() -> Element {
+    let state_arc = use_context::<Arc<AppState>>();
+
+    let input_devices = use_signal(get_input_devices);
+    let output_devices = use_signal(get_output_devices);
+    let network_interfaces = use_signal(get_network_interfaces);
+
+    let mut selected_input = use_signal(|| String::new());
+    let mut selected_output = use_signal(|| String::new());
+    let mut selected_network = use_signal(|| String::new());
+
+    let input_options: Vec<(String, String)> =
+        std::iter::once(("".to_string(), "System Default".to_string()))
+            .chain(input_devices.read().iter().filter_map(|d| {
+                d.id().ok().map(|id| {
+                    let id_str = format!("{:?}", id);
+                    (id_str, device_display_name(d))
+                })
+            }))
+            .collect();
+
+    let output_options: Vec<(String, String)> =
+        std::iter::once(("".to_string(), "System Default".to_string()))
+            .chain(output_devices.read().iter().filter_map(|d| {
+                d.id().ok().map(|id| {
+                    let id_str = format!("{:?}", id);
+                    (id_str, device_display_name(d))
+                })
+            }))
+            .collect();
+
+    let network_options: Vec<(String, String)> =
+        std::iter::once(("".to_string(), "All Interfaces".to_string()))
+            .chain(network_interfaces.read().iter().filter_map(|iface| {
+                if let if_addrs::IfAddr::V4(v4) = &iface.addr {
+                    Some((v4.ip.to_string(), format!("{} ({})", iface.name, v4.ip)))
+                } else {
+                    None
+                }
+            }))
+            .collect();
+
+    let on_apply = {
+        let state = state_arc.clone();
+        let input_devices = input_devices.clone();
+        let output_devices = output_devices.clone();
+        move |_| {
+            let input_id: Option<DeviceId> = {
+                let sel = selected_input.read();
+                if sel.is_empty() {
+                    None
+                } else {
+                    input_devices
+                        .read()
+                        .iter()
+                        .find(|d| d.id().ok().map(|id| format!("{:?}", id)) == Some(sel.clone()))
+                        .and_then(|d| d.id().ok())
+                }
+            };
+
+            let output_id: Option<DeviceId> = {
+                let sel = selected_output.read();
+                if sel.is_empty() {
+                    None
+                } else {
+                    output_devices
+                        .read()
+                        .iter()
+                        .find(|d| d.id().ok().map(|id| format!("{:?}", id)) == Some(sel.clone()))
+                        .and_then(|d| d.id().ok())
+                }
+            };
+
+            let send_ip: Option<Ipv4Addr> = {
+                let sel = selected_network.read();
+                if sel.is_empty() {
+                    None
+                } else {
+                    sel.parse().ok()
+                }
+            };
+
+            let config = PartyConfig {
+                input_device_id: input_id,
+                output_device_id: output_id,
+                send_interface_ip: send_ip,
+            };
+
+            if let Ok(mut party_guard) = state.party.lock() {
+                if let Some(party) = party_guard.as_mut() {
+                    if let Err(e) = party.restart_with_config(config) {
+                        tracing::error!("Failed to restart party: {}", e);
+                    }
+                }
+            }
+        }
+    };
+
+    rsx! {
+        div {
+            class: "space-y-4",
+
+            div {
+                class: "text-xs font-bold text-slate-500 uppercase tracking-wider mb-4",
+                "Device Settings"
+            }
+
+            div {
+                class: "space-y-3",
+
+                DeviceSelector {
+                    label: "Input Device",
+                    options: input_options,
+                    selected: selected_input(),
+                    on_change: move |v| selected_input.set(v),
+                }
+
+                DeviceSelector {
+                    label: "Output Device",
+                    options: output_options,
+                    selected: selected_output(),
+                    on_change: move |v| selected_output.set(v),
+                }
+
+                DeviceSelector {
+                    label: "Network Interface (Send)",
+                    options: network_options,
+                    selected: selected_network(),
+                    on_change: move |v| selected_network.set(v),
+                }
+
+                button {
+                    class: "w-full mt-4 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg transition-colors",
+                    onclick: on_apply,
+                    "Apply Changes"
                 }
             }
         }

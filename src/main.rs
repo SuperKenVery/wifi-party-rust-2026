@@ -21,9 +21,8 @@ mod state;
 mod ui;
 
 use anyhow::{Context, Result};
-use party::Party;
+use party::PartyConfig;
 use state::AppState;
-use std::sync::Arc;
 use tracing::{Level, error, info};
 
 fn main() {
@@ -38,10 +37,8 @@ fn main() {
 fn run() -> Result<()> {
     info!("Starting Wi-Fi Party KTV...");
 
-    let state = Arc::new(AppState::new());
-
-    let mut party = Party::<f32, 2, 48000>::new(state.clone());
-    party.run().context("Failed to start Party")?;
+    let config = PartyConfig::default();
+    let state = AppState::new(config).context("Failed to initialize application")?;
 
     info!("Application setup complete. Audio pipelines are live.");
 

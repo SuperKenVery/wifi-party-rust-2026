@@ -10,12 +10,51 @@ use crate::audio::frame::AudioBuffer;
 use crate::pipeline::{Sink, Source};
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{BufferSize, StreamConfig};
-use std::fmt::Debug;
+use cpal::{BufferSize, Device, DeviceId, StreamConfig};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
-/// Captures audio from the default input device (microphone).
+fn find_device_by_id<I: Iterator<Item = Device>>(
+    devices: I,
+    device_id: &DeviceId,
+) -> Option<Device> {
+    devices
+        .filter_map(|d| d.id().ok().map(|id| (d, id)))
+        .find(|(_, id)| id == device_id)
+        .map(|(d, _)| d)
+}
+
+fn get_input_device(device_id: Option<&DeviceId>) -> Result<Device> {
+    let host = cpal::default_host();
+    match device_id {
+        Some(id) => {
+            let devices = host
+                .input_devices()
+                .context("Failed to enumerate input devices")?;
+            find_device_by_id(devices, id).context("Input device not found")
+        }
+        None => host
+            .default_input_device()
+            .context("No default input device available"),
+    }
+}
+
+fn get_output_device(device_id: Option<&DeviceId>) -> Result<Device> {
+    let host = cpal::default_host();
+    match device_id {
+        Some(id) => {
+            let devices = host
+                .output_devices()
+                .context("Failed to enumerate output devices")?;
+            find_device_by_id(devices, id).context("Output device not found")
+        }
+        None => host
+            .default_output_device()
+            .context("No default output device available"),
+    }
+}
+
+/// Captures audio from an input device (microphone).
 pub struct AudioInput<S> {
     sink: Arc<S>,
 }
@@ -29,17 +68,15 @@ impl<S> AudioInput<S> {
 
     pub fn start<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>(
         self,
+        device_id: Option<&DeviceId>,
     ) -> Result<cpal::Stream>
     where
         Sample: AudioSample + cpal::SizedSample,
         S: Sink<Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> + 'static,
     {
-        let host = cpal::default_host();
-        let input_device = host
-            .default_input_device()
-            .context("No input device available")?;
+        let input_device = get_input_device(device_id)?;
         let input_config = input_device.default_input_config()?;
-        debug!("Default input config: {input_config:#?}");
+        debug!("Input config: {input_config:#?}");
 
         const MIN_BUFFER_MS: u32 = 3;
         let min_buffer_size = SAMPLE_RATE * MIN_BUFFER_MS / 1000;
@@ -92,20 +129,15 @@ impl<S> LoopbackInput<S> {
 
     pub fn start<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>(
         self,
+        device_id: Option<&DeviceId>,
     ) -> Result<cpal::Stream>
     where
         Sample: AudioSample + cpal::SizedSample,
         S: Sink<Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> + 'static,
     {
-        let host = cpal::default_host();
-        let output_device = host
-            .default_output_device()
-            .context("No output device available for loopback")?;
+        let output_device = get_output_device(device_id)?;
 
-        info!(
-            "Setting up loopback recording on output device: {:?}",
-            output_device.name()
-        );
+        info!("Setting up loopback recording on output device");
 
         let output_config = output_device.default_output_config()?;
 
@@ -154,17 +186,15 @@ impl<S> AudioOutput<S> {
 
     pub fn start<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>(
         self,
+        device_id: Option<&DeviceId>,
     ) -> Result<cpal::Stream>
     where
         Sample: AudioSample + cpal::SizedSample,
         S: Source<Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> + 'static,
     {
-        let host = cpal::default_host();
-        let output_device = host
-            .default_output_device()
-            .context("No output device available")?;
+        let output_device = get_output_device(device_id)?;
         let output_config = output_device.default_output_config()?;
-        debug!("Default output config: {output_config:#?}");
+        debug!("Output config: {output_config:#?}");
 
         let config = StreamConfig {
             channels: CHANNELS as u16,

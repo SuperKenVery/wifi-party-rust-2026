@@ -110,6 +110,10 @@ where
     /// This initializes the UDP multicast sender and spawns a background thread
     /// for the receiver.
     ///
+    /// # Arguments
+    ///
+    /// * `send_interface_ip` - If Some, bind sender to this interface. If None, use all interfaces.
+    ///
     /// # Returns
     ///
     /// A tuple of:
@@ -121,6 +125,7 @@ where
         &mut self,
         realtime_stream: Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
         state: Arc<AppState>,
+        send_interface_ip: Option<Ipv4Addr>,
     ) -> Result<(
         impl Sink<Input = NetworkPacket<Sample, CHANNELS, SAMPLE_RATE>> + Clone + 'static,
         Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
@@ -144,6 +149,13 @@ where
         socket
             .set_multicast_loop_v4(false)
             .context("Failed to disable multicast loop")?;
+
+        if let Some(iface_ip) = send_interface_ip {
+            socket
+                .set_multicast_if_v4(&iface_ip)
+                .context("Failed to set multicast interface")?;
+            info!("Multicast send interface set to {}", iface_ip);
+        }
 
         let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), MULTICAST_PORT);
         socket

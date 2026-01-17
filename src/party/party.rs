@@ -18,11 +18,13 @@ use crate::pipeline::Sink;
 use crate::state::{AppState, HostInfo, StreamInfo};
 
 use super::combinator::{MixingSource, Switch, Tee};
+use super::config::PartyConfig;
 use super::network::NetworkNode;
 use super::stream::{NetworkPacket, RealtimeAudioStream, RealtimeFramePacker, RealtimeStreamId};
 
 pub struct Party<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     state: Arc<AppState>,
+    config: PartyConfig,
     network_node: NetworkNode<Sample, CHANNELS, SAMPLE_RATE>,
     realtime_stream: Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
     _audio_streams: Vec<cpal::Stream>,
@@ -31,9 +33,10 @@ pub struct Party<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     Party<Sample, CHANNELS, SAMPLE_RATE>
 {
-    pub fn new(state: Arc<AppState>) -> Self {
+    pub fn new(state: Arc<AppState>, config: PartyConfig) -> Self {
         Self {
             state,
+            config,
             network_node: NetworkNode::new(),
             realtime_stream: Arc::new(RealtimeAudioStream::new()),
             _audio_streams: Vec::new(),
@@ -60,9 +63,11 @@ where
     pub fn run(&mut self) -> Result<()> {
         info!("Starting Party pipelines...");
 
-        let (network_sink, realtime_stream) = self
-            .network_node
-            .start(self.realtime_stream.clone(), self.state.clone())?;
+        let (network_sink, realtime_stream) = self.network_node.start(
+            self.realtime_stream.clone(),
+            self.state.clone(),
+            self.config.send_interface_ip,
+        )?;
 
         let loopback_buffer: SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE> = SimpleBuffer::new();
 
@@ -71,7 +76,8 @@ where
         //                                                  -> RealtimeFramePacker(Mic) -> NetworkSink
         //                                                  -> LoopbackSwitch -> loopback_buffer
         // ============================================================
-        let mic_packer = RealtimeFramePacker::<Sample, CHANNELS, SAMPLE_RATE>::new(RealtimeStreamId::Mic);
+        let mic_packer =
+            RealtimeFramePacker::<Sample, CHANNELS, SAMPLE_RATE>::new(RealtimeStreamId::Mic);
         let mic_sink = Tee::new(
             network_sink.clone().get_data_from(mic_packer),
             loopback_buffer.clone().get_data_from(
@@ -85,12 +91,13 @@ where
             self.state.mic_audio_level.clone(),
         ));
         let audio_input = AudioInput::new(mic_sink);
-        let input_stream = audio_input.start()?;
+        let input_stream = audio_input.start(self.config.input_device_id.as_ref())?;
 
         // ============================================================
         // System Audio Pipeline: SystemAudio -> LevelMeter -> SystemSwitch -> AudioBatcher -> RealtimeFramePacker(System) -> NetworkSink
         // ============================================================
-        let system_packer = RealtimeFramePacker::<Sample, CHANNELS, SAMPLE_RATE>::new(RealtimeStreamId::System);
+        let system_packer =
+            RealtimeFramePacker::<Sample, CHANNELS, SAMPLE_RATE>::new(RealtimeStreamId::System);
         let system_sink = network_sink
             .get_data_from(system_packer)
             .get_data_from(AudioBatcher::<Sample, CHANNELS, SAMPLE_RATE>::new(5))
@@ -101,7 +108,8 @@ where
                 self.state.system_audio_level.clone(),
             ));
 
-        let system_stream_result = LoopbackInput::new(system_sink).start();
+        let system_stream_result =
+            LoopbackInput::new(system_sink).start(self.config.output_device_id.as_ref());
         let system_stream = match system_stream_result {
             Ok(stream) => Some(stream),
             Err(e) => {
@@ -122,7 +130,7 @@ where
             MixingSource::new(realtime_stream, loopback_buffer);
 
         let audio_output: AudioOutput<_> = AudioOutput::new(speaker_source);
-        let output_stream = audio_output.start()?;
+        let output_stream = audio_output.start(self.config.output_device_id.as_ref())?;
 
         let mut streams = vec![input_stream, output_stream];
         if let Some(sys_stream) = system_stream {
@@ -135,6 +143,18 @@ where
         info!("Party pipelines configured successfully");
 
         Ok(())
+    }
+
+    pub fn restart_with_config(&mut self, config: PartyConfig) -> Result<()> {
+        info!("Restarting Party with new config...");
+
+        self._audio_streams.clear();
+
+        self.config = config;
+        self.network_node = NetworkNode::new();
+        self.realtime_stream = Arc::new(RealtimeAudioStream::new());
+
+        self.run()
     }
 
     fn start_host_sync_task(&self) {

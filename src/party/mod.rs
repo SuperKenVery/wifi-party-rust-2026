@@ -33,9 +33,11 @@
 
 pub mod codec;
 pub mod combinator;
+pub mod config;
 pub mod host;
 pub mod network;
 pub mod party;
 pub mod stream;
 
+pub use config::PartyConfig;
 pub use party::Party;

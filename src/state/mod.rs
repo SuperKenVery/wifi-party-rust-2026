@@ -4,11 +4,13 @@
 //!
 //! - [`AppState`] - Global application state (configs, connection status, etc.)
 //! - [`HostId`] / [`HostInfo`] - Remote peer identification and metadata
-//! - [`AudioConfig`] / [`NetworkConfig`] - Configuration structures
 
+use anyhow::Result;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::{Arc, Mutex};
+
+use crate::party::{Party, PartyConfig};
 
 /// Unique identifier for a remote host, derived from their socket address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -51,44 +53,6 @@ pub struct HostInfo {
     pub hardware_latency_ms: f32,
 }
 
-/// Audio device configuration
-#[derive(Debug, Clone)]
-pub struct AudioConfig {
-    pub input_device: Option<String>,
-    pub output_device: Option<String>,
-    pub sample_rate: u32,
-    pub channels: u8,
-    pub frame_size: usize,
-}
-
-impl Default for AudioConfig {
-    fn default() -> Self {
-        Self {
-            input_device: None,
-            output_device: None,
-            sample_rate: 48000,
-            channels: 2,
-            frame_size: 480, // 10ms at 48kHz
-        }
-    }
-}
-
-/// Network configuration
-#[derive(Debug, Clone)]
-pub struct NetworkConfig {
-    pub multicast_addr: String,
-    pub port: u16,
-}
-
-impl Default for NetworkConfig {
-    fn default() -> Self {
-        Self {
-            multicast_addr: "242.355.43.2".to_string(),
-            port: 7667,
-        }
-    }
-}
-
 /// Connection status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionStatus {
@@ -98,8 +62,6 @@ pub enum ConnectionStatus {
 
 /// Shared application state
 pub struct AppState {
-    pub audio_config: Arc<Mutex<AudioConfig>>,
-    pub network_config: Arc<Mutex<NetworkConfig>>,
     pub connection_status: Arc<Mutex<ConnectionStatus>>,
     pub mic_enabled: Arc<AtomicBool>,
     pub mic_volume: Arc<Mutex<f32>>,
@@ -107,15 +69,13 @@ pub struct AppState {
     pub loopback_enabled: Arc<AtomicBool>,
     pub system_audio_enabled: Arc<AtomicBool>,
     pub system_audio_level: Arc<AtomicU32>,
-    pub sequence_number: Arc<AtomicU64>,
     pub host_infos: Arc<Mutex<Vec<HostInfo>>>,
+    pub party: Mutex<Option<Party<f32, 2, 48000>>>,
 }
 
 impl AppState {
-    pub fn new() -> Self {
-        Self {
-            audio_config: Arc::new(Mutex::new(AudioConfig::default())),
-            network_config: Arc::new(Mutex::new(NetworkConfig::default())),
+    pub fn new(config: PartyConfig) -> Result<Arc<Self>> {
+        let state = Arc::new(Self {
             connection_status: Arc::new(Mutex::new(ConnectionStatus::Disconnected)),
             mic_enabled: Arc::new(AtomicBool::new(false)),
             mic_volume: Arc::new(Mutex::new(1.0)),
@@ -123,14 +83,14 @@ impl AppState {
             loopback_enabled: Arc::new(AtomicBool::new(true)),
             system_audio_enabled: Arc::new(AtomicBool::new(false)),
             system_audio_level: Arc::new(AtomicU32::new(0)),
-            sequence_number: Arc::new(AtomicU64::new(0)),
             host_infos: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-}
+            party: Mutex::new(None),
+        });
 
-impl Default for AppState {
-    fn default() -> Self {
-        Self::new()
+        let mut party = Party::new(state.clone(), config);
+        party.run()?;
+        *state.party.lock().unwrap() = Some(party);
+
+        Ok(state)
     }
 }
