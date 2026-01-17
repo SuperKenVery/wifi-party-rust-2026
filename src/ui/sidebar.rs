@@ -12,6 +12,8 @@ pub fn Sidebar(
     mic_volume: f32,
     mic_audio_level: u32,
     loopback_enabled: bool,
+    system_audio_enabled: bool,
+    system_audio_level: u32,
 ) -> Element {
     let (status_text, status_color, status_bg) = match connection_status {
         ConnectionStatus::Connected => ("Online", "text-emerald-400", "bg-emerald-500"),
@@ -63,6 +65,8 @@ pub fn Sidebar(
                     mic_volume: mic_volume,
                     mic_audio_level: mic_audio_level,
                     loopback_enabled: loopback_enabled,
+                    system_audio_enabled: system_audio_enabled,
+                    system_audio_level: system_audio_level,
                 }
 
                 NetworkStatsCompact {}
@@ -83,6 +87,8 @@ fn SelfAudioControls(
     mic_volume: f32,
     mic_audio_level: u32,
     loopback_enabled: bool,
+    system_audio_enabled: bool,
+    system_audio_level: u32,
 ) -> Element {
     let state_arc = use_context::<Arc<AppState>>();
     
@@ -107,6 +113,12 @@ fn SelfAudioControls(
         state_loop.loopback_enabled.store(!current, std::sync::atomic::Ordering::Relaxed);
     };
 
+    let state_sys = state_arc.clone();
+    let on_system_audio_toggle = move |_| {
+        let current = state_sys.system_audio_enabled.load(std::sync::atomic::Ordering::Relaxed);
+        state_sys.system_audio_enabled.store(!current, std::sync::atomic::Ordering::Relaxed);
+    };
+
     rsx! {
         div {
             class: "space-y-6",
@@ -117,8 +129,9 @@ fn SelfAudioControls(
             }
 
             div {
-                class: "grid grid-cols-2 gap-3",
+                class: "grid grid-cols-3 gap-3",
                 
+                // Mic toggle button
                 button {
                     class: format!(
                         "p-4 rounded-2xl flex flex-col items-center justify-center gap-2 transition-all duration-200 border {}", 
@@ -127,9 +140,10 @@ fn SelfAudioControls(
                     ),
                     onclick: on_mic_toggle,
                     div { class: "text-2xl", if mic_enabled { "🎙️" } else { "🔇" } }
-                    span { class: "text-xs font-bold", if mic_enabled { "Active" } else { "Muted" } }
+                    span { class: "text-xs font-bold", if mic_enabled { "Mic On" } else { "Mic Off" } }
                 }
 
+                // Loopback toggle button
                 button {
                     class: format!(
                         "p-4 rounded-2xl flex flex-col items-center justify-center gap-2 transition-all duration-200 border {}", 
@@ -138,7 +152,19 @@ fn SelfAudioControls(
                     ),
                     onclick: on_loopback_toggle,
                     div { class: "text-2xl", "🎧" }
-                    span { class: "text-xs font-bold", if loopback_enabled { "Loopback On" } else { "Loopback Off" } }
+                    span { class: "text-xs font-bold", if loopback_enabled { "Loopback" } else { "No Loop" } }
+                }
+
+                // System audio toggle button
+                button {
+                    class: format!(
+                        "p-4 rounded-2xl flex flex-col items-center justify-center gap-2 transition-all duration-200 border {}", 
+                        if system_audio_enabled { "bg-purple-500/10 border-purple-500/50 text-purple-400 hover:bg-purple-500/20" } 
+                        else { "bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700 hover:text-slate-300" }
+                    ),
+                    onclick: on_system_audio_toggle,
+                    div { class: "text-2xl", "🔊" }
+                    span { class: "text-xs font-bold", if system_audio_enabled { "Sharing" } else { "Not Share" } }
                 }
             }
 
@@ -165,14 +191,31 @@ fn SelfAudioControls(
                 }
                 div {
                     class: "h-2 bg-slate-800 rounded-full overflow-hidden relative",
-                    // Full-width gradient layer (green->yellow->red from 0%->100%)
                     div {
-                        class: "absolute inset-0 bg-gradient-to-r from-emerald-500 via-yellow-400 to-rose-500",
+                        class: "absolute inset-0",
+                        style: "background: linear-gradient(to right, #22c55e 0%, #22c55e 50%, #eab308 75%, #ef4444 100%)",
                     }
-                    // Overlay that hides the gradient beyond the current level
                     div {
                         class: "absolute inset-0 bg-slate-800 transition-all duration-75",
                         style: "left: {mic_audio_level}%",
+                    }
+                }
+            }
+
+            div {
+                div {
+                    class: "flex justify-between text-xs mb-2",
+                    span { class: "text-slate-400", "System Audio Level" }
+                }
+                div {
+                    class: "h-2 bg-slate-800 rounded-full overflow-hidden relative",
+                    div {
+                        class: "absolute inset-0",
+                        style: "background: linear-gradient(to right, #22c55e 0%, #22c55e 50%, #eab308 75%, #ef4444 100%)",
+                    }
+                    div {
+                        class: "absolute inset-0 bg-slate-800 transition-all duration-75",
+                        style: "left: {system_audio_level}%",
                     }
                 }
             }

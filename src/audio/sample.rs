@@ -1,8 +1,20 @@
+use std::fmt::Debug;
+
 use num_traits::{Bounded, FromPrimitive, Num, ToPrimitive};
 use rkyv::Archive;
 
 pub trait AudioSample:
-    Num + Copy + Send + Sync + PartialOrd + ToPrimitive + FromPrimitive + Bounded + Archive + 'static
+    Num
+    + Copy
+    + Send
+    + Sync
+    + PartialOrd
+    + ToPrimitive
+    + FromPrimitive
+    + Bounded
+    + Archive
+    + Debug
+    + 'static
 {
     fn silence() -> Self;
 

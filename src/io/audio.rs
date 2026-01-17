@@ -1,16 +1,21 @@
 //! Audio device I/O using cpal.
 //!
-//! Provides `AudioInput` for microphone capture and `AudioOutput` for speaker playback.
+//! Provides:
+//! - [`AudioInput`] for microphone capture
+//! - [`LoopbackInput`] for system audio capture (loopback recording)
+//! - [`AudioOutput`] for speaker playback
 
 use crate::audio::AudioSample;
 use crate::audio::frame::AudioBuffer;
 use crate::pipeline::{Sink, Source};
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{BufferSize, SampleRate, StreamConfig};
+use cpal::{BufferSize, StreamConfig};
+use std::fmt::Debug;
 use std::sync::Arc;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
+/// Captures audio from the default input device (microphone).
 pub struct AudioInput<S> {
     sink: Arc<S>,
 }
@@ -41,7 +46,7 @@ impl<S> AudioInput<S> {
 
         let config = StreamConfig {
             channels: CHANNELS as u16,
-            sample_rate: SampleRate(SAMPLE_RATE),
+            sample_rate: SAMPLE_RATE,
             buffer_size: match input_config.buffer_size() {
                 cpal::SupportedBufferSize::Range { min, .. } => {
                     BufferSize::Fixed((*min).max(min_buffer_size))
@@ -70,6 +75,72 @@ impl<S> AudioInput<S> {
     }
 }
 
+/// Captures system audio via loopback recording.
+///
+/// This works by building an input stream on the default output device,
+/// which cpal supports as loopback recording on supported platforms.
+pub struct LoopbackInput<S> {
+    sink: Arc<S>,
+}
+
+impl<S> LoopbackInput<S> {
+    pub fn new(sink: S) -> Self {
+        Self {
+            sink: Arc::new(sink),
+        }
+    }
+
+    pub fn start<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>(
+        self,
+    ) -> Result<cpal::Stream>
+    where
+        Sample: AudioSample + cpal::SizedSample,
+        S: Sink<Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> + 'static,
+    {
+        let host = cpal::default_host();
+        let output_device = host
+            .default_output_device()
+            .context("No output device available for loopback")?;
+
+        info!(
+            "Setting up loopback recording on output device: {:?}",
+            output_device.name()
+        );
+
+        let output_config = output_device.default_output_config()?;
+
+        let config = StreamConfig {
+            channels: CHANNELS as u16,
+            sample_rate: SAMPLE_RATE,
+            buffer_size: match output_config.buffer_size() {
+                cpal::SupportedBufferSize::Range { min, .. } => BufferSize::Fixed(*min),
+                cpal::SupportedBufferSize::Unknown => {
+                    warn!("Supported buffer size range unknown, using default");
+                    BufferSize::Default
+                }
+            },
+        };
+        debug!("Using output config for loopback: {:?}", config);
+
+        let sink = self.sink;
+        let stream = output_device.build_input_stream(
+            &config,
+            move |data: &[Sample], _: &cpal::InputCallbackInfo| {
+                let owned: Vec<Sample> = Vec::from(data);
+                if let Ok(frame) = AudioBuffer::<Sample, CHANNELS, SAMPLE_RATE>::new(owned) {
+                    sink.push(frame);
+                }
+            },
+            |err| error!("An error occurred on the loopback audio stream: {}", err),
+            None,
+        )?;
+        stream.play()?;
+        info!("Loopback recording started successfully");
+        Ok(stream)
+    }
+}
+
+/// Plays audio to the default output device (speakers).
 pub struct AudioOutput<S> {
     source: Arc<S>,
 }
@@ -97,7 +168,7 @@ impl<S> AudioOutput<S> {
 
         let config = StreamConfig {
             channels: CHANNELS as u16,
-            sample_rate: SampleRate(SAMPLE_RATE),
+            sample_rate: SAMPLE_RATE,
             buffer_size: match output_config.buffer_size() {
                 cpal::SupportedBufferSize::Range { min, .. } => BufferSize::Fixed(*min),
                 cpal::SupportedBufferSize::Unknown => {

@@ -17,8 +17,9 @@ pub fn App() -> Element {
     let mut mic_volume = use_signal(|| 1.0f32);
     let mut mic_audio_level = use_signal(|| 0u32);
     let mut loopback_enabled = use_signal(|| false);
+    let mut system_audio_enabled = use_signal(|| false);
+    let mut system_audio_level = use_signal(|| 0u32);
 
-    // Poll state periodically
     use_effect(move || {
         let state = state_arc.clone();
         spawn(async move {
@@ -48,6 +49,17 @@ pub fn App() -> Element {
                         .load(std::sync::atomic::Ordering::Relaxed),
                 );
 
+                system_audio_enabled.set(
+                    state
+                        .system_audio_enabled
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                );
+
+                let sys_level = state
+                    .system_audio_level
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                system_audio_level.set(sys_level);
+
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
         });
@@ -67,6 +79,8 @@ pub fn App() -> Element {
                 mic_volume: mic_volume(),
                 mic_audio_level: mic_audio_level(),
                 loopback_enabled: loopback_enabled(),
+                system_audio_enabled: system_audio_enabled(),
+                system_audio_level: system_audio_level(),
             }
 
             MainContent {

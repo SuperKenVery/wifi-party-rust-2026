@@ -9,5 +9,4 @@
 pub mod frame;
 pub mod sample;
 
-pub use frame::{AudioBuffer, AudioFrame};
 pub use sample::AudioSample;

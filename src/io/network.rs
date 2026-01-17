@@ -1,18 +1,15 @@
 //! Network I/O using UDP multicast.
 //!
-//! This module provides low-level network transport for audio frames:
+//! This module provides low-level network transport for audio packets:
 //!
-//! - [`NetworkSender`] - Broadcasts audio frames to all peers via UDP multicast
-//! - [`NetworkReceiver`] - Receives frames from peers and dispatches to per-host pipelines
+//! - [`NetworkSender`] - Broadcasts audio packets to all peers via UDP multicast
+//! - [`NetworkReceiver`] - Receives packets from peers and dispatches to stream handlers
 //! - [`get_local_ip`] - Utility to discover local IP address for multicast
 //!
 //! # Protocol
 //!
-//! Audio frames are serialized using `rkyv` (zero-copy deserialization) and sent
-//! over UDP multicast. Each packet contains a single [`AudioFrame`] with:
-//! - Sequence number for ordering and jitter buffer management
-//! - Timestamp for synchronization
-//! - Audio sample data
+//! Audio data is wrapped in [`NetworkPacket`] and serialized using `rkyv` (zero-copy
+//! deserialization). Each packet is sent over UDP multicast.
 //!
 //! # Multicast Configuration
 //!
@@ -25,11 +22,10 @@ use std::marker::PhantomData;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::audio::AudioSample;
-use crate::audio::frame::AudioFrame;
-use crate::party::host::HostPipelineManager;
+use crate::party::stream::{NetworkPacket, RealtimeAudioStream};
 use crate::pipeline::Sink;
 use crate::state::{AppState, ConnectionStatus, HostId};
 
@@ -37,17 +33,22 @@ pub const MULTICAST_ADDR: &str = "239.255.43.2";
 pub const MULTICAST_PORT: u16 = 7667;
 pub const TTL: u32 = 1;
 
-/// Sends audio frames to all peers via UDP multicast.
+/// Sends audio packets to all peers via UDP multicast.
 ///
 /// Implements [`Sink`] so it can be used directly in the audio pipeline.
-/// Frames are serialized with `rkyv` and broadcast to the multicast group.
+/// Packets are serialized with `rkyv` and broadcast to the multicast group.
 ///
 /// # Error Handling
 ///
 /// Send failures are logged but don't propagate errors - audio streaming
 /// continues even if individual packets are lost (UDP is unreliable by design).
+///
+/// # Cloning
+///
+/// `NetworkSender` can be cloned to share the same socket between multiple
+/// audio pipelines (e.g., mic and system audio).
 pub struct NetworkSender<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    socket: UdpSocket,
+    socket: Arc<UdpSocket>,
     multicast_addr: SocketAddr,
     _marker: PhantomData<Sample>,
 }
@@ -55,16 +56,24 @@ pub struct NetworkSender<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> 
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     NetworkSender<Sample, CHANNELS, SAMPLE_RATE>
 {
-    /// Creates a new NetworkSender using the provided UDP socket.
-    ///
-    /// The caller is responsible for configuring the socket appropriately
-    /// (e.g., setting non-blocking mode, multicast TTL).
     pub fn new(socket: UdpSocket, multicast_addr: SocketAddr) -> Self {
         info!("Network sender initialized for {:?}", multicast_addr);
 
         Self {
-            socket,
+            socket: Arc::new(socket),
             multicast_addr,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Clone
+    for NetworkSender<Sample, CHANNELS, SAMPLE_RATE>
+{
+    fn clone(&self) -> Self {
+        Self {
+            socket: self.socket.clone(),
+            multicast_addr: self.multicast_addr,
             _marker: PhantomData,
         }
     }
@@ -73,7 +82,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     NetworkSender<Sample, CHANNELS, SAMPLE_RATE>
 where
-    AudioFrame<Sample, CHANNELS, SAMPLE_RATE>: for<'a> rkyv::Serialize<
+    NetworkPacket<Sample, CHANNELS, SAMPLE_RATE>: for<'a> rkyv::Serialize<
             rkyv::api::high::HighSerializer<
                 rkyv::util::AlignedVec,
                 rkyv::ser::allocator::ArenaHandle<'a>,
@@ -81,8 +90,8 @@ where
             >,
         >,
 {
-    fn send_frame(&self, frame: &AudioFrame<Sample, CHANNELS, SAMPLE_RATE>) {
-        match rkyv::to_bytes::<rkyv::rancor::Error>(frame) {
+    fn send_packet(&self, packet: &NetworkPacket<Sample, CHANNELS, SAMPLE_RATE>) {
+        match rkyv::to_bytes::<rkyv::rancor::Error>(packet) {
             Ok(serialized) => match self.socket.send_to(&serialized, self.multicast_addr) {
                 Ok(bytes_sent) => {
                     if bytes_sent != serialized.len() {
@@ -90,14 +99,14 @@ where
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    warn!("Socket would block, dropping frame");
+                    warn!("Socket would block, dropping packet");
                 }
                 Err(e) => {
                     warn!("Failed to send packet: {}", e);
                 }
             },
             Err(e) => {
-                warn!("Failed to serialize frame: {}", e);
+                warn!("Failed to serialize packet: {}", e);
             }
         }
     }
@@ -106,7 +115,7 @@ where
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Sink
     for NetworkSender<Sample, CHANNELS, SAMPLE_RATE>
 where
-    AudioFrame<Sample, CHANNELS, SAMPLE_RATE>: for<'a> rkyv::Serialize<
+    NetworkPacket<Sample, CHANNELS, SAMPLE_RATE>: for<'a> rkyv::Serialize<
             rkyv::api::high::HighSerializer<
                 rkyv::util::AlignedVec,
                 rkyv::ser::allocator::ArenaHandle<'a>,
@@ -114,44 +123,37 @@ where
             >,
         >,
 {
-    type Input = AudioFrame<Sample, CHANNELS, SAMPLE_RATE>;
+    type Input = NetworkPacket<Sample, CHANNELS, SAMPLE_RATE>;
 
     fn push(&self, input: Self::Input) {
-        self.send_frame(&input);
+        self.send_packet(&input);
     }
 }
 
-/// Receives audio frames from peers and dispatches them to per-host pipelines.
+/// Receives audio packets from peers and dispatches them to stream handlers.
 ///
 /// Runs in a dedicated thread (see [`NetworkNode`](crate::party::network::NetworkNode)),
-/// continuously listening for UDP multicast packets. Each received frame is:
+/// continuously listening for UDP multicast packets. Each received packet is:
 ///
 /// 1. Deserialized from `rkyv` format
 /// 2. Filtered (packets from self are ignored based on source IP)
-/// 3. Dispatched to the appropriate host's jitter buffer via [`HostPipelineManager`]
+/// 3. Dispatched to the appropriate stream handler based on packet type
 ///
-/// The receiver also periodically cleans up stale host pipelines.
+/// The receiver also periodically cleans up stale stream buffers.
 pub struct NetworkReceiver<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     socket: UdpSocket,
     state: Arc<AppState>,
-    pipeline_manager: Arc<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>,
+    realtime_stream: Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
     local_ips: Vec<std::net::IpAddr>,
 }
 
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     NetworkReceiver<Sample, CHANNELS, SAMPLE_RATE>
 {
-    /// Creates a new NetworkReceiver using the provided UDP socket.
-    ///
-    /// The caller is responsible for configuring the socket appropriately
-    /// (e.g., binding, joining multicast group, setting options).
-    ///
-    /// `local_ips` should contain all IP addresses of the local machine,
-    /// used to filter out packets originating from this device.
     pub fn new(
         socket: UdpSocket,
         state: Arc<AppState>,
-        pipeline_manager: Arc<HostPipelineManager<Sample, CHANNELS, SAMPLE_RATE>>,
+        realtime_stream: Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
         local_ips: Vec<std::net::IpAddr>,
     ) -> Self {
         info!("Network receiver initialized, local IPs: {:?}", local_ips);
@@ -159,22 +161,21 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         Self {
             socket,
             state,
-            pipeline_manager,
+            realtime_stream,
             local_ips,
         }
     }
 }
 
-impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+impl<Sample: AudioSample + Clone, const CHANNELS: usize, const SAMPLE_RATE: u32>
     NetworkReceiver<Sample, CHANNELS, SAMPLE_RATE>
 where
-    AudioFrame<Sample, CHANNELS, SAMPLE_RATE>: rkyv::Archive,
-    <AudioFrame<Sample, CHANNELS, SAMPLE_RATE> as rkyv::Archive>::Archived: rkyv::Deserialize<
-            AudioFrame<Sample, CHANNELS, SAMPLE_RATE>,
+    NetworkPacket<Sample, CHANNELS, SAMPLE_RATE>: rkyv::Archive,
+    <NetworkPacket<Sample, CHANNELS, SAMPLE_RATE> as rkyv::Archive>::Archived: rkyv::Deserialize<
+            NetworkPacket<Sample, CHANNELS, SAMPLE_RATE>,
             rkyv::api::high::HighDeserializer<rkyv::rancor::Error>,
         >,
 {
-    /// Runs the receive loop. This blocks forever, processing incoming packets.
     pub fn run(mut self) {
         info!("Network receive thread started");
 
@@ -189,7 +190,7 @@ where
             }
 
             if last_cleanup.elapsed() > Duration::from_secs(1) {
-                self.pipeline_manager.cleanup_stale_hosts();
+                self.realtime_stream.cleanup_stale();
                 last_cleanup = Instant::now();
             }
         }
@@ -201,7 +202,6 @@ where
             .recv_from(buf)
             .context("Failed to receive UDP packet")?;
 
-        // Filter out packets from our own device (router may echo multicast back to us)
         if self.local_ips.contains(&source_addr.ip()) {
             return Ok(());
         }
@@ -209,20 +209,20 @@ where
         let received_data = &buf[..size];
         let host_id = HostId::from(source_addr);
 
-        let frame: AudioFrame<Sample, CHANNELS, SAMPLE_RATE> =
+        let packet: NetworkPacket<Sample, CHANNELS, SAMPLE_RATE> =
             unsafe { rkyv::from_bytes_unchecked(received_data) }
                 .map_err(|e| anyhow::anyhow!("Deserialization error: {:?}", e))?;
 
-        self.pipeline_manager.push_frame(host_id, frame);
+        match packet {
+            NetworkPacket::Realtime(frame) => {
+                self.realtime_stream.receive(host_id, frame);
+            }
+        }
 
         Ok(())
     }
 }
 
-/// Get the local IP address by creating a socket.
-///
-/// This doesn't actually send any data, just queries the local routing table
-/// to determine which interface would be used for multicast traffic.
 pub fn get_local_ip() -> Result<HostId> {
     let socket = UdpSocket::bind("0.0.0.0:0").context("Failed to create socket")?;
 

@@ -8,7 +8,7 @@ edition = "2024"
 
 [dependencies]
 dioxus = { version = "0.7.2", features = ["desktop"] }
-cpal = "0.15"
+cpal = "0.17"
 rkyv = "0.8"
 rtrb = "0.3"
 socket2 = "0.5"

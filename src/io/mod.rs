@@ -4,10 +4,11 @@
 //! implementations that interface with the outside world:
 //!
 //! - [`AudioInput`] / [`AudioOutput`] - Microphone capture and speaker playback via cpal
-//! - [`NetworkSender`] / [`NetworkReceiver`] - UDP multicast for audio frame transport
+//! - [`LoopbackInput`] - System audio capture (loopback recording) via cpal
+//! - [`NetworkSender`] / [`NetworkReceiver`] - UDP multicast for audio packet transport
 
 pub mod audio;
 pub mod network;
 
-pub use audio::{AudioInput, AudioOutput};
+pub use audio::{AudioInput, AudioOutput, LoopbackInput};
 pub use network::{get_local_ip, NetworkReceiver, NetworkSender, MULTICAST_ADDR, MULTICAST_PORT, TTL};
