@@ -4,6 +4,8 @@
 //! audio sharing pipeline.
 
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use anyhow::Result;
 use tracing::{info, warn};
@@ -13,7 +15,7 @@ use crate::io::{AudioInput, AudioOutput, LoopbackInput};
 use crate::pipeline::effect::LevelMeter;
 use crate::pipeline::node::{AudioBatcher, SimpleBuffer};
 use crate::pipeline::Sink;
-use crate::state::AppState;
+use crate::state::{AppState, HostInfo, StreamInfo};
 
 use super::combinator::{MixingSource, Switch, Tee};
 use super::network::NetworkNode;
@@ -128,8 +130,72 @@ where
         }
         self._audio_streams = streams;
 
+        self.start_host_sync_task();
+
         info!("Party pipelines configured successfully");
 
         Ok(())
+    }
+
+    fn start_host_sync_task(&self) {
+        let state = self.state.clone();
+        let realtime_stream = self.realtime_stream.clone();
+
+        thread::spawn(move || {
+            loop {
+                thread::sleep(Duration::from_millis(100));
+
+                let active_host_ids = realtime_stream.active_hosts();
+
+                let mut host_infos_vec = Vec::new();
+
+                for host_id in active_host_ids {
+                    let stream_stats = realtime_stream.host_stream_stats(host_id);
+
+                    // Aggregate stats across streams (average)
+                    let (total_loss, total_jitter, total_hw, count) = stream_stats.iter().fold(
+                        (0.0f32, 0.0f32, 0.0f32, 0usize),
+                        |(loss, jitter, hw, cnt), s| {
+                            (
+                                loss + s.packet_loss,
+                                jitter + s.jitter_latency_ms,
+                                hw + s.hardware_latency_ms,
+                                cnt + 1,
+                            )
+                        },
+                    );
+
+                    let (packet_loss, jitter_latency_ms, hardware_latency_ms) = if count > 0 {
+                        (
+                            total_loss / count as f32,
+                            total_jitter / count as f32,
+                            total_hw / count as f32,
+                        )
+                    } else {
+                        (0.0, 0.0, 0.0)
+                    };
+
+                    let streams: Vec<StreamInfo> = stream_stats
+                        .iter()
+                        .map(|s| StreamInfo {
+                            stream_id: s.stream_id.to_string(),
+                            audio_level: s.audio_level,
+                        })
+                        .collect();
+
+                    host_infos_vec.push(HostInfo {
+                        id: host_id,
+                        streams,
+                        packet_loss,
+                        jitter_latency_ms,
+                        hardware_latency_ms,
+                    });
+                }
+
+                if let Ok(mut host_infos) = state.host_infos.lock() {
+                    *host_infos = host_infos_vec;
+                }
+            }
+        });
     }
 }

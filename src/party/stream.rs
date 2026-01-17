@@ -49,6 +49,15 @@ pub enum RealtimeStreamId {
     System,
 }
 
+impl std::fmt::Display for RealtimeStreamId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RealtimeStreamId::Mic => write!(f, "Mic"),
+            RealtimeStreamId::System => write!(f, "System"),
+        }
+    }
+}
+
 /// Frame format for realtime audio streams.
 ///
 /// Contains the stream identifier, sequence number for ordering,
@@ -241,6 +250,63 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     pub fn buffer_count(&self) -> usize {
         self.buffers.len()
     }
+
+    /// Returns a list of unique active host IDs.
+    pub fn active_hosts(&self) -> Vec<HostId> {
+        let mut hosts = Vec::new();
+        for entry in self.buffers.iter() {
+            let host_id = entry.key().host_id;
+            if !hosts.contains(&host_id) {
+                hosts.push(host_id);
+            }
+        }
+        hosts
+    }
+
+    /// Returns stats for all streams belonging to a specific host.
+    pub fn host_stream_stats(&self, host_id: HostId) -> Vec<StreamStats> {
+        let mut result = Vec::new();
+
+        for entry in self.buffers.iter() {
+            if entry.key().host_id != host_id {
+                continue;
+            }
+
+            let stream_id = entry.key().stream_id;
+            let stats = entry.value().buffer.stats();
+
+            let packet_loss = 1.0 - stats.stability();
+
+            // Hardware latency = frame_size / sample_rate / channels * 1000
+            let expected_frame_size = stats.expected_frame_size();
+            let hardware_latency_ms = if expected_frame_size > 0 {
+                expected_frame_size as f64 / (SAMPLE_RATE as f64) / (CHANNELS as f64) * 1000.0
+            } else {
+                0.0
+            };
+            let jitter_latency_ms = stats.latency_ema() * hardware_latency_ms;
+
+            result.push(StreamStats {
+                stream_id,
+                audio_level: stats.audio_level_ema() as f32,
+                packet_loss: packet_loss as f32,
+                jitter_latency_ms: jitter_latency_ms as f32,
+                hardware_latency_ms: hardware_latency_ms as f32,
+            });
+        }
+
+        result
+    }
+}
+
+/// Statistics for a single audio stream.
+#[derive(Debug, Clone)]
+pub struct StreamStats {
+    pub stream_id: RealtimeStreamId,
+    pub audio_level: f32,
+    pub packet_loss: f32,
+    pub jitter_latency_ms: f32,
+    pub hardware_latency_ms: f32,
 }
 
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Default

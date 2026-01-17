@@ -59,11 +59,9 @@ pub fn MainContent(hosts: Vec<HostInfo>) -> Element {
 #[allow(non_snake_case)]
 #[component]
 fn HostCard(host: HostInfo) -> Element {
-    let on_volume_change = move |evt: Event<FormData>| {
-        if let Ok(value_str) = evt.value().parse::<f32>() {
-            let _volume = value_str / 100.0;
-        }
-    };
+    let packet_loss_pct = (host.packet_loss * 100.0) as i32;
+    let jitter_ms = host.jitter_latency_ms as i32;
+    let hw_ms = host.hardware_latency_ms as i32;
 
     rsx! {
         div {
@@ -90,20 +88,15 @@ fn HostCard(host: HostInfo) -> Element {
             }
 
             div {
-                class: "space-y-3",
-                
-                div {
-                    class: "flex items-center justify-between text-xs text-slate-400 mb-1",
-                    span { "Volume" }
-                    span { class: "text-slate-300", "{(host.volume * 100.0) as i32}%" }
+                class: "space-y-2",
+                for stream in &host.streams {
+                    StreamLevelIndicator { stream_id: stream.stream_id.clone(), audio_level: stream.audio_level }
                 }
-                input {
-                    r#type: "range",
-                    min: 0,
-                    max: 200,
-                    value: (host.volume * 100.0) as i32,
-                    class: "w-full",
-                    oninput: on_volume_change,
+                if host.streams.is_empty() {
+                    div {
+                        class: "text-xs text-slate-500 italic",
+                        "No active streams"
+                    }
                 }
             }
 
@@ -111,8 +104,44 @@ fn HostCard(host: HostInfo) -> Element {
                 class: "mt-4 pt-4 border-t border-white/5 flex items-center justify-between text-xs",
                 div {
                     class: "flex gap-3",
-                    span { class: "text-slate-500", "Loss: <span class=\"text-slate-300 ml-1\">{(host.packet_loss * 100.0) as i32}%</span>" }
-                    span { class: "text-slate-500", "Ping: <span class=\"text-emerald-400 ml-1\">20ms</span>" }
+                    span { class: "text-slate-500",
+                        "Loss: "
+                        span { class: "text-slate-300 ml-1", "{packet_loss_pct}%" }
+                    }
+                    span { class: "text-slate-500",
+                        "Jitter: "
+                        span { class: "text-emerald-400 ml-1", "{jitter_ms}ms" }
+                    }
+                    span { class: "text-slate-500",
+                        "HW: "
+                        span { class: "text-indigo-400 ml-1", "{hw_ms}ms" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[allow(non_snake_case)]
+#[component]
+fn StreamLevelIndicator(stream_id: String, audio_level: f32) -> Element {
+    let level_pct = (audio_level * 100.0) as u32;
+    let icon = if stream_id == "Mic" { "🎙️" } else { "🔊" };
+
+    rsx! {
+        div {
+            class: "flex items-center gap-2",
+            span { class: "text-sm", "{icon}" }
+            span { class: "text-xs text-slate-400 w-12", "{stream_id}" }
+            div {
+                class: "flex-1 h-2 bg-slate-800 rounded-full overflow-hidden relative",
+                div {
+                    class: "absolute inset-0",
+                    style: "background: linear-gradient(to right, #22c55e 0%, #22c55e 50%, #eab308 75%, #ef4444 100%)",
+                }
+                div {
+                    class: "absolute inset-0 bg-slate-800 transition-all duration-75",
+                    style: "left: {level_pct}%",
                 }
             }
         }

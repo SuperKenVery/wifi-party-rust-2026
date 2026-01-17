@@ -1,6 +1,6 @@
 //! Main application entry point for the UI.
 
-use crate::state::{AppState, ConnectionStatus, HostInfo};
+use crate::state::{AppState, HostInfo};
 use dioxus::prelude::*;
 use std::sync::Arc;
 
@@ -11,7 +11,6 @@ use super::sidebar::Sidebar;
 pub fn App() -> Element {
     let state_arc = use_context::<Arc<AppState>>();
 
-    let mut connection_status = use_signal(|| ConnectionStatus::Disconnected);
     let mut active_hosts = use_signal(|| Vec::<HostInfo>::new());
     let mut mic_enabled = use_signal(|| false);
     let mut mic_volume = use_signal(|| 1.0f32);
@@ -24,10 +23,6 @@ pub fn App() -> Element {
         let state = state_arc.clone();
         spawn(async move {
             loop {
-                if let Ok(status) = state.connection_status.lock() {
-                    connection_status.set(*status);
-                }
-
                 if let Ok(infos) = state.host_infos.lock() {
                     active_hosts.set(infos.clone());
                 }
@@ -74,7 +69,6 @@ pub fn App() -> Element {
             class: "flex h-screen w-full bg-slate-900 text-slate-100 font-sans overflow-hidden selection:bg-indigo-500 selection:text-white",
 
             Sidebar {
-                connection_status: connection_status(),
                 mic_enabled: mic_enabled(),
                 mic_volume: mic_volume(),
                 mic_audio_level: mic_audio_level(),

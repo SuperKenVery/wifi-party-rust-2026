@@ -1,13 +1,12 @@
 //! Sidebar components for audio controls and status display.
 
-use crate::state::{AppState, ConnectionStatus};
+use crate::state::AppState;
 use dioxus::prelude::*;
 use std::sync::Arc;
 
 #[allow(non_snake_case)]
 #[component]
 pub fn Sidebar(
-    connection_status: ConnectionStatus,
     mic_enabled: bool,
     mic_volume: f32,
     mic_audio_level: u32,
@@ -15,11 +14,6 @@ pub fn Sidebar(
     system_audio_enabled: bool,
     system_audio_level: u32,
 ) -> Element {
-    let (status_text, status_color, status_bg) = match connection_status {
-        ConnectionStatus::Connected => ("Online", "text-emerald-400", "bg-emerald-500"),
-        ConnectionStatus::Disconnected => ("Offline", "text-rose-400", "bg-rose-500"),
-    };
-
     rsx! {
         div {
             class: "w-80 flex-shrink-0 flex flex-col glass-strong border-r border-slate-800 z-20",
@@ -41,23 +35,6 @@ pub fn Sidebar(
             }
 
             div {
-                class: "px-8 py-4",
-                div {
-                    class: "flex items-center gap-3 p-3 bg-slate-800/40 rounded-xl border border-slate-700/50",
-                    div {
-                        class: "relative w-3 h-3",
-                        div { class: "absolute inset-0 rounded-full {status_bg} opacity-75 animate-ping" }
-                        div { class: "relative w-3 h-3 rounded-full {status_bg}" }
-                    }
-                    div {
-                        class: "flex flex-col",
-                        span { class: "text-xs text-slate-400 font-semibold uppercase tracking-wider", "Status" }
-                        span { class: "text-sm font-bold {status_color}", "{status_text}" }
-                    }
-                }
-            }
-
-            div {
                 class: "flex-1 overflow-y-auto px-8 py-4 space-y-8",
                 
                 SelfAudioControls {
@@ -68,8 +45,6 @@ pub fn Sidebar(
                     system_audio_enabled: system_audio_enabled,
                     system_audio_level: system_audio_level,
                 }
-
-                NetworkStatsCompact {}
             }
 
             div {
@@ -219,39 +194,6 @@ fn SelfAudioControls(
                     }
                 }
             }
-        }
-    }
-}
-
-#[allow(non_snake_case)]
-#[component]
-fn NetworkStatsCompact() -> Element {
-    rsx! {
-        div {
-            class: "space-y-3 pt-4 border-t border-slate-800/50",
-            div {
-                class: "text-xs font-bold text-slate-500 uppercase tracking-wider mb-2",
-                "Network Health"
-            }
-            
-            div {
-                class: "grid grid-cols-2 gap-2",
-                StatBox { label: "Latency", value: "~20ms", color: "text-emerald-400" }
-                StatBox { label: "Loss", value: "0%", color: "text-indigo-400" }
-                StatBox { label: "Jitter", value: "2ms", color: "text-yellow-400" }
-            }
-        }
-    }
-}
-
-#[allow(non_snake_case)]
-#[component]
-fn StatBox(label: &'static str, value: &'static str, color: &'static str) -> Element {
-    rsx! {
-        div {
-            class: "bg-slate-800/30 p-2 rounded-lg border border-slate-700/30",
-            div { class: "text-[10px] text-slate-500 uppercase", "{label}" }
-            div { class: "text-sm font-mono font-bold {color}", "{value}" }
         }
     }
 }

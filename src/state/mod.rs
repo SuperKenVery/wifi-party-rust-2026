@@ -34,35 +34,21 @@ impl From<SocketAddr> for HostId {
     }
 }
 
+/// Information about a single audio stream from a remote host.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamInfo {
+    pub stream_id: String,
+    pub audio_level: f32,
+}
+
 /// Information about a remote host
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct HostInfo {
     pub id: HostId,
-    pub volume: f32,      // 0.0 to 2.0 (0-200%)
-    pub audio_level: f32, // 0.0 to 1.0
-    pub packet_loss: f32, // 0.0 to 1.0 (percentage)
-    pub last_seen: std::time::Instant,
-}
-
-impl PartialEq for HostInfo {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-            && self.volume == other.volume
-            && self.audio_level == other.audio_level
-            && self.packet_loss == other.packet_loss
-    }
-}
-
-impl HostInfo {
-    pub fn new(id: HostId) -> Self {
-        Self {
-            id,
-            volume: 1.0,
-            audio_level: 0.0,
-            packet_loss: 0.0,
-            last_seen: std::time::Instant::now(),
-        }
-    }
+    pub streams: Vec<StreamInfo>,
+    pub packet_loss: f32,
+    pub jitter_latency_ms: f32,
+    pub hardware_latency_ms: f32,
 }
 
 /// Audio device configuration

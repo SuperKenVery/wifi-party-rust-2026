@@ -34,13 +34,13 @@ impl<T> std::ops::Deref for CachePadded<T> {
     }
 }
 
-/// Statistics for adaptive jitter buffer behavior.
-///
-/// - `latency_window`: ring buffer tracking recent latency values to find minimum
-/// - `stability`: EMA of hit rate (higher = more reliable delivery)
-struct JitterBufferStats {
+/// Statistics for jitter buffer behavior.
+pub struct JitterBufferStats {
     latency_window: Mutex<LatencyWindow>,
     stability: AtomicU64,
+    latency_ema: AtomicU64,
+    audio_level_ema: AtomicU64,
+    expected_frame_size: AtomicU64,
 }
 
 struct LatencyWindow {
@@ -89,6 +89,9 @@ impl JitterBufferStats {
         Self {
             latency_window: Mutex::new(LatencyWindow::new()),
             stability: AtomicU64::new(STABILITY_THRESHOLD.to_bits()),
+            latency_ema: AtomicU64::new(0f64.to_bits()),
+            audio_level_ema: AtomicU64::new(0f64.to_bits()),
+            expected_frame_size: AtomicU64::new(0),
         }
     }
 
@@ -96,12 +99,46 @@ impl JitterBufferStats {
         self.latency_window.lock().unwrap().min()
     }
 
-    fn stability(&self) -> f64 {
+    /// Returns the stability (hit rate) as EMA. Higher = more reliable delivery.
+    /// Miss rate = 1.0 - stability.
+    pub fn stability(&self) -> f64 {
         f64::from_bits(self.stability.load(Ordering::Acquire))
+    }
+
+    /// Returns the EMA of jitter buffer latency in frames.
+    pub fn latency_ema(&self) -> f64 {
+        f64::from_bits(self.latency_ema.load(Ordering::Acquire))
+    }
+
+    /// Returns the EMA of audio level (0.0 to 1.0).
+    pub fn audio_level_ema(&self) -> f64 {
+        f64::from_bits(self.audio_level_ema.load(Ordering::Acquire))
+    }
+
+    /// Returns the expected frame size in samples (total, not per channel).
+    pub fn expected_frame_size(&self) -> u64 {
+        self.expected_frame_size.load(Ordering::Acquire)
     }
 
     fn record_latency(&self, latency: u64) {
         self.latency_window.lock().unwrap().record(latency);
+
+        let curr = self.latency_ema();
+        let new_val = (1.0 - EMA_ALPHA) * curr + EMA_ALPHA * (latency as f64);
+        self.latency_ema.store(new_val.to_bits(), Ordering::Release);
+    }
+
+    fn record_audio_level(&self, level: f64) {
+        let curr = self.audio_level_ema();
+        let new_val = (1.0 - EMA_ALPHA) * curr + EMA_ALPHA * level;
+        self.audio_level_ema
+            .store(new_val.to_bits(), Ordering::Release);
+    }
+
+    fn record_expected_frame_size(&self, size: u64) {
+        self.expected_frame_size
+            .compare_exchange(0, size, Ordering::AcqRel, Ordering::Relaxed)
+            .ok();
     }
 
     fn reset_latency(&self, latency: u64) {
@@ -226,7 +263,6 @@ pub struct JitterBuffer<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     capacity: usize,
     read_seq: CachePadded<AtomicU64>,
     write_seq: CachePadded<AtomicU64>,
-    expected_frame_size: AtomicU64,
     late_packet_count: AtomicU64,
     stats: JitterBufferStats,
     partial: Mutex<PartialFrameState<Sample>>,
@@ -243,7 +279,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             capacity,
             read_seq: CachePadded::new(AtomicU64::new(0)),
             write_seq: CachePadded::new(AtomicU64::new(0)),
-            expected_frame_size: AtomicU64::new(0),
             late_packet_count: AtomicU64::new(0),
             stats: JitterBufferStats::new(),
             partial: Mutex::new(PartialFrameState::new()),
@@ -267,6 +302,11 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         let write_seq = self.write_seq.load(Ordering::Acquire);
         let read_seq = self.read_seq.load(Ordering::Acquire);
         write_seq.saturating_sub(read_seq)
+    }
+
+    /// Returns a reference to the jitter buffer statistics.
+    pub fn stats(&self) -> &JitterBufferStats {
+        &self.stats
     }
 
     /// Try to fetch the frame at current read_seq from slots.
@@ -320,22 +360,25 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                     result_seq = frame.sequence_number;
 
                     let samples = frame.samples.into_inner();
+
+                    // Calculate and record audio level (RMS normalized to 0.0-1.0)
+                    if !samples.is_empty() {
+                        let sum_sq: f64 = samples
+                            .iter()
+                            .map(|s| {
+                                let normalized = s.to_f64_normalized();
+                                normalized * normalized
+                            })
+                            .sum();
+                        let rms = (sum_sq / samples.len() as f64).sqrt();
+                        self.stats.record_audio_level(rms.min(1.0));
+                    }
+
                     let needed = len - collected.len();
 
                     if samples.len() <= needed {
-                        debug!(
-                            "JitterBuffer Pull: Taking {} samples from seq={} (not enough)",
-                            samples.len(),
-                            frame.sequence_number
-                        );
                         collected.extend(samples);
                     } else {
-                        debug!(
-                            "JitterBuffer Pull: Taking {} samples from seq={} (enough, left={})",
-                            needed,
-                            frame.sequence_number,
-                            samples.len() - needed
-                        );
                         collected.extend(samples[..needed].iter().copied());
                         partial.store(samples[needed..].iter().copied(), result_seq);
                     }
@@ -355,7 +398,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
                     let stability = self.stats.stability();
                     let remaining = len - collected.len();
-                    let frame_size = self.expected_frame_size.load(Ordering::Acquire) as usize;
+                    let frame_size = self.stats.expected_frame_size() as usize;
                     let fill_count = if frame_size > 0 {
                         frame_size.min(remaining)
                     } else {
@@ -403,9 +446,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Sink
     fn push(&self, input: AudioFrame<Sample, CHANNELS, SAMPLE_RATE>) {
         // Record expected frame size from first push
         let frame_size = input.samples.data().len() as u64;
-        self.expected_frame_size
-            .compare_exchange(0, frame_size, Ordering::AcqRel, Ordering::Relaxed)
-            .ok();
+        self.stats.record_expected_frame_size(frame_size);
 
         let seq = input.sequence_number;
         let slot_idx = self.slot_index(seq);
@@ -459,9 +500,9 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Sink
                 .compare_exchange_weak(current_write_seq, seq, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
-                if seq % 10 == 0 || true {
-                    debug!("Updated write_seq to {}", seq);
-                }
+                // if seq % 10 == 0 || true {
+                //     debug!("Updated write_seq to {}", seq);
+                // }
                 break;
             }
         }
