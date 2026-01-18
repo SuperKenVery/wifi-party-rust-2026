@@ -310,7 +310,7 @@ fn DeviceSettings() -> Element {
             .collect();
 
     let network_options: Vec<(String, String)> =
-        std::iter::once(("".to_string(), "All Interfaces".to_string()))
+        std::iter::once(("".to_string(), "Default interface".to_string()))
             .chain(network_interfaces.read().iter().filter_map(|iface| {
                 if let if_addrs::IfAddr::V4(v4) = &iface.addr {
                     Some((v4.ip.to_string(), format!("{} ({})", iface.name, v4.ip)))

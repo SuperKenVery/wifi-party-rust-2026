@@ -41,6 +41,9 @@ impl From<SocketAddr> for HostId {
 pub struct StreamInfo {
     pub stream_id: String,
     pub audio_level: f32,
+    pub packet_loss: f32,
+    pub jitter_latency_ms: f32,
+    pub hardware_latency_ms: f32,
 }
 
 /// Information about a remote host
@@ -48,9 +51,6 @@ pub struct StreamInfo {
 pub struct HostInfo {
     pub id: HostId,
     pub streams: Vec<StreamInfo>,
-    pub packet_loss: f32,
-    pub jitter_latency_ms: f32,
-    pub hardware_latency_ms: f32,
 }
 
 /// Connection status

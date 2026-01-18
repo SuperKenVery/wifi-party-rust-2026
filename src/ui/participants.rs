@@ -59,10 +59,6 @@ pub fn MainContent(hosts: Vec<HostInfo>) -> Element {
 #[allow(non_snake_case)]
 #[component]
 fn HostCard(host: HostInfo) -> Element {
-    let packet_loss_pct = (host.packet_loss * 100.0) as i32;
-    let jitter_ms = host.jitter_latency_ms as i32;
-    let hw_ms = host.hardware_latency_ms as i32;
-
     rsx! {
         div {
             class: "glass-card p-5 rounded-2xl relative group",
@@ -90,31 +86,18 @@ fn HostCard(host: HostInfo) -> Element {
             div {
                 class: "space-y-2",
                 for stream in &host.streams {
-                    StreamLevelIndicator { stream_id: stream.stream_id.clone(), audio_level: stream.audio_level }
+                    StreamIndicator {
+                        stream_id: stream.stream_id.clone(),
+                        audio_level: stream.audio_level,
+                        packet_loss: stream.packet_loss,
+                        jitter_latency_ms: stream.jitter_latency_ms,
+                        hardware_latency_ms: stream.hardware_latency_ms,
+                    }
                 }
                 if host.streams.is_empty() {
                     div {
                         class: "text-xs text-slate-500 italic",
                         "No active streams"
-                    }
-                }
-            }
-
-            div {
-                class: "mt-4 pt-4 border-t border-white/5 flex items-center justify-between text-xs",
-                div {
-                    class: "flex gap-3",
-                    span { class: "text-slate-500",
-                        "Loss: "
-                        span { class: "text-slate-300 ml-1", "{packet_loss_pct}%" }
-                    }
-                    span { class: "text-slate-500",
-                        "Jitter: "
-                        span { class: "text-emerald-400 ml-1", "{jitter_ms}ms" }
-                    }
-                    span { class: "text-slate-500",
-                        "HW: "
-                        span { class: "text-indigo-400 ml-1", "{hw_ms}ms" }
                     }
                 }
             }
@@ -124,24 +107,51 @@ fn HostCard(host: HostInfo) -> Element {
 
 #[allow(non_snake_case)]
 #[component]
-fn StreamLevelIndicator(stream_id: String, audio_level: f32) -> Element {
+fn StreamIndicator(
+    stream_id: String,
+    audio_level: f32,
+    packet_loss: f32,
+    jitter_latency_ms: f32,
+    hardware_latency_ms: f32,
+) -> Element {
     let level_pct = (audio_level * 100.0) as u32;
     let icon = if stream_id == "Mic" { "🎙️" } else { "🔊" };
+    let packet_loss_pct = (packet_loss * 100.0) as i32;
+    let jitter_ms = jitter_latency_ms as i32;
+    let hw_ms = hardware_latency_ms as i32;
 
     rsx! {
         div {
-            class: "flex items-center gap-2",
-            span { class: "text-sm", "{icon}" }
-            span { class: "text-xs text-slate-400 w-12", "{stream_id}" }
+            class: "space-y-1",
             div {
-                class: "flex-1 h-2 bg-slate-800 rounded-full overflow-hidden relative",
+                class: "flex items-center gap-2",
+                span { class: "text-sm", "{icon}" }
+                span { class: "text-xs text-slate-400 w-12", "{stream_id}" }
                 div {
-                    class: "absolute inset-0",
-                    style: "background: linear-gradient(to right, #22c55e 0%, #22c55e 50%, #eab308 75%, #ef4444 100%)",
+                    class: "flex-1 h-2 bg-slate-800 rounded-full overflow-hidden relative",
+                    div {
+                        class: "absolute inset-0",
+                        style: "background: linear-gradient(to right, #22c55e 0%, #22c55e 50%, #eab308 75%, #ef4444 100%)",
+                    }
+                    div {
+                        class: "absolute inset-0 bg-slate-800 transition-all duration-75",
+                        style: "left: {level_pct}%",
+                    }
                 }
-                div {
-                    class: "absolute inset-0 bg-slate-800 transition-all duration-75",
-                    style: "left: {level_pct}%",
+            }
+            div {
+                class: "flex gap-3 pl-7 text-[10px]",
+                span { class: "text-slate-500",
+                    "Loss: "
+                    span { class: "text-slate-300", "{packet_loss_pct}%" }
+                }
+                span { class: "text-slate-500",
+                    "Jitter: "
+                    span { class: "text-emerald-400", "{jitter_ms}ms" }
+                }
+                span { class: "text-slate-500",
+                    "HW: "
+                    span { class: "text-indigo-400", "{hw_ms}ms" }
                 }
             }
         }

@@ -18,8 +18,10 @@
 //! - TTL: `1` (local network only)
 
 use anyhow::{Context, Result};
+use std::io::ErrorKind;
 use std::marker::PhantomData;
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
@@ -145,6 +147,7 @@ pub struct NetworkReceiver<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32
     state: Arc<AppState>,
     realtime_stream: Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
     local_ips: Vec<std::net::IpAddr>,
+    shutdown_flag: Arc<AtomicBool>,
 }
 
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
@@ -155,6 +158,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         state: Arc<AppState>,
         realtime_stream: Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
         local_ips: Vec<std::net::IpAddr>,
+        shutdown_flag: Arc<AtomicBool>,
     ) -> Self {
         info!("Network receiver initialized, local IPs: {:?}", local_ips);
 
@@ -163,6 +167,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             state,
             realtime_stream,
             local_ips,
+            shutdown_flag,
         }
     }
 }
@@ -184,9 +189,11 @@ where
         let mut buf = [0u8; 65536];
         let mut last_cleanup = Instant::now();
 
-        loop {
+        while !self.shutdown_flag.load(Ordering::SeqCst) {
             if let Err(e) = self.handle_packet(&mut buf) {
-                warn!("Error processing packet: {:?}", e);
+                if !self.shutdown_flag.load(Ordering::SeqCst) {
+                    warn!("Error processing packet: {:?}", e);
+                }
             }
 
             if last_cleanup.elapsed() > Duration::from_secs(1) {
@@ -194,13 +201,18 @@ where
                 last_cleanup = Instant::now();
             }
         }
+
+        info!("Network receive thread shutting down");
     }
 
     fn handle_packet(&mut self, buf: &mut [u8]) -> Result<()> {
-        let (size, source_addr) = self
-            .socket
-            .recv_from(buf)
-            .context("Failed to receive UDP packet")?;
+        let (size, source_addr) = match self.socket.recv_from(buf) {
+            Ok(result) => result,
+            Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {
+                return Ok(());
+            }
+            Err(e) => return Err(e).context("Failed to receive UDP packet"),
+        };
 
         if self.local_ips.contains(&source_addr.ip()) {
             return Ok(());

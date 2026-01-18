@@ -12,9 +12,9 @@ use tracing::{info, warn};
 
 use crate::audio::AudioSample;
 use crate::io::{AudioInput, AudioOutput, LoopbackInput};
+use crate::pipeline::Sink;
 use crate::pipeline::effect::LevelMeter;
 use crate::pipeline::node::{AudioBatcher, SimpleBuffer};
-use crate::pipeline::Sink;
 use crate::state::{AppState, HostInfo, StreamInfo};
 
 use super::combinator::{MixingSource, Switch, Tee};
@@ -61,7 +61,7 @@ where
         >,
 {
     pub fn run(&mut self) -> Result<()> {
-        info!("Starting Party pipelines...");
+        info!("Starting Party pipelines with config {:#?}", self.config);
 
         let (network_sink, realtime_stream) = self.network_node.start(
             self.realtime_stream.clone(),
@@ -80,9 +80,11 @@ where
             RealtimeFramePacker::<Sample, CHANNELS, SAMPLE_RATE>::new(RealtimeStreamId::Mic);
         let mic_sink = Tee::new(
             network_sink.clone().get_data_from(mic_packer),
-            loopback_buffer.clone().get_data_from(
-                Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(self.state.loopback_enabled.clone()),
-            ),
+            loopback_buffer
+                .clone()
+                .get_data_from(Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(
+                    self.state.loopback_enabled.clone(),
+                )),
         )
         .get_data_from(Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(
             self.state.mic_enabled.clone(),
@@ -172,43 +174,20 @@ where
                 for host_id in active_host_ids {
                     let stream_stats = realtime_stream.host_stream_stats(host_id);
 
-                    // Aggregate stats across streams (average)
-                    let (total_loss, total_jitter, total_hw, count) = stream_stats.iter().fold(
-                        (0.0f32, 0.0f32, 0.0f32, 0usize),
-                        |(loss, jitter, hw, cnt), s| {
-                            (
-                                loss + s.packet_loss,
-                                jitter + s.jitter_latency_ms,
-                                hw + s.hardware_latency_ms,
-                                cnt + 1,
-                            )
-                        },
-                    );
-
-                    let (packet_loss, jitter_latency_ms, hardware_latency_ms) = if count > 0 {
-                        (
-                            total_loss / count as f32,
-                            total_jitter / count as f32,
-                            total_hw / count as f32,
-                        )
-                    } else {
-                        (0.0, 0.0, 0.0)
-                    };
-
                     let streams: Vec<StreamInfo> = stream_stats
                         .iter()
                         .map(|s| StreamInfo {
                             stream_id: s.stream_id.to_string(),
                             audio_level: s.audio_level,
+                            packet_loss: s.packet_loss,
+                            jitter_latency_ms: s.jitter_latency_ms,
+                            hardware_latency_ms: s.hardware_latency_ms,
                         })
                         .collect();
 
                     host_infos_vec.push(HostInfo {
                         id: host_id,
                         streams,
-                        packet_loss,
-                        jitter_latency_ms,
-                        hardware_latency_ms,
                     });
                 }
 

@@ -49,8 +49,10 @@
 
 use std::marker::PhantomData;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use socket2::{Domain, Protocol, Socket, Type};
@@ -74,7 +76,8 @@ use crate::state::AppState;
 /// - The receiver runs in a dedicated background thread, continuously listening
 ///   for incoming packets and dispatching them to stream handlers
 pub struct NetworkNode<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    _receiver_handle: Option<thread::JoinHandle<()>>,
+    receiver_handle: Option<thread::JoinHandle<()>>,
+    shutdown_flag: Arc<AtomicBool>,
     _marker: PhantomData<Sample>,
 }
 
@@ -83,9 +86,25 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 {
     pub fn new() -> Self {
         Self {
-            _receiver_handle: None,
+            receiver_handle: None,
+            shutdown_flag: Arc::new(AtomicBool::new(false)),
             _marker: PhantomData,
         }
+    }
+
+    pub fn shutdown(&mut self) {
+        self.shutdown_flag.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.receiver_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Drop
+    for NetworkNode<Sample, CHANNELS, SAMPLE_RATE>
+{
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -205,8 +224,8 @@ where
             NetworkSender::<Sample, CHANNELS, SAMPLE_RATE>::new(send_socket, multicast_addr);
 
         socket
-            .set_nonblocking(false)
-            .context("Failed to set receiver socket to blocking")?;
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .context("Failed to set socket read timeout")?;
 
         let local_ips = match get_local_ip() {
             Ok(host_id) => vec![host_id.as_socket_addr().ip()],
@@ -218,17 +237,19 @@ where
 
         let realtime_stream_clone = realtime_stream.clone();
         let state_clone = state.clone();
+        let shutdown_flag = self.shutdown_flag.clone();
         let receiver_handle = thread::spawn(move || {
             let receiver = NetworkReceiver::<Sample, CHANNELS, SAMPLE_RATE>::new(
                 socket,
                 state_clone,
                 realtime_stream_clone,
                 local_ips,
+                shutdown_flag,
             );
             receiver.run();
         });
 
-        self._receiver_handle = Some(receiver_handle);
+        self.receiver_handle = Some(receiver_handle);
 
         Ok((sender, realtime_stream))
     }
