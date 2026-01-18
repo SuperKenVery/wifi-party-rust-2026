@@ -175,13 +175,14 @@ where
                     let stream_stats = realtime_stream.host_stream_stats(host_id);
 
                     let streams: Vec<StreamInfo> = stream_stats
-                        .iter()
+                        .into_iter()
                         .map(|s| StreamInfo {
                             stream_id: s.stream_id.to_string(),
                             audio_level: s.audio_level,
                             packet_loss: s.packet_loss,
                             jitter_latency_ms: s.jitter_latency_ms,
                             hardware_latency_ms: s.hardware_latency_ms,
+                            timeline: s.timeline,
                         })
                         .collect();
 

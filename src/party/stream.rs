@@ -31,7 +31,7 @@ use tracing::info;
 
 use crate::audio::AudioSample;
 use crate::audio::frame::AudioBuffer;
-use crate::pipeline::node::JitterBuffer;
+use crate::pipeline::node::{JitterBuffer, TimelineSnapshot};
 use crate::pipeline::{Sink, Source};
 use crate::state::HostId;
 
@@ -292,6 +292,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 packet_loss: packet_loss as f32,
                 jitter_latency_ms: jitter_latency_ms as f32,
                 hardware_latency_ms: hardware_latency_ms as f32,
+                timeline: stats.timeline_snapshot(),
             });
         }
 
@@ -307,6 +308,7 @@ pub struct StreamStats {
     pub packet_loss: f32,
     pub jitter_latency_ms: f32,
     pub hardware_latency_ms: f32,
+    pub timeline: TimelineSnapshot,
 }
 
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Default
