@@ -411,7 +411,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
         // 3. Control: Bump Forward when stability is very high
         // If stability is excellent and we have excess buffer, reduce latency
-        if stability > HIGH_STABILITY && latency > 2 {
+        if stability > HIGH_STABILITY && latency > 1 {
             debug!(
                 "JitterBuffer: High stability ({:.4}), latency={}, bumping forward",
                 stability, latency
@@ -453,6 +453,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                     }
                 }
                 None => {
+                    self.stats.record_miss();
                     let current_read = self.read_seq.load(Ordering::Acquire);
                     let current_write = self.write_seq.load(Ordering::Acquire);
 
@@ -466,7 +467,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
                     // Hole - Skip (Never Wait for missing packets)
                     self.skip(1);
-                    self.stats.record_miss();
 
                     let stability = self.stats.stability();
                     let remaining = len - collected.len();
