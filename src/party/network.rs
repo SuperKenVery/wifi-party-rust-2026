@@ -11,8 +11,8 @@
 //!       │
 //!       ▼
 //! ┌───────────────────┐
-//! │RealtimeFramePacker│
-//! │  (stream_id=Mic)  │
+//! │OpusEncoder        │
+//! │  + FramePacker    │
 //! └─────────┬─────────┘
 //!           │
 //!           ▼
@@ -33,7 +33,7 @@
 //!                                              ▼
 //!                                   ┌──────────────────────┐
 //!                                   │RealtimeAudioStream   │
-//!                                   │(per-host/stream      │
+//!                                   │(OpusDecoder +        │
 //!                                   │ jitter buffers)      │
 //!                                   └──────────┬───────────┘
 //!                                              │
@@ -44,7 +44,7 @@
 //! # Usage
 //!
 //! Call [`NetworkNode::start`] to initialize network transport. It returns:
-//! - A [`Sink`] for sending [`NetworkPacket`]s to the network
+//! - A [`Sink`] for sending [`NetworkPacket`]s (Opus-encoded) to the network
 //! - A reference to [`RealtimeAudioStream`] that provides mixed audio from all peers
 
 use std::marker::PhantomData;
@@ -108,21 +108,8 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Drop
     }
 }
 
-impl<Sample: AudioSample + Clone, const CHANNELS: usize, const SAMPLE_RATE: u32>
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     NetworkNode<Sample, CHANNELS, SAMPLE_RATE>
-where
-    NetworkPacket<Sample, CHANNELS, SAMPLE_RATE>: for<'a> rkyv::Serialize<
-            rkyv::api::high::HighSerializer<
-                rkyv::util::AlignedVec,
-                rkyv::ser::allocator::ArenaHandle<'a>,
-                rkyv::rancor::Error,
-            >,
-        >,
-    NetworkPacket<Sample, CHANNELS, SAMPLE_RATE>: rkyv::Archive,
-    <NetworkPacket<Sample, CHANNELS, SAMPLE_RATE> as rkyv::Archive>::Archived: rkyv::Deserialize<
-            NetworkPacket<Sample, CHANNELS, SAMPLE_RATE>,
-            rkyv::api::high::HighDeserializer<rkyv::rancor::Error>,
-        >,
 {
     /// Starts the network transport layer.
     ///
@@ -136,7 +123,7 @@ where
     /// # Returns
     ///
     /// A tuple of:
-    /// - `Sink` - Push [`NetworkPacket`]s here to broadcast to other peers
+    /// - `Sink` - Push [`NetworkPacket`]s (Opus-encoded) here to broadcast to other peers
     /// - `Arc<RealtimeAudioStream>` - Pull from here to get mixed audio from all peers.
     ///   Each pull returns audio that combines all hosts and all stream IDs,
     ///   with per-buffer jitter buffering already applied.
@@ -146,7 +133,7 @@ where
         state: Arc<AppState>,
         send_interface_ip: Option<Ipv4Addr>,
     ) -> Result<(
-        impl Sink<Input = NetworkPacket<Sample, CHANNELS, SAMPLE_RATE>> + Clone + 'static,
+        impl Sink<Input = NetworkPacket> + Clone + 'static,
         Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
     )> {
         let multicast_ip: Ipv4Addr = MULTICAST_ADDR
@@ -220,8 +207,7 @@ where
             .try_clone()
             .context("Failed to clone socket for sender")?;
 
-        let sender =
-            NetworkSender::<Sample, CHANNELS, SAMPLE_RATE>::new(send_socket, multicast_addr);
+        let sender = NetworkSender::new(send_socket, multicast_addr);
 
         socket
             .set_read_timeout(Some(Duration::from_millis(100)))

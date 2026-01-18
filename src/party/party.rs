@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::Result;
 use tracing::{info, warn};
 
-use crate::audio::AudioSample;
+use crate::audio::{AudioSample, OpusEncoder};
 use crate::io::{AudioInput, AudioOutput, LoopbackInput};
 use crate::pipeline::Sink;
 use crate::pipeline::effect::LevelMeter;
@@ -20,7 +20,7 @@ use crate::state::{AppState, HostInfo, StreamInfo};
 use super::combinator::{MixingSource, Switch, Tee};
 use super::config::PartyConfig;
 use super::network::NetworkNode;
-use super::stream::{NetworkPacket, RealtimeAudioStream, RealtimeFramePacker, RealtimeStreamId};
+use super::stream::{RealtimeAudioStream, RealtimeFramePacker, RealtimeStreamId};
 
 pub struct Party<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     state: Arc<AppState>,
@@ -46,19 +46,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
 impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     Party<Sample, CHANNELS, SAMPLE_RATE>
-where
-    NetworkPacket<Sample, CHANNELS, SAMPLE_RATE>: for<'a> rkyv::Serialize<
-            rkyv::api::high::HighSerializer<
-                rkyv::util::AlignedVec,
-                rkyv::ser::allocator::ArenaHandle<'a>,
-                rkyv::rancor::Error,
-            >,
-        >,
-    NetworkPacket<Sample, CHANNELS, SAMPLE_RATE>: rkyv::Archive,
-    <NetworkPacket<Sample, CHANNELS, SAMPLE_RATE> as rkyv::Archive>::Archived: rkyv::Deserialize<
-            NetworkPacket<Sample, CHANNELS, SAMPLE_RATE>,
-            rkyv::api::high::HighDeserializer<rkyv::rancor::Error>,
-        >,
 {
     pub fn run(&mut self) -> Result<()> {
         info!("Starting Party pipelines with config {:#?}", self.config);
@@ -73,13 +60,17 @@ where
 
         // ============================================================
         // Mic Pipeline: Mic -> LevelMeter -> MicSwitch -> Tee
-        //                                                  -> RealtimeFramePacker(Mic) -> NetworkSink
-        //                                                  -> LoopbackSwitch -> loopback_buffer
+        //   -> AudioBatcher -> OpusEncoder -> RealtimeFramePacker(Mic) -> NetworkSink
+        //   -> LoopbackSwitch -> loopback_buffer
         // ============================================================
-        let mic_packer =
-            RealtimeFramePacker::<Sample, CHANNELS, SAMPLE_RATE>::new(RealtimeStreamId::Mic);
+        let mic_encoder = OpusEncoder::<Sample, CHANNELS, SAMPLE_RATE>::new()?;
+        let mic_packer = RealtimeFramePacker::new(RealtimeStreamId::Mic);
         let mic_sink = Tee::new(
-            network_sink.clone().get_data_from(mic_packer),
+            network_sink
+                .clone()
+                .get_data_from(mic_packer)
+                .get_data_from(mic_encoder)
+                .get_data_from(AudioBatcher::<Sample, CHANNELS, SAMPLE_RATE>::new(20)),
             loopback_buffer
                 .clone()
                 .get_data_from(Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(
@@ -96,13 +87,14 @@ where
         let input_stream = audio_input.start(self.config.input_device_id.as_ref())?;
 
         // ============================================================
-        // System Audio Pipeline: SystemAudio -> LevelMeter -> SystemSwitch -> AudioBatcher -> RealtimeFramePacker(System) -> NetworkSink
+        // System Audio Pipeline: SystemAudio -> LevelMeter -> SystemSwitch -> AudioBatcher -> OpusEncoder -> RealtimeFramePacker(System) -> NetworkSink
         // ============================================================
-        let system_packer =
-            RealtimeFramePacker::<Sample, CHANNELS, SAMPLE_RATE>::new(RealtimeStreamId::System);
+        let system_encoder = OpusEncoder::<Sample, CHANNELS, SAMPLE_RATE>::new()?;
+        let system_packer = RealtimeFramePacker::new(RealtimeStreamId::System);
         let system_sink = network_sink
             .get_data_from(system_packer)
-            .get_data_from(AudioBatcher::<Sample, CHANNELS, SAMPLE_RATE>::new(5))
+            .get_data_from(system_encoder)
+            .get_data_from(AudioBatcher::<Sample, CHANNELS, SAMPLE_RATE>::new(20))
             .get_data_from(Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(
                 self.state.system_audio_enabled.clone(),
             ))

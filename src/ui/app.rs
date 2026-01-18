@@ -63,7 +63,7 @@ pub fn App() -> Element {
     rsx! {
         document::Stylesheet { href: asset!("/assets/custom.css") }
         document::Stylesheet { href: asset!("/assets/tailwind_output.css") }
-        script { src: "https://cdn.tailwindcss.com" }
+        // script { src: "https://cdn.tailwindcss.com" }
 
         div {
             class: "flex h-screen w-full bg-slate-900 text-slate-100 font-sans overflow-hidden selection:bg-indigo-500 selection:text-white",

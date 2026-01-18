@@ -83,10 +83,11 @@
           wasm-bindgen-cli.${pkgs.stdenv.hostPlatform.system}
           nodejs
           lld
+          cmake
+          pkg-config
         ] ++
         (pkgs.lib.optionals pkgs.stdenv.isLinux (with pkgs; [
           openssl
-          pkg-config
         ])) ++
         (pkgs.lib.optionals pkgs.stdenv.isDarwin (with pkgs; [
           apple-sdk_15
@@ -97,6 +98,10 @@
         # }/lib/rustlib/src/rust/library";
         RUST_BACKTRACE = "1";
         RUST_LOG = "debug";
+
+        # Statically link libopus
+        OPUS_NO_PKG = "1";
+        CMAKE_POLICY_VERSION_MINIMUM = "3.5";
       });
     });
 
