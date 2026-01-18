@@ -49,8 +49,8 @@
 
 use std::marker::PhantomData;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -160,7 +160,7 @@ where
             .set_reuse_address(true)
             .context("Failed to set reuse address")?;
         socket
-            .set_nonblocking(true)
+            .set_nonblocking(false)
             .context("Failed to set non-blocking")?;
         socket
             .set_multicast_ttl_v4(TTL)
