@@ -412,7 +412,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         // 3. Control: Bump Forward when stability is very high
         // If stability is excellent and we have excess buffer, reduce latency
         // Use a higher threshold to reduce frequency of bumps
-        if stability > HIGH_STABILITY && latency > 5 {
+        if stability > HIGH_STABILITY && latency > 1 {
             debug!(
                 "JitterBuffer: High stability ({:.4}), latency={}, bumping forward",
                 stability, latency
@@ -619,7 +619,9 @@ mod tests {
     type TestFrame = AudioFrame<f32, 2, 48000>;
 
     fn make_frame(seq: u64, len: usize) -> TestFrame {
-        let samples: Vec<f32> = (0..len).map(|i| (seq as f32) + (i as f32) * 0.001).collect();
+        let samples: Vec<f32> = (0..len)
+            .map(|i| (seq as f32) + (i as f32) * 0.001)
+            .collect();
         TestFrame::new(seq, samples).unwrap()
     }
 

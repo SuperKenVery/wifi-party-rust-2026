@@ -22,7 +22,7 @@ use super::frame::AudioBuffer;
 use crate::pipeline::node::Node;
 
 const OPUS_BITRATE: i32 = 64000;
-const OPUS_EXPECTED_PACKET_LOSS: i32 = 10;
+const OPUS_EXPECTED_PACKET_LOSS: i32 = 60;
 const MAX_OPUS_PACKET_SIZE: usize = 4000;
 const MAX_FRAME_SIZE: usize = 48000;
 

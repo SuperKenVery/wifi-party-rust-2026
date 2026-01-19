@@ -94,7 +94,7 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
         let system_sink = network_sink
             .get_data_from(system_packer)
             .get_data_from(system_encoder)
-            .get_data_from(AudioBatcher::<Sample, CHANNELS, SAMPLE_RATE>::new(20))
+            .get_data_from(AudioBatcher::<Sample, CHANNELS, SAMPLE_RATE>::new(10))
             .get_data_from(Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(
                 self.state.system_audio_enabled.clone(),
             ))
