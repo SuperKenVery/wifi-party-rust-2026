@@ -5,8 +5,11 @@
 //! - [`AudioSample`] - Trait for audio sample types (i16, f32, etc.)
 //! - [`AudioBuffer`] - A buffer of audio samples (raw PCM data)
 //! - [`AudioFrame`] - An [`AudioBuffer`] with sequence number and timestamp for network transport
+//! - [`opus`] - Opus codec with FEC for network transmission
 
 pub mod frame;
+pub mod opus;
 pub mod sample;
 
+pub use opus::{OpusDecoder, OpusEncoder, OpusPacket};
 pub use sample::AudioSample;

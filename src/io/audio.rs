@@ -145,7 +145,12 @@ impl<S> LoopbackInput<S> {
             channels: CHANNELS as u16,
             sample_rate: SAMPLE_RATE,
             buffer_size: match output_config.buffer_size() {
-                cpal::SupportedBufferSize::Range { min, .. } => BufferSize::Fixed(*min),
+                cpal::SupportedBufferSize::Range { min, max } => {
+                    let target = 256u32;
+                    let size = target.clamp(*min, *max);
+                    debug!("Using buffer size: {} (min={}, max={})", size, min, max);
+                    BufferSize::Fixed(size)
+                }
                 cpal::SupportedBufferSize::Unknown => {
                     warn!("Supported buffer size range unknown, using default");
                     BufferSize::Default
@@ -200,7 +205,12 @@ impl<S> AudioOutput<S> {
             channels: CHANNELS as u16,
             sample_rate: SAMPLE_RATE,
             buffer_size: match output_config.buffer_size() {
-                cpal::SupportedBufferSize::Range { min, .. } => BufferSize::Fixed(*min),
+                cpal::SupportedBufferSize::Range { min, max } => {
+                    let target = 256u32;
+                    let size = target.clamp(*min, *max);
+                    debug!("Using output buffer size: {} (min={}, max={})", size, min, max);
+                    BufferSize::Fixed(size)
+                }
                 cpal::SupportedBufferSize::Unknown => {
                     warn!("Supported buffer size range unknown, using default");
                     BufferSize::Default

@@ -8,8 +8,8 @@
 //!
 //! # Protocol
 //!
-//! Audio data is wrapped in [`NetworkPacket`] and serialized using `rkyv` (zero-copy
-//! deserialization). Each packet is sent over UDP multicast.
+//! Audio data is wrapped in [`NetworkPacket`] (Opus-encoded) and serialized using `rkyv`
+//! (zero-copy deserialization). Each packet is sent over UDP multicast.
 //!
 //! # Multicast Configuration
 //!
@@ -19,15 +19,13 @@
 
 use anyhow::{Context, Result};
 use std::io::ErrorKind;
-use std::marker::PhantomData;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
-use crate::audio::AudioSample;
-use crate::party::stream::{NetworkPacket, RealtimeAudioStream};
+use crate::party::stream::NetworkPacket;
 use crate::pipeline::Sink;
 use crate::state::{AppState, ConnectionStatus, HostId};
 
@@ -49,50 +47,23 @@ pub const TTL: u32 = 1;
 ///
 /// `NetworkSender` can be cloned to share the same socket between multiple
 /// audio pipelines (e.g., mic and system audio).
-pub struct NetworkSender<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+#[derive(Clone)]
+pub struct NetworkSender {
     socket: Arc<UdpSocket>,
     multicast_addr: SocketAddr,
-    _marker: PhantomData<Sample>,
 }
 
-impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
-    NetworkSender<Sample, CHANNELS, SAMPLE_RATE>
-{
+impl NetworkSender {
     pub fn new(socket: UdpSocket, multicast_addr: SocketAddr) -> Self {
         info!("Network sender initialized for {:?}", multicast_addr);
 
         Self {
             socket: Arc::new(socket),
             multicast_addr,
-            _marker: PhantomData,
         }
     }
-}
 
-impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Clone
-    for NetworkSender<Sample, CHANNELS, SAMPLE_RATE>
-{
-    fn clone(&self) -> Self {
-        Self {
-            socket: self.socket.clone(),
-            multicast_addr: self.multicast_addr,
-            _marker: PhantomData,
-        }
-    }
-}
-
-impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
-    NetworkSender<Sample, CHANNELS, SAMPLE_RATE>
-where
-    NetworkPacket<Sample, CHANNELS, SAMPLE_RATE>: for<'a> rkyv::Serialize<
-            rkyv::api::high::HighSerializer<
-                rkyv::util::AlignedVec,
-                rkyv::ser::allocator::ArenaHandle<'a>,
-                rkyv::rancor::Error,
-            >,
-        >,
-{
-    fn send_packet(&self, packet: &NetworkPacket<Sample, CHANNELS, SAMPLE_RATE>) {
+    fn send_packet(&self, packet: &NetworkPacket) {
         match rkyv::to_bytes::<rkyv::rancor::Error>(packet) {
             Ok(serialized) => match self.socket.send_to(&serialized, self.multicast_addr) {
                 Ok(bytes_sent) => {
@@ -114,18 +85,8 @@ where
     }
 }
 
-impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Sink
-    for NetworkSender<Sample, CHANNELS, SAMPLE_RATE>
-where
-    NetworkPacket<Sample, CHANNELS, SAMPLE_RATE>: for<'a> rkyv::Serialize<
-            rkyv::api::high::HighSerializer<
-                rkyv::util::AlignedVec,
-                rkyv::ser::allocator::ArenaHandle<'a>,
-                rkyv::rancor::Error,
-            >,
-        >,
-{
-    type Input = NetworkPacket<Sample, CHANNELS, SAMPLE_RATE>;
+impl Sink for NetworkSender {
+    type Input = NetworkPacket;
 
     fn push(&self, input: Self::Input) {
         self.send_packet(&input);
@@ -145,18 +106,18 @@ where
 pub struct NetworkReceiver<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     socket: UdpSocket,
     state: Arc<AppState>,
-    realtime_stream: Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
+    realtime_stream: Arc<crate::party::stream::RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
     local_ips: Vec<std::net::IpAddr>,
     shutdown_flag: Arc<AtomicBool>,
 }
 
-impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+impl<Sample: crate::audio::AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     NetworkReceiver<Sample, CHANNELS, SAMPLE_RATE>
 {
     pub fn new(
         socket: UdpSocket,
         state: Arc<AppState>,
-        realtime_stream: Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
+        realtime_stream: Arc<crate::party::stream::RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
         local_ips: Vec<std::net::IpAddr>,
         shutdown_flag: Arc<AtomicBool>,
     ) -> Self {
@@ -170,17 +131,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             shutdown_flag,
         }
     }
-}
 
-impl<Sample: AudioSample + Clone, const CHANNELS: usize, const SAMPLE_RATE: u32>
-    NetworkReceiver<Sample, CHANNELS, SAMPLE_RATE>
-where
-    NetworkPacket<Sample, CHANNELS, SAMPLE_RATE>: rkyv::Archive,
-    <NetworkPacket<Sample, CHANNELS, SAMPLE_RATE> as rkyv::Archive>::Archived: rkyv::Deserialize<
-            NetworkPacket<Sample, CHANNELS, SAMPLE_RATE>,
-            rkyv::api::high::HighDeserializer<rkyv::rancor::Error>,
-        >,
-{
     pub fn run(mut self) {
         info!("Network receive thread started");
 
@@ -221,8 +172,8 @@ where
         let received_data = &buf[..size];
         let host_id = HostId::from(source_addr);
 
-        let packet: NetworkPacket<Sample, CHANNELS, SAMPLE_RATE> =
-            unsafe { rkyv::from_bytes_unchecked(received_data) }
+        let packet: NetworkPacket =
+            unsafe { rkyv::from_bytes_unchecked::<NetworkPacket, rkyv::rancor::Error>(received_data) }
                 .map_err(|e| anyhow::anyhow!("Deserialization error: {:?}", e))?;
 
         match packet {

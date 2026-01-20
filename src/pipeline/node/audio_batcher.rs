@@ -39,7 +39,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Node
         buffer.extend(input.into_inner());
 
         if buffer.len() >= self.min_samples {
-            let samples = std::mem::take(&mut *buffer);
+            let samples: Vec<Sample> = buffer.drain(..self.min_samples).collect();
             AudioBuffer::new(samples).ok()
         } else {
             None

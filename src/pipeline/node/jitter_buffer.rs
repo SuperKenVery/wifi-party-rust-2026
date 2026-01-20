@@ -20,7 +20,7 @@ const EMA_ALPHA: f64 = 0.01;
 const RESET_THRESHOLD_COUNT: u64 = 50;
 const RESET_THRESHOLD_DIFF: u64 = 100;
 const HUGE_GAP_THRESHOLD: u64 = 150; // ~3 seconds at 20ms/frame
-const TIMELINE_CAPACITY: usize = 500; // ~10 seconds at 20ms/frame
+const TIMELINE_CAPACITY: usize = 2500; // ~10 seconds at 20ms/frame
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum JitterEvent {
@@ -516,7 +516,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Sink
     type Input = AudioFrame<Sample, CHANNELS, SAMPLE_RATE>;
 
     fn push(&self, input: AudioFrame<Sample, CHANNELS, SAMPLE_RATE>) {
-        // Record expected frame size from first push
         let frame_size = input.samples.data().len() as u64;
         self.stats.record_expected_frame_size(frame_size);
 
@@ -524,8 +523,18 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Sink
         let slot_idx = self.slot_index(seq);
         let slot = &self.slots[slot_idx];
 
+        let mut read_seq = self.read_seq.load(Ordering::Acquire);
+        let write_seq = self.write_seq.load(Ordering::Acquire);
+
+        // Initialize read_seq on first frame
+        if read_seq == 0 && write_seq == 0 && seq > 0 {
+            self.read_seq
+                .compare_exchange(0, seq, Ordering::AcqRel, Ordering::Relaxed)
+                .ok();
+            read_seq = self.read_seq.load(Ordering::Acquire);
+        }
+
         // Drop late packets (but allow some tolerance for out-of-order)
-        let read_seq = self.read_seq.load(Ordering::Acquire);
         if seq < read_seq {
             let diff = read_seq - seq;
             if diff > RESET_THRESHOLD_DIFF {
@@ -588,6 +597,232 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Source
     fn pull(&self, len: usize) -> Option<AudioFrame<Sample, CHANNELS, SAMPLE_RATE>> {
         let (samples, seq) = self.collect_samples(len)?;
 
+        debug_assert_eq!(
+            samples.len(),
+            len,
+            "JitterBuffer: collected {} samples but expected {}",
+            samples.len(),
+            len
+        );
+
         AudioFrame::new(seq, samples).ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio::frame::AudioFrame;
+
+    type TestBuffer = JitterBuffer<f32, 2, 48000>;
+    type TestFrame = AudioFrame<f32, 2, 48000>;
+
+    fn make_frame(seq: u64, len: usize) -> TestFrame {
+        let samples: Vec<f32> = (0..len)
+            .map(|i| (seq as f32) + (i as f32) * 0.001)
+            .collect();
+        TestFrame::new(seq, samples).unwrap()
+    }
+
+    #[test]
+    fn test_push_and_pull_single_frame() {
+        let buffer = TestBuffer::new(16);
+        let frame = make_frame(1, 1920);
+
+        buffer.push(frame);
+
+        let pulled = buffer.pull(1920);
+        assert!(pulled.is_some());
+        let pulled = pulled.unwrap();
+        assert_eq!(pulled.samples.data().len(), 1920);
+        assert_eq!(pulled.sequence_number, 1);
+    }
+
+    #[test]
+    fn test_pull_exact_length() {
+        let buffer = TestBuffer::new(16);
+
+        buffer.push(make_frame(1, 1920));
+        buffer.push(make_frame(2, 1920));
+
+        let pulled = buffer.pull(1000);
+        assert!(pulled.is_some());
+        assert_eq!(pulled.unwrap().samples.data().len(), 1000);
+
+        let pulled = buffer.pull(500);
+        assert!(pulled.is_some());
+        assert_eq!(pulled.unwrap().samples.data().len(), 500);
+    }
+
+    #[test]
+    fn test_pull_across_frames() {
+        let buffer = TestBuffer::new(16);
+
+        buffer.push(make_frame(1, 1920));
+        buffer.push(make_frame(2, 1920));
+
+        let pulled = buffer.pull(2500);
+        assert!(pulled.is_some());
+        assert_eq!(pulled.unwrap().samples.data().len(), 2500);
+    }
+
+    #[test]
+    fn test_pull_with_underrun_fills_silence() {
+        let buffer = TestBuffer::new(16);
+
+        buffer.push(make_frame(1, 1920));
+
+        let pulled = buffer.pull(1920);
+        assert!(pulled.is_some());
+        assert_eq!(pulled.unwrap().samples.data().len(), 1920);
+
+        let pulled = buffer.pull(1920);
+        assert!(pulled.is_some());
+        let data = pulled.unwrap();
+        assert_eq!(data.samples.data().len(), 1920);
+        assert!(data.samples.data().iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn test_out_of_order_frames() {
+        let buffer = TestBuffer::new(16);
+
+        // Push seq 1 first to initialize read_seq to 1
+        buffer.push(make_frame(1, 1920));
+        // Then push out of order: 3 before 2
+        buffer.push(make_frame(3, 1920));
+        buffer.push(make_frame(2, 1920));
+
+        let pulled = buffer.pull(1920);
+        assert!(pulled.is_some());
+        assert_eq!(pulled.unwrap().sequence_number, 1);
+
+        let pulled = buffer.pull(1920);
+        assert!(pulled.is_some());
+        assert_eq!(pulled.unwrap().sequence_number, 2);
+
+        let pulled = buffer.pull(1920);
+        assert!(pulled.is_some());
+        assert_eq!(pulled.unwrap().sequence_number, 3);
+    }
+
+    #[test]
+    fn test_partial_frame_handling() {
+        let buffer = TestBuffer::new(16);
+
+        buffer.push(make_frame(1, 1920));
+
+        let pulled1 = buffer.pull(1000);
+        assert!(pulled1.is_some());
+        assert_eq!(pulled1.unwrap().samples.data().len(), 1000);
+
+        let pulled2 = buffer.pull(920);
+        assert!(pulled2.is_some());
+        assert_eq!(pulled2.unwrap().samples.data().len(), 920);
+    }
+
+    #[test]
+    fn test_multiple_push_pull_cycles() {
+        let buffer = TestBuffer::new(16);
+
+        for seq in 1..=10 {
+            buffer.push(make_frame(seq, 1920));
+            let pulled = buffer.pull(1920);
+            assert!(pulled.is_some());
+            assert_eq!(pulled.unwrap().samples.data().len(), 1920);
+        }
+    }
+
+    #[test]
+    fn test_pull_length_always_matches_request() {
+        let buffer = TestBuffer::new(16);
+
+        for seq in 1..=5 {
+            buffer.push(make_frame(seq, 1920));
+        }
+
+        let test_lengths = [100, 500, 1920, 2000, 3000, 5000];
+        for &len in &test_lengths {
+            let pulled = buffer.pull(len);
+            assert!(pulled.is_some(), "pull({}) returned None", len);
+            assert_eq!(
+                pulled.unwrap().samples.data().len(),
+                len,
+                "pull({}) returned wrong length",
+                len
+            );
+        }
+    }
+
+    #[test]
+    fn test_pull_with_gaps_maintains_length() {
+        let buffer = TestBuffer::new(16);
+
+        // Push frames with gaps (1, 3, 5 - missing 2, 4)
+        buffer.push(make_frame(1, 1920));
+        buffer.push(make_frame(3, 1920));
+        buffer.push(make_frame(5, 1920));
+
+        // Pull should still return exact length requested
+        let test_lengths = [100, 500, 1920, 2500, 4000];
+        for &len in &test_lengths {
+            let pulled = buffer.pull(len);
+            assert!(pulled.is_some(), "pull({}) returned None", len);
+            let actual_len = pulled.unwrap().samples.data().len();
+            assert_eq!(
+                actual_len, len,
+                "pull({}) returned {} samples instead",
+                len, actual_len
+            );
+        }
+    }
+
+    #[test]
+    fn test_pull_empty_buffer_returns_silence() {
+        let buffer = TestBuffer::new(16);
+
+        // Empty buffer returns silence (not None) to maintain continuous audio
+        let pulled = buffer.pull(1920);
+        assert!(pulled.is_some(), "Empty buffer should return silence");
+        let data = pulled.unwrap().samples.into_inner();
+        assert_eq!(data.len(), 1920);
+        assert!(
+            data.iter().all(|&x| x == 0.0),
+            "Empty buffer should return all zeros"
+        );
+    }
+
+    #[test]
+    fn test_continuous_push_pull_data_integrity() {
+        let buffer = TestBuffer::new(16);
+
+        // Push frames with known pattern
+        for seq in 1..=10u64 {
+            let samples: Vec<f32> = (0..1920)
+                .map(|i| (seq as f32) + (i as f32) * 0.0001)
+                .collect();
+            let frame = TestFrame::new(seq, samples).unwrap();
+            buffer.push(frame);
+        }
+
+        // Pull and verify data is continuous (no gaps, no zeros where there shouldn't be)
+        let mut all_pulled: Vec<f32> = Vec::new();
+        for _ in 0..10 {
+            let pulled = buffer.pull(1920);
+            assert!(pulled.is_some());
+            all_pulled.extend(pulled.unwrap().samples.into_inner());
+        }
+
+        // Check that we got all the data
+        assert_eq!(all_pulled.len(), 1920 * 10);
+
+        // Check that data is not all zeros (would indicate a bug)
+        let non_zero_count = all_pulled.iter().filter(|&&x| x != 0.0).count();
+        assert!(
+            non_zero_count > all_pulled.len() / 2,
+            "Too many zeros in pulled data: {} zeros out of {}",
+            all_pulled.len() - non_zero_count,
+            all_pulled.len()
+        );
     }
 }
