@@ -2534,16 +2534,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "if-addrs"
-version = "0.13.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69b2eeee38fef3aa9b4cc5f1beea8a2444fc00e7377cafae396de3f5c2065e24"
-dependencies = [
- "libc",
- "windows-sys 0.59.0",
-]
-
-[[package]]
 name = "indexmap"
 version = "2.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3111,6 +3101,18 @@ dependencies = [
  "serde",
  "thiserror 1.0.69",
  "web-time",
+]
+
+[[package]]
+name = "network-interface"
+version = "2.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ddcb8865ad3d9950f22f42ffa0ef0aecbfbf191867b3122413602b0a360b2a6"
+dependencies = [
+ "cc",
+ "libc",
+ "thiserror 2.0.17",
+ "winapi",
 ]
 
 [[package]]
@@ -5717,8 +5719,8 @@ dependencies = [
  "dasp_sample",
  "dioxus",
  "hound",
- "if-addrs",
  "neteq",
+ "network-interface",
  "num-traits",
  "opus",
  "rkyv",

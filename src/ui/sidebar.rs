@@ -5,7 +5,8 @@ use crate::state::AppState;
 use cpal::traits::{DeviceTrait, HostTrait};
 use cpal::{Device, DeviceId};
 use dioxus::prelude::*;
-use std::net::Ipv4Addr;
+use network_interface::NetworkInterfaceConfig;
+use std::net::IpAddr;
 use std::sync::Arc;
 
 fn get_input_devices() -> Vec<Device> {
@@ -22,13 +23,33 @@ fn get_output_devices() -> Vec<Device> {
         .unwrap_or_default()
 }
 
-fn get_network_interfaces() -> Vec<if_addrs::Interface> {
-    if_addrs::get_if_addrs()
+#[derive(Clone, Debug)]
+struct NetworkInterfaceInfo {
+    name: String,
+    index: u32,
+    has_v4: bool,
+    has_v6: bool,
+}
+
+fn get_network_interfaces() -> Vec<NetworkInterfaceInfo> {
+    network_interface::NetworkInterface::show()
         .map(|ifaces| {
-            ifaces
-                .into_iter()
-                .filter(|i| matches!(i.addr, if_addrs::IfAddr::V4(ref v) if !v.ip.is_loopback()))
-                .collect()
+            let mut result: Vec<NetworkInterfaceInfo> = Vec::new();
+            for iface in ifaces {
+                let has_v4 = iface.addr.iter().any(|a| matches!(a.ip(), IpAddr::V4(ip) if !ip.is_loopback()));
+                let has_v6 = iface.addr.iter().any(|a| matches!(a.ip(), IpAddr::V6(ip) if !ip.is_loopback()));
+                if has_v4 || has_v6 {
+                    if !result.iter().any(|r| r.index == iface.index) {
+                        result.push(NetworkInterfaceInfo {
+                            name: iface.name.clone(),
+                            index: iface.index,
+                            has_v4,
+                            has_v6,
+                        });
+                    }
+                }
+            }
+            result
         })
         .unwrap_or_default()
 }
@@ -287,7 +308,8 @@ fn DeviceSettings() -> Element {
 
     let mut selected_input = use_signal(|| String::new());
     let mut selected_output = use_signal(|| String::new());
-    let mut selected_network = use_signal(|| String::new());
+    let mut selected_interface = use_signal(|| String::new());
+    let mut use_ipv6 = use_signal(|| false);
 
     let input_options: Vec<(String, String)> =
         std::iter::once(("".to_string(), "System Default".to_string()))
@@ -309,11 +331,13 @@ fn DeviceSettings() -> Element {
             }))
             .collect();
 
-    let network_options: Vec<(String, String)> =
-        std::iter::once(("".to_string(), "Default interface".to_string()))
+    let ipv6 = *use_ipv6.read();
+    let interface_options: Vec<(String, String)> =
+        std::iter::once(("".to_string(), "System Default".to_string()))
             .chain(network_interfaces.read().iter().filter_map(|iface| {
-                if let if_addrs::IfAddr::V4(v4) = &iface.addr {
-                    Some((v4.ip.to_string(), format!("{} ({})", iface.name, v4.ip)))
+                let supported = if ipv6 { iface.has_v6 } else { iface.has_v4 };
+                if supported {
+                    Some((iface.index.to_string(), iface.name.clone()))
                 } else {
                     None
                 }
@@ -351,8 +375,8 @@ fn DeviceSettings() -> Element {
                 }
             };
 
-            let send_ip: Option<Ipv4Addr> = {
-                let sel = selected_network.read();
+            let send_interface_index: Option<u32> = {
+                let sel = selected_interface.read();
                 if sel.is_empty() {
                     None
                 } else {
@@ -363,7 +387,8 @@ fn DeviceSettings() -> Element {
             let config = PartyConfig {
                 input_device_id: input_id,
                 output_device_id: output_id,
-                send_interface_ip: send_ip,
+                ipv6: *use_ipv6.read(),
+                send_interface_index,
             };
 
             if let Ok(mut party_guard) = state.party.lock() {
@@ -402,11 +427,27 @@ fn DeviceSettings() -> Element {
                     on_change: move |v| selected_output.set(v),
                 }
 
+                div {
+                    class: "flex items-center gap-3 py-2",
+                    input {
+                        r#type: "checkbox",
+                        id: "ipv6-toggle",
+                        class: "w-4 h-4 rounded border-slate-600 bg-slate-800 text-indigo-500 focus:ring-indigo-500 focus:ring-offset-slate-900",
+                        checked: *use_ipv6.read(),
+                        onchange: move |evt| use_ipv6.set(evt.checked()),
+                    }
+                    label {
+                        r#for: "ipv6-toggle",
+                        class: "text-sm text-slate-300",
+                        "Use IPv6 multicast"
+                    }
+                }
+
                 DeviceSelector {
-                    label: "Network Interface (Send)",
-                    options: network_options,
-                    selected: selected_network(),
-                    on_change: move |v| selected_network.set(v),
+                    label: "Send Interface",
+                    options: interface_options,
+                    selected: selected_interface(),
+                    on_change: move |v| selected_interface.set(v),
                 }
 
                 button {

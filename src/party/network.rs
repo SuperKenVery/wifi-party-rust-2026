@@ -48,21 +48,20 @@
 //! - A reference to [`RealtimeAudioStream`] that provides mixed audio from all peers
 
 use std::marker::PhantomData;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use network_interface::NetworkInterfaceConfig;
 use socket2::{Domain, Protocol, Socket, Type};
 use tracing::{info, warn};
 
 use crate::audio::AudioSample;
-use crate::io::get_local_ip;
-use crate::io::{MULTICAST_ADDR, MULTICAST_PORT, NetworkReceiver, NetworkSender, TTL};
-use crate::party::stream::{NetworkPacket, RealtimeAudioStream};
-use crate::pipeline::Sink;
+use crate::io::{MULTICAST_ADDR_V4, MULTICAST_ADDR_V6, MULTICAST_PORT, NetworkReceiver, NetworkSender, TTL};
+use crate::party::stream::RealtimeAudioStream;
 use crate::state::AppState;
 
 /// Orchestrates network audio transport.
@@ -114,112 +113,43 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     /// Starts the network transport layer.
     ///
     /// This initializes the UDP multicast sender and spawns a background thread
-    /// for the receiver.
+    /// for the receiver. Supports both IPv4 and IPv6.
     ///
     /// # Arguments
     ///
-    /// * `send_interface_ip` - If Some, bind sender to this interface. If None, use all interfaces.
+    /// * `ipv6` - If true, use IPv6 multicast, otherwise IPv4.
+    /// * `send_interface_index` - Interface index to send multicast packets on.
+    ///   If None, uses the system default.
     ///
     /// # Returns
     ///
     /// A tuple of:
-    /// - `Sink` - Push [`NetworkPacket`]s (Opus-encoded) here to broadcast to other peers
+    /// - `NetworkSender` - Push [`NetworkPacket`]s here to broadcast to other peers
     /// - `Arc<RealtimeAudioStream>` - Pull from here to get mixed audio from all peers.
-    ///   Each pull returns audio that combines all hosts and all stream IDs,
-    ///   with per-buffer jitter buffering already applied.
     pub fn start(
         &mut self,
         realtime_stream: Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
         state: Arc<AppState>,
-        send_interface_ip: Option<Ipv4Addr>,
+        ipv6: bool,
+        send_interface_index: Option<u32>,
     ) -> Result<(
-        impl Sink<Input = NetworkPacket> + Clone + 'static,
+        NetworkSender,
         Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
     )> {
-        let multicast_ip: Ipv4Addr = MULTICAST_ADDR
-            .parse()
-            .context("Invalid multicast address")?;
-        let multicast_addr = SocketAddr::new(IpAddr::V4(multicast_ip), MULTICAST_PORT);
-
-        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
-            .context("Failed to create socket")?;
-        socket
-            .set_reuse_address(true)
-            .context("Failed to set reuse address")?;
-        socket
-            .set_nonblocking(false)
-            .context("Failed to set non-blocking")?;
-        socket
-            .set_multicast_ttl_v4(TTL)
-            .context("Failed to set multicast TTL")?;
-        socket
-            .set_multicast_loop_v4(false)
-            .context("Failed to disable multicast loop")?;
-
-        if let Some(iface_ip) = send_interface_ip {
-            socket
-                .set_multicast_if_v4(&iface_ip)
-                .context("Failed to set multicast interface")?;
-            info!("Multicast send interface set to {}", iface_ip);
-        }
-
-        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), MULTICAST_PORT);
-        socket
-            .bind(&bind_addr.into())
-            .context("Failed to bind socket")?;
-
-        match if_addrs::get_if_addrs() {
-            Ok(interfaces) => {
-                for iface in interfaces {
-                    if let if_addrs::IfAddr::V4(v4) = &iface.addr {
-                        match socket.join_multicast_v4(&multicast_ip, &v4.ip) {
-                            Ok(()) => info!(
-                                "Joined multicast group on interface {} ({})",
-                                iface.name, v4.ip
-                            ),
-                            Err(e) => warn!(
-                                "Failed to join multicast on {} ({}): {}",
-                                iface.name, v4.ip, e
-                            ),
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to enumerate network interfaces: {}, joining on default interface only",
-                    e
-                );
-                socket
-                    .join_multicast_v4(&multicast_ip, &Ipv4Addr::UNSPECIFIED)
-                    .context("Failed to join multicast group")?;
-            }
-        }
-
-        let socket: UdpSocket = socket.into();
-
-        info!(
-            "Network socket initialized for multicast group {}:{}",
-            MULTICAST_ADDR, MULTICAST_PORT
-        );
+        let (socket, multicast_addr, local_ips) = if ipv6 {
+            Self::setup_socket_v6(send_interface_index)?
+        } else {
+            Self::setup_socket_v4(send_interface_index)?
+        };
 
         let send_socket = socket
             .try_clone()
             .context("Failed to clone socket for sender")?;
-
         let sender = NetworkSender::new(send_socket, multicast_addr);
 
         socket
             .set_read_timeout(Some(Duration::from_millis(100)))
             .context("Failed to set socket read timeout")?;
-
-        let local_ips = match get_local_ip() {
-            Ok(host_id) => vec![host_id.as_socket_addr().ip()],
-            Err(e) => {
-                info!("Could not determine local IP for self-filtering: {}", e);
-                vec![]
-            }
-        };
 
         let realtime_stream_clone = realtime_stream.clone();
         let state_clone = state.clone();
@@ -236,8 +166,110 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         });
 
         self.receiver_handle = Some(receiver_handle);
-
         Ok((sender, realtime_stream))
+    }
+
+    fn setup_socket_v4(send_interface_index: Option<u32>) -> Result<(UdpSocket, SocketAddr, Vec<IpAddr>)> {
+        let multicast_ip: Ipv4Addr = MULTICAST_ADDR_V4
+            .parse()
+            .context("Invalid multicast address")?;
+        let multicast_addr = SocketAddr::new(IpAddr::V4(multicast_ip), MULTICAST_PORT);
+
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
+            .context("Failed to create socket")?;
+        socket.set_reuse_address(true)?;
+        socket.set_nonblocking(false)?;
+        socket.set_multicast_ttl_v4(TTL)?;
+        socket.set_multicast_loop_v4(false)?;
+
+        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), MULTICAST_PORT);
+        socket.bind(&bind_addr.into())?;
+
+        let mut local_ips = Vec::new();
+        let mut send_ip: Option<Ipv4Addr> = None;
+
+        match network_interface::NetworkInterface::show() {
+            Ok(interfaces) => {
+                for iface in interfaces {
+                    for addr in &iface.addr {
+                        if let IpAddr::V4(ip) = addr.ip() {
+                            if ip.is_loopback() {
+                                continue;
+                            }
+                            local_ips.push(IpAddr::V4(ip));
+                            if send_interface_index == Some(iface.index) {
+                                send_ip = Some(ip);
+                            }
+                            match socket.join_multicast_v4(&multicast_ip, &ip) {
+                                Ok(()) => info!("Joined multicast on {} ({})", iface.name, ip),
+                                Err(e) => warn!("Failed to join multicast on {} ({}): {}", iface.name, ip, e),
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Failed to enumerate interfaces: {:?}, using default", e);
+                socket.join_multicast_v4(&multicast_ip, &Ipv4Addr::UNSPECIFIED)?;
+            }
+        }
+
+        if let Some(ip) = send_ip {
+            socket.set_multicast_if_v4(&ip)?;
+            info!("Send interface set to {}", ip);
+        }
+
+        info!("IPv4 multicast socket ready on {}:{}", MULTICAST_ADDR_V4, MULTICAST_PORT);
+        Ok((socket.into(), multicast_addr, local_ips))
+    }
+
+    fn setup_socket_v6(send_interface_index: Option<u32>) -> Result<(UdpSocket, SocketAddr, Vec<IpAddr>)> {
+        let multicast_ip: Ipv6Addr = MULTICAST_ADDR_V6
+            .parse()
+            .context("Invalid IPv6 multicast address")?;
+        let multicast_addr = SocketAddr::V6(SocketAddrV6::new(multicast_ip, MULTICAST_PORT, 0, 0));
+
+        let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))
+            .context("Failed to create IPv6 socket")?;
+        socket.set_reuse_address(true)?;
+        socket.set_nonblocking(false)?;
+        socket.set_multicast_hops_v6(TTL)?;
+        socket.set_multicast_loop_v6(false)?;
+
+        if let Some(index) = send_interface_index {
+            socket.set_multicast_if_v6(index)?;
+            info!("Send interface set to index {}", index);
+        }
+
+        let bind_addr = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, MULTICAST_PORT, 0, 0);
+        socket.bind(&bind_addr.into())?;
+
+        let mut local_ips = Vec::new();
+        match network_interface::NetworkInterface::show() {
+            Ok(interfaces) => {
+                for iface in interfaces {
+                    for addr in &iface.addr {
+                        if let IpAddr::V6(ip) = addr.ip() {
+                            if ip.is_loopback() {
+                                continue;
+                            }
+                            local_ips.push(IpAddr::V6(ip));
+                            match socket.join_multicast_v6(&multicast_ip, iface.index) {
+                                Ok(()) => info!("Joined IPv6 multicast on {} ({})", iface.name, ip),
+                                Err(e) => warn!("Failed to join IPv6 multicast on {} ({}): {}", iface.name, ip, e),
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Failed to enumerate interfaces: {:?}, using default", e);
+                socket.join_multicast_v6(&multicast_ip, 0)?;
+            }
+        }
+
+        info!("IPv6 multicast socket ready on [{}]:{}", MULTICAST_ADDR_V6, MULTICAST_PORT);
+        Ok((socket.into(), multicast_addr, local_ips))
     }
 }
 

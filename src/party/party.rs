@@ -53,7 +53,8 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
         let (network_sink, realtime_stream) = self.network_node.start(
             self.realtime_stream.clone(),
             self.state.clone(),
-            self.config.send_interface_ip,
+            self.config.ipv6,
+            self.config.send_interface_index,
         )?;
 
         let loopback_buffer: SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE> = SimpleBuffer::new();

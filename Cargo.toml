@@ -21,7 +21,7 @@ anyhow = "1.0.100"
 neteq = { version = "0.8", default-features = false }
 num-traits = "0.2.19"
 dashmap = "6.1.0"
-if-addrs = "0.13"
+network-interface = "2.0"
 opus = "0.3"
 audiopus_sys = { version = "0.2", features = ["static"] }
 

@@ -4,7 +4,7 @@
 //!
 //! - [`NetworkSender`] - Broadcasts audio packets to all peers via UDP multicast
 //! - [`NetworkReceiver`] - Receives packets from peers and dispatches to stream handlers
-//! - [`get_local_ip`] - Utility to discover local IP address for multicast
+//! - [`get_local_ip`] / [`get_local_ip_v6`] - Utility to discover local IP address for multicast
 //!
 //! # Protocol
 //!
@@ -13,13 +13,19 @@
 //!
 //! # Multicast Configuration
 //!
-//! - Address: `239.255.43.2` (link-local multicast)
+//! IPv4:
+//! - Address: `239.255.43.2` (administratively scoped multicast)
 //! - Port: `7667`
 //! - TTL: `1` (local network only)
+//!
+//! IPv6:
+//! - Address: `ff02::7667` (link-local scope multicast)
+//! - Port: `7667`
+//! - Hop limit: `1` (local network only)
 
 use anyhow::{Context, Result};
 use std::io::ErrorKind;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -29,9 +35,13 @@ use crate::party::stream::NetworkPacket;
 use crate::pipeline::Sink;
 use crate::state::{AppState, ConnectionStatus, HostId};
 
-pub const MULTICAST_ADDR: &str = "239.255.43.2";
+pub const MULTICAST_ADDR_V4: &str = "239.255.43.2";
+pub const MULTICAST_ADDR_V6: &str = "ff02::7667";
 pub const MULTICAST_PORT: u16 = 7667;
 pub const TTL: u32 = 1;
+
+#[deprecated(note = "Use MULTICAST_ADDR_V4 instead")]
+pub const MULTICAST_ADDR: &str = MULTICAST_ADDR_V4;
 
 /// Sends audio packets to all peers via UDP multicast.
 ///
@@ -190,8 +200,26 @@ pub fn get_local_ip() -> Result<HostId> {
     let socket = UdpSocket::bind("0.0.0.0:0").context("Failed to create socket")?;
 
     socket
-        .connect(format!("{}:{}", MULTICAST_ADDR, MULTICAST_PORT))
+        .connect(format!("{}:{}", MULTICAST_ADDR_V4, MULTICAST_PORT))
         .context("Failed to connect socket")?;
+
+    let local_addr = socket.local_addr().context("Failed to get local address")?;
+
+    Ok(HostId::from(local_addr))
+}
+
+pub fn get_local_ip_v6(scope_id: u32) -> Result<HostId> {
+    let bind_addr = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, scope_id);
+    let socket = UdpSocket::bind(bind_addr).context("Failed to create IPv6 socket")?;
+
+    let multicast_ip: Ipv6Addr = MULTICAST_ADDR_V6
+        .parse()
+        .context("Invalid IPv6 multicast address")?;
+    let multicast_addr = SocketAddrV6::new(multicast_ip, MULTICAST_PORT, 0, scope_id);
+
+    socket
+        .connect(multicast_addr)
+        .context("Failed to connect IPv6 socket")?;
 
     let local_addr = socket.local_addr().context("Failed to get local address")?;
 
