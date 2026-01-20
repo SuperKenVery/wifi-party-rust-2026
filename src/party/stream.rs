@@ -28,6 +28,7 @@
 //! - [`RealtimeFrame`] - Frame format for realtime audio (Opus-encoded)
 //! - [`RealtimeAudioStream`] - Manages all realtime streams across all hosts
 
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -46,9 +47,6 @@ const HOST_TIMEOUT: Duration = Duration::from_secs(5);
 const JITTER_BUFFER_CAPACITY: usize = 64;
 
 /// Identifies a realtime audio stream instance.
-///
-/// Each variant represents a different audio source that uses realtime
-/// streaming with jitter buffering.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[rkyv(compare(PartialEq))]
 pub enum RealtimeStreamId {
@@ -66,10 +64,6 @@ impl std::fmt::Display for RealtimeStreamId {
 }
 
 /// Frame format for realtime audio streams (Opus-encoded).
-///
-/// Contains the stream identifier, sequence number for ordering,
-/// timestamp for synchronization, and Opus-encoded audio data.
-/// Using Opus provides ~95% bandwidth reduction and built-in FEC.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone)]
 #[rkyv(compare(PartialEq))]
 pub struct RealtimeFrame {
@@ -105,24 +99,21 @@ impl RealtimeFrame {
 }
 
 /// Top-level network packet enum.
-///
-/// All data sent over the network is wrapped in this enum, allowing
-/// the receiver to dispatch to the appropriate stream handler.
-/// Audio is Opus-encoded for bandwidth efficiency and FEC support.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone)]
 pub enum NetworkPacket {
     Realtime(RealtimeFrame),
 }
 
 /// Key for identifying a specific jitter buffer.
+/// We use SocketAddr (IP + Port) here to distinguish between multiple
+/// instances running on the same machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct BufferKey {
-    host_id: HostId,
+    source_addr: SocketAddr,
     stream_id: RealtimeStreamId,
 }
 
 /// Metadata for a buffer entry with Opus decoder.
-/// Each remote stream gets its own decoder to maintain FEC state.
 struct BufferEntry<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     buffer: JitterBuffer<Sample, CHANNELS, SAMPLE_RATE>,
     decoder: crate::audio::opus::OpusDecoder<Sample, CHANNELS, SAMPLE_RATE>,
@@ -130,15 +121,6 @@ struct BufferEntry<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
 }
 
 /// Manages all realtime audio streams across all hosts.
-///
-/// Each (HostId, RealtimeStreamId) pair gets its own jitter buffer.
-/// When pulling audio, all buffers are mixed together into a single output.
-///
-/// # Thread Safety
-///
-/// Uses [`DashMap`] internally for lock-free concurrent access between
-/// the network receiver thread (pushes frames) and the audio output thread
-/// (pulls mixed frames).
 pub struct RealtimeAudioStream<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     buffers: DashMap<BufferKey, BufferEntry<Sample, CHANNELS, SAMPLE_RATE>>,
 }
@@ -152,20 +134,17 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         }
     }
 
-    /// Receives a realtime frame (Opus-encoded) and routes it to the appropriate jitter buffer.
-    ///
-    /// Creates a new buffer and decoder if this is the first frame from this (host, stream) pair.
-    /// Decodes Opus to PCM before pushing to jitter buffer.
-    pub fn receive(&self, host_id: HostId, frame: RealtimeFrame) {
+    /// Receives a realtime frame and routes it to the appropriate jitter buffer.
+    pub fn receive(&self, source_addr: SocketAddr, frame: RealtimeFrame) {
         let key = BufferKey {
-            host_id,
+            source_addr,
             stream_id: frame.stream_id,
         };
 
         let mut entry = self.buffers.entry(key).or_insert_with(|| {
             info!(
-                "Creating jitter buffer for host {} stream {:?}",
-                host_id.to_string(),
+                "Creating jitter buffer for source {} stream {:?}",
+                source_addr,
                 frame.stream_id
             );
             let decoder = crate::audio::opus::OpusDecoder::new()
@@ -192,8 +171,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     }
 
     /// Pulls `len` samples from all buffers and mixes them together.
-    ///
-    /// Returns `None` if no buffers have data available.
     pub fn pull_and_mix(&self, len: usize) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
         let mut mixed: Vec<f64> = vec![0.0; len];
         let mut has_data = false;
@@ -224,8 +201,8 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             let alive = now.duration_since(entry.last_seen) < HOST_TIMEOUT;
             if !alive {
                 info!(
-                    "Removing stale buffer for host {} stream {:?}",
-                    key.host_id.to_string(),
+                    "Removing stale buffer for source {} stream {:?}",
+                    key.source_addr,
                     key.stream_id
                 );
             }
@@ -238,11 +215,11 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         self.buffers.len()
     }
 
-    /// Returns a list of unique active host IDs.
+    /// Returns a list of unique active host IDs (IP addresses).
     pub fn active_hosts(&self) -> Vec<HostId> {
         let mut hosts = Vec::new();
         for entry in self.buffers.iter() {
-            let host_id = entry.key().host_id;
+            let host_id = HostId::from(entry.key().source_addr.ip());
             if !hosts.contains(&host_id) {
                 hosts.push(host_id);
             }
@@ -250,12 +227,12 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         hosts
     }
 
-    /// Returns stats for all streams belonging to a specific host.
+    /// Returns stats for all streams belonging to a specific host (IP).
     pub fn host_stream_stats(&self, host_id: HostId) -> Vec<StreamStats> {
         let mut result = Vec::new();
 
         for entry in self.buffers.iter() {
-            if entry.key().host_id != host_id {
+            if entry.key().source_addr.ip() != host_id.ip() {
                 continue;
             }
 
@@ -264,7 +241,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
             let packet_loss = 1.0 - stats.stability();
 
-            // Hardware latency = frame_size / sample_rate / channels * 1000
             let expected_frame_size = stats.expected_frame_size();
             let hardware_latency_ms = if expected_frame_size > 0 {
                 expected_frame_size as f64 / (SAMPLE_RATE as f64) / (CHANNELS as f64) * 1000.0
@@ -273,8 +249,16 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             };
             let jitter_latency_ms = stats.latency_ema() * hardware_latency_ms;
 
+            // Include source port in the stream name if there are multiple instances
+            // We can detect this by seeing if there are other buffers with the same IP and stream_id
+            let stream_name = if self.has_multiple_instances(entry.key().source_addr.ip(), stream_id) {
+                format!("{} (:{})", stream_id, entry.key().source_addr.port())
+            } else {
+                stream_id.to_string()
+            };
+
             result.push(StreamStats {
-                stream_id,
+                stream_id: stream_name,
                 audio_level: stats.audio_level_ema() as f32,
                 packet_loss: packet_loss as f32,
                 jitter_latency_ms: jitter_latency_ms as f32,
@@ -285,12 +269,25 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
         result
     }
+
+    fn has_multiple_instances(&self, ip: std::net::IpAddr, stream_id: RealtimeStreamId) -> bool {
+        let mut count = 0;
+        for entry in self.buffers.iter() {
+            if entry.key().source_addr.ip() == ip && entry.key().stream_id == stream_id {
+                count += 1;
+                if count > 1 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
 }
 
 /// Statistics for a single audio stream.
 #[derive(Debug, Clone)]
 pub struct StreamStats {
-    pub stream_id: RealtimeStreamId,
+    pub stream_id: String,
     pub audio_level: f32,
     pub packet_loss: f32,
     pub jitter_latency_ms: f32,
@@ -452,7 +449,7 @@ mod tests {
 
         let encoder = OpusEncoder::<f32, 2, 48000>::new().unwrap();
         let stream = RealtimeAudioStream::<f32, 2, 48000>::new();
-        let host_id = HostId::new("127.0.0.1:12345".parse::<SocketAddr>().unwrap());
+        let source_addr = "127.0.0.1:12345".parse::<SocketAddr>().unwrap();
 
         // Encode and send 10 frames
         for seq in 1..=10u64 {
@@ -463,7 +460,7 @@ mod tests {
             let input = AudioBuffer::<f32, 2, 48000>::new(samples).unwrap();
             let opus_packet = encoder.process(input).unwrap();
             let frame = RealtimeFrame::new(RealtimeStreamId::Mic, seq, opus_packet);
-            stream.receive(host_id, frame);
+            stream.receive(source_addr, frame);
         }
 
         // Pull frame by frame and check sequence
@@ -517,7 +514,7 @@ mod tests {
         use std::net::SocketAddr;
         let encoder = OpusEncoder::<f32, 2, 48000>::new().unwrap();
         let stream = RealtimeAudioStream::<f32, 2, 48000>::new();
-        let host_id = HostId::new("127.0.0.1:12345".parse::<SocketAddr>().unwrap());
+        let source_addr = "127.0.0.1:12345".parse::<SocketAddr>().unwrap();
 
         // Send enough frames
         for seq in 1..=10u64 {
@@ -525,7 +522,7 @@ mod tests {
             let input = AudioBuffer::<f32, 2, 48000>::new(samples).unwrap();
             let opus_packet = encoder.process(input).unwrap();
             let frame = RealtimeFrame::new(RealtimeStreamId::Mic, seq, opus_packet);
-            stream.receive(host_id, frame);
+            stream.receive(source_addr, frame);
         }
 
         // Test various pull lengths
@@ -550,7 +547,7 @@ mod tests {
 
         let encoder = OpusEncoder::<f32, 2, 48000>::new().unwrap();
         let stream = RealtimeAudioStream::<f32, 2, 48000>::new();
-        let host_id = HostId::new("127.0.0.1:12345".parse::<SocketAddr>().unwrap());
+        let source_addr = "127.0.0.1:12345".parse::<SocketAddr>().unwrap();
 
         let sample_rate = 48000;
         let duration_secs = 3;
@@ -582,7 +579,7 @@ mod tests {
             let input = AudioBuffer::<f32, 2, 48000>::new(samples).unwrap();
             let opus_packet = encoder.process(input).unwrap();
             let frame = RealtimeFrame::new(RealtimeStreamId::Mic, seq, opus_packet);
-            stream.receive(host_id, frame);
+            stream.receive(source_addr, frame);
 
             if seq >= 3 {
                 if let Some(data) = stream.pull_and_mix(pull_size) {
@@ -674,7 +671,7 @@ mod tests {
 
         let encoder = Arc::new(OpusEncoder::<f32, 2, 48000>::new().unwrap());
         let stream = Arc::new(RealtimeAudioStream::<f32, 2, 48000>::new());
-        let host_id = HostId::new("127.0.0.1:12345".parse::<SocketAddr>().unwrap());
+        let source_addr = "127.0.0.1:12345".parse::<SocketAddr>().unwrap();
 
         let sample_rate = 48000;
         let duration_secs = 3;
@@ -712,7 +709,7 @@ mod tests {
                 let input = AudioBuffer::<f32, 2, 48000>::new(samples).unwrap();
                 let opus_packet = encoder_clone.process(input).unwrap();
                 let frame = RealtimeFrame::new(RealtimeStreamId::Mic, seq, opus_packet);
-                stream_clone.receive(host_id, frame);
+                stream_clone.receive(source_addr, frame);
 
                 let expected_time = Duration::from_secs_f64(seq as f64 * frame_duration_ms / 1000.0);
                 let elapsed = start.elapsed();

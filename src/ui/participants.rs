@@ -48,7 +48,10 @@ pub fn MainContent(hosts: Vec<HostInfo>) -> Element {
                     div {
                         class: "flex flex-col gap-6 pb-20",
                         for host in hosts {
-                            HostCard { host: host.clone() }
+                            HostCard { 
+                                key: "{host.id.to_string()}",
+                                host: host.clone() 
+                            }
                         }
                     }
                 }

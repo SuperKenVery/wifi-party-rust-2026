@@ -27,8 +27,23 @@ fn get_output_devices() -> Vec<Device> {
 struct NetworkInterfaceInfo {
     name: String,
     index: u32,
-    has_v4: bool,
-    has_v6: bool,
+    v4_addrs: Vec<std::net::Ipv4Addr>,
+    v6_addrs: Vec<std::net::Ipv6Addr>,
+}
+
+impl NetworkInterfaceInfo {
+    fn display_name(&self, ipv6: bool) -> String {
+        let addrs = if ipv6 {
+            self.v6_addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ")
+        } else {
+            self.v4_addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ")
+        };
+        if addrs.is_empty() {
+            self.name.clone()
+        } else {
+            format!("{} ({})", self.name, addrs)
+        }
+    }
 }
 
 fn get_network_interfaces() -> Vec<NetworkInterfaceInfo> {
@@ -36,15 +51,21 @@ fn get_network_interfaces() -> Vec<NetworkInterfaceInfo> {
         .map(|ifaces| {
             let mut result: Vec<NetworkInterfaceInfo> = Vec::new();
             for iface in ifaces {
-                let has_v4 = iface.addr.iter().any(|a| matches!(a.ip(), IpAddr::V4(ip) if !ip.is_loopback()));
-                let has_v6 = iface.addr.iter().any(|a| matches!(a.ip(), IpAddr::V6(ip) if !ip.is_loopback()));
-                if has_v4 || has_v6 {
+                let v4_addrs: Vec<_> = iface.addr.iter().filter_map(|a| match a.ip() {
+                    IpAddr::V4(ip) if !ip.is_loopback() => Some(ip),
+                    _ => None,
+                }).collect();
+                let v6_addrs: Vec<_> = iface.addr.iter().filter_map(|a| match a.ip() {
+                    IpAddr::V6(ip) if !ip.is_loopback() => Some(ip),
+                    _ => None,
+                }).collect();
+                if !v4_addrs.is_empty() || !v6_addrs.is_empty() {
                     if !result.iter().any(|r| r.index == iface.index) {
                         result.push(NetworkInterfaceInfo {
                             name: iface.name.clone(),
                             index: iface.index,
-                            has_v4,
-                            has_v6,
+                            v4_addrs,
+                            v6_addrs,
                         });
                     }
                 }
@@ -335,9 +356,9 @@ fn DeviceSettings() -> Element {
     let interface_options: Vec<(String, String)> =
         std::iter::once(("".to_string(), "System Default".to_string()))
             .chain(network_interfaces.read().iter().filter_map(|iface| {
-                let supported = if ipv6 { iface.has_v6 } else { iface.has_v4 };
+                let supported = if ipv6 { !iface.v6_addrs.is_empty() } else { !iface.v4_addrs.is_empty() };
                 if supported {
-                    Some((iface.index.to_string(), iface.name.clone()))
+                    Some((iface.index.to_string(), iface.display_name(ipv6)))
                 } else {
                     None
                 }

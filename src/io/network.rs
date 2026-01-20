@@ -26,8 +26,8 @@
 use anyhow::{Context, Result};
 use std::io::ErrorKind;
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
@@ -36,12 +36,9 @@ use crate::pipeline::Sink;
 use crate::state::{AppState, ConnectionStatus, HostId};
 
 pub const MULTICAST_ADDR_V4: &str = "239.255.43.2";
-pub const MULTICAST_ADDR_V6: &str = "ff02::7667";
+pub const MULTICAST_ADDR_V6: &str = "ff02::fb";
 pub const MULTICAST_PORT: u16 = 7667;
 pub const TTL: u32 = 1;
-
-#[deprecated(note = "Use MULTICAST_ADDR_V4 instead")]
-pub const MULTICAST_ADDR: &str = MULTICAST_ADDR_V4;
 
 /// Sends audio packets to all peers via UDP multicast.
 ///
@@ -127,7 +124,9 @@ impl<Sample: crate::audio::AudioSample, const CHANNELS: usize, const SAMPLE_RATE
     pub fn new(
         socket: UdpSocket,
         state: Arc<AppState>,
-        realtime_stream: Arc<crate::party::stream::RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
+        realtime_stream: Arc<
+            crate::party::stream::RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>,
+        >,
         local_ips: Vec<std::net::IpAddr>,
         shutdown_flag: Arc<AtomicBool>,
     ) -> Self {
@@ -180,15 +179,15 @@ impl<Sample: crate::audio::AudioSample, const CHANNELS: usize, const SAMPLE_RATE
         }
 
         let received_data = &buf[..size];
-        let host_id = HostId::from(source_addr);
 
-        let packet: NetworkPacket =
-            unsafe { rkyv::from_bytes_unchecked::<NetworkPacket, rkyv::rancor::Error>(received_data) }
-                .map_err(|e| anyhow::anyhow!("Deserialization error: {:?}", e))?;
+        let packet: NetworkPacket = unsafe {
+            rkyv::from_bytes_unchecked::<NetworkPacket, rkyv::rancor::Error>(received_data)
+        }
+        .map_err(|e| anyhow::anyhow!("Deserialization error: {:?}", e))?;
 
         match packet {
             NetworkPacket::Realtime(frame) => {
-                self.realtime_stream.receive(host_id, frame);
+                self.realtime_stream.receive(source_addr, frame);
             }
         }
 

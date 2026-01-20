@@ -6,24 +6,26 @@
 //! - [`HostId`] / [`HostInfo`] - Remote peer identification and metadata
 
 use anyhow::Result;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::{Arc, Mutex};
 
 use crate::party::{Party, PartyConfig};
 use crate::pipeline::node::TimelineSnapshot;
 
-/// Unique identifier for a remote host, derived from their socket address.
+/// Unique identifier for a remote host, derived from their IP address.
+/// We use IP address instead of SocketAddr to keep the host identity stable
+/// even if the ephemeral source port changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct HostId(SocketAddr);
+pub struct HostId(IpAddr);
 
 impl HostId {
-    pub fn new(addr: SocketAddr) -> Self {
+    pub fn new(addr: IpAddr) -> Self {
         Self(addr)
     }
 
-    pub fn as_socket_addr(&self) -> &SocketAddr {
-        &self.0
+    pub fn ip(&self) -> IpAddr {
+        self.0
     }
 
     pub fn to_string(&self) -> String {
@@ -31,9 +33,15 @@ impl HostId {
     }
 }
 
+impl From<IpAddr> for HostId {
+    fn from(addr: IpAddr) -> Self {
+        Self(addr)
+    }
+}
+
 impl From<SocketAddr> for HostId {
     fn from(addr: SocketAddr) -> Self {
-        Self(addr)
+        Self(addr.ip())
     }
 }
 

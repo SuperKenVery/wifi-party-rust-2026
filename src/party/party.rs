@@ -160,7 +160,9 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
             loop {
                 thread::sleep(Duration::from_millis(100));
 
-                let active_host_ids = realtime_stream.active_hosts();
+                let mut active_host_ids = realtime_stream.active_hosts();
+                // Sort hosts by ID to ensure stable UI order and prevent flickering
+                active_host_ids.sort_by_key(|h| h.to_string());
 
                 let mut host_infos_vec = Vec::new();
 
