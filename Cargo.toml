@@ -24,6 +24,7 @@ dashmap = "6.1.0"
 network-interface = "2.0"
 opus = "0.3"
 audiopus_sys = { version = "0.2", features = ["static"] }
+deloxide = { version = "1.0.0", features = ["lock-order-graph", "logging-and-visualization"] }
 
 [dev-dependencies]
 hound = "3.5"

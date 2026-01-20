@@ -1,8 +1,13 @@
-//! A jitter buffer for AudioFrame with sequence number handling and adaptive latency.
+//! A jitter buffer for AudioFrame with target-latency based adaptive control.
 //!
 //! This buffer handles out-of-order packets, duplicates, and late arrivals
 //! using a slot-based design where each slot is indexed by sequence number.
 //! It supports partial reads and adaptive latency management.
+//!
+//! Key design principle: assume missing packets are lost, not delayed.
+//! - On push: clamp read_seq forward if it falls outside target latency window
+//! - On pull: only hold back when read_seq would exceed write_seq (underrun)
+//! - Adapt target latency: increase on high loss, decrease when min latency stays high
 
 use super::{Sink, Source};
 use crate::audio::AudioSample;
@@ -11,39 +16,20 @@ use crossbeam::atomic::AtomicCell;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Instant;
 use tracing::debug;
 
-const HIGH_STABILITY: f64 = 0.99;
-const TARGET_STABILITY: f64 = 0.95;
 const EMA_ALPHA: f64 = 0.01;
 const RESET_THRESHOLD_COUNT: u64 = 50;
 const RESET_THRESHOLD_DIFF: u64 = 100;
-const HUGE_GAP_THRESHOLD: u64 = 150; // ~3 seconds at 20ms/frame
-const TIMELINE_CAPACITY: usize = 2500; // ~10 seconds at 20ms/frame
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum JitterEvent {
-    LowStabilityHoldBack { stability: f64, latency: i64 },
-    MissingSeq { seq: u64, stability: f64 },
-    HugeGapSkip { latency: i64, skip_amount: i64 },
-    HighStabilityBump { stability: f64, latency: i64 },
-}
+const DEFAULT_TARGET_LATENCY: u64 = 3; // frames (~60ms at 20ms/frame)
+const MIN_TARGET_LATENCY: u64 = 1;
+const MAX_TARGET_LATENCY: u64 = 25; // ~500ms at 20ms/frame
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct TimelineEntry {
-    pub timestamp_ms: u64,
-    pub read_seq: u64,
-    pub write_seq: u64,
-    pub buffer_state: Vec<bool>,
-    pub event: Option<JitterEvent>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct TimelineSnapshot {
-    pub entries: Vec<TimelineEntry>,
-    pub now_ms: u64,
-}
+const LATENCY_WINDOW_SIZE: usize = 50; // sliding window for min latency detection
+const HIGH_MIN_LATENCY_THRESHOLD: u64 = 5; // if min latency stays above this, decrease target
+const HIGH_LOSS_THRESHOLD: f64 = 0.05; // 10% loss rate triggers target increase
+const LOW_LOSS_THRESHOLD: f64 = 0.02; // 2% loss rate allows target decrease
 
 #[repr(align(64))]
 struct CachePadded<T>(T);
@@ -63,46 +49,20 @@ impl<T> std::ops::Deref for CachePadded<T> {
 
 /// Statistics for jitter buffer behavior.
 pub struct JitterBufferStats {
-    stability: AtomicU64,
-    latency_ema: AtomicU64,
-    audio_level_ema: AtomicU64,
     expected_frame_size: AtomicU64,
-    timeline: Mutex<TimelineState>,
-}
-
-struct TimelineState {
-    entries: VecDeque<TimelineEntry>,
-    start_time: Instant,
+    loss_rate_ema: AtomicU64,
+    target_latency: AtomicU64,
+    latency_window: Mutex<VecDeque<u64>>,
 }
 
 impl JitterBufferStats {
     fn new() -> Self {
         Self {
-            stability: AtomicU64::new(1.0f64.to_bits()),
-            latency_ema: AtomicU64::new(0f64.to_bits()),
-            audio_level_ema: AtomicU64::new(0f64.to_bits()),
             expected_frame_size: AtomicU64::new(0),
-            timeline: Mutex::new(TimelineState {
-                entries: VecDeque::with_capacity(TIMELINE_CAPACITY),
-                start_time: Instant::now(),
-            }),
+            loss_rate_ema: AtomicU64::new(0f64.to_bits()),
+            target_latency: AtomicU64::new(DEFAULT_TARGET_LATENCY),
+            latency_window: Mutex::new(VecDeque::with_capacity(LATENCY_WINDOW_SIZE)),
         }
-    }
-
-    /// Returns the stability (hit rate) as EMA. Higher = more reliable delivery.
-    /// Miss rate = 1.0 - stability.
-    pub fn stability(&self) -> f64 {
-        f64::from_bits(self.stability.load(Ordering::Acquire))
-    }
-
-    /// Returns the EMA of jitter buffer latency in frames.
-    pub fn latency_ema(&self) -> f64 {
-        f64::from_bits(self.latency_ema.load(Ordering::Acquire))
-    }
-
-    /// Returns the EMA of audio level (0.0 to 1.0).
-    pub fn audio_level_ema(&self) -> f64 {
-        f64::from_bits(self.audio_level_ema.load(Ordering::Acquire))
     }
 
     /// Returns the expected frame size in samples (total, not per channel).
@@ -110,17 +70,27 @@ impl JitterBufferStats {
         self.expected_frame_size.load(Ordering::Acquire)
     }
 
-    fn record_latency(&self, latency: i64) {
-        let curr = self.latency_ema();
-        let new_val = (1.0 - EMA_ALPHA) * curr + EMA_ALPHA * (latency as f64);
-        self.latency_ema.store(new_val.to_bits(), Ordering::Release);
+    /// Returns the current loss rate EMA (0.0 to 1.0).
+    pub fn loss_rate(&self) -> f64 {
+        f64::from_bits(self.loss_rate_ema.load(Ordering::Acquire))
     }
 
-    fn record_audio_level(&self, level: f64) {
-        let curr = self.audio_level_ema();
-        let new_val = (1.0 - EMA_ALPHA) * curr + EMA_ALPHA * level;
-        self.audio_level_ema
-            .store(new_val.to_bits(), Ordering::Release);
+    /// Returns the current target latency in frames.
+    pub fn target_latency(&self) -> u64 {
+        self.target_latency.load(Ordering::Acquire)
+    }
+
+    fn record_latency(&self, latency: u64) {
+        let mut window = self.latency_window.lock().unwrap();
+        if window.len() >= LATENCY_WINDOW_SIZE {
+            window.pop_front();
+        }
+        window.push_back(latency);
+    }
+
+    fn min_latency_in_window(&self) -> Option<u64> {
+        let window = self.latency_window.lock().unwrap();
+        window.iter().copied().min()
     }
 
     fn record_expected_frame_size(&self, size: u64) {
@@ -130,53 +100,49 @@ impl JitterBufferStats {
     }
 
     fn record_hit(&self) {
-        let curr = self.stability();
-        let new_val = (1.0 - EMA_ALPHA) * curr + EMA_ALPHA;
-        self.stability.store(new_val.to_bits(), Ordering::Release);
+        let curr = self.loss_rate();
+        let new_val = (1.0 - EMA_ALPHA) * curr;
+        self.loss_rate_ema
+            .store(new_val.to_bits(), Ordering::Release);
     }
 
     fn record_miss(&self) {
-        let curr = self.stability();
-        let new_val = (1.0 - EMA_ALPHA) * curr;
-        self.stability.store(new_val.to_bits(), Ordering::Release);
+        let curr = self.loss_rate();
+        let new_val = (1.0 - EMA_ALPHA) * curr + EMA_ALPHA;
+        self.loss_rate_ema
+            .store(new_val.to_bits(), Ordering::Release);
     }
 
-    fn record_timeline(
-        &self,
-        read_seq: u64,
-        write_seq: u64,
-        buffer_state: Vec<bool>,
-        event: Option<JitterEvent>,
-    ) {
-        let mut state = self.timeline.lock().unwrap();
-        let timestamp_ms = state.start_time.elapsed().as_millis() as u64;
+    fn adjust_target_latency(&self) {
+        let loss_rate = self.loss_rate();
+        let current_target = self.target_latency.load(Ordering::Acquire);
 
-        if state.entries.len() >= TIMELINE_CAPACITY {
-            state.entries.pop_front();
+        // Increase target latency when loss is high
+        if loss_rate > HIGH_LOSS_THRESHOLD && current_target < MAX_TARGET_LATENCY {
+            let new_target = (current_target + 1).min(MAX_TARGET_LATENCY);
+            self.target_latency.store(new_target, Ordering::Release);
+            debug!(
+                "JitterBuffer: Target latency increased {} -> {} (loss_rate={:.2}%)",
+                current_target,
+                new_target,
+                loss_rate * 100.0
+            );
+            return;
         }
 
-        state.entries.push_back(TimelineEntry {
-            timestamp_ms,
-            read_seq,
-            write_seq,
-            buffer_state,
-            event,
-        });
-    }
-
-    pub fn timeline_snapshot(&self) -> TimelineSnapshot {
-        let state = self.timeline.lock().unwrap();
-        let now_ms = state.start_time.elapsed().as_millis() as u64;
-        let cutoff = now_ms.saturating_sub(1000);
-
-        let entries = state
-            .entries
-            .iter()
-            .filter(|e| e.timestamp_ms >= cutoff)
-            .cloned()
-            .collect();
-
-        TimelineSnapshot { entries, now_ms }
+        // Decrease target latency when loss is low and min latency is high
+        if loss_rate < LOW_LOSS_THRESHOLD && current_target > MIN_TARGET_LATENCY {
+            if let Some(min_lat) = self.min_latency_in_window() {
+                if min_lat >= HIGH_MIN_LATENCY_THRESHOLD {
+                    let new_target = (current_target - 1).max(MIN_TARGET_LATENCY);
+                    self.target_latency.store(new_target, Ordering::Release);
+                    debug!(
+                        "JitterBuffer: Target latency decreased {} -> {} (min_latency={})",
+                        current_target, new_target, min_lat
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -258,22 +224,30 @@ impl<Sample> PartialFrameState<Sample> {
 /// in sequence order. The buffer is safe to use across threads - one thread can push
 /// while another pulls.
 ///
-/// # Features
-/// - **Partial reads**: `pull(len)` returns exactly `len` samples, storing remainder
-/// - **Adaptive latency**: Skips frames when latency is too high
-/// - **Stability tracking**: Waits for missing frames when connection is unstable
+/// # Design Principle
+/// Assume missing packets are lost, not delayed. This avoids waiting for packets
+/// that will never arrive, which would otherwise enlarge silence gaps.
 ///
 /// # Behavior
-/// - Out-of-order frames are held until earlier frames arrive or are skipped
-/// - Duplicate frames (same sequence number) are ignored
-/// - Late frames (sequence < current read position) are dropped
+/// - On push: clamp read_seq forward if it falls outside target latency window
+/// - On pull: only hold back when read_seq would exceed write_seq (underrun)
+/// - Adapt target latency: increase on high loss, decrease when min latency stays high
 pub struct JitterBuffer<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     slots: Box<[Slot<Sample, CHANNELS, SAMPLE_RATE>]>,
     capacity: usize,
+    /// Next sequence number to read (will-be-read).
+    /// The reader attempts to fetch from slot[read_seq % capacity].
     read_seq: CachePadded<AtomicU64>,
+    /// Highest sequence number written (last-written).
+    /// Updated when a new frame with seq > write_seq is pushed.
     write_seq: CachePadded<AtomicU64>,
+    /// Counter for detecting host restart.
+    /// Incremented when receiving packets with seq far below read_seq.
+    /// When count reaches RESET_THRESHOLD_COUNT, we assume the sender restarted
+    /// and reset the buffer to accept the new sequence range.
     late_packet_count: AtomicU64,
     stats: JitterBufferStats,
+    /// A partially read frame. Here we store its left over for next pull's use.
     partial: Mutex<PartialFrameState<Sample>>,
 }
 
@@ -307,32 +281,46 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     }
 
     /// Returns the number of frames buffered ahead of the read position.
-    pub fn latency(&self) -> i64 {
+    pub fn latency(&self) -> u64 {
         let write_seq = self.write_seq.load(Ordering::Acquire);
         let read_seq = self.read_seq.load(Ordering::Acquire);
-        (write_seq.wrapping_sub(read_seq)) as i64
-    }
-
-    /// Returns the buffer state: for each seq from read_seq to write_seq,
-    /// true if that slot has data, false if missing.
-    fn buffer_state(&self) -> Vec<bool> {
-        let read_seq = self.read_seq.load(Ordering::Acquire);
-        let write_seq = self.write_seq.load(Ordering::Acquire);
-        if write_seq <= read_seq {
-            return vec![];
-        }
-        (read_seq..=write_seq)
-            .map(|seq| {
-                let slot_idx = self.slot_index(seq);
-                let slot = &self.slots[slot_idx];
-                slot.stored_seq() == Some(seq)
-            })
-            .collect()
+        write_seq.saturating_sub(read_seq)
     }
 
     /// Returns a reference to the jitter buffer statistics.
     pub fn stats(&self) -> &JitterBufferStats {
         &self.stats
+    }
+
+    /// Clamp read_seq forward to stay within target latency of write_seq.
+    fn clamp_read_seq(&self, write_seq: u64) {
+        let target_latency = self.stats.target_latency();
+        let desired_read_seq = write_seq.saturating_sub(target_latency);
+
+        loop {
+            let current_read_seq = self.read_seq.load(Ordering::Acquire);
+            if current_read_seq >= desired_read_seq {
+                return;
+            }
+
+            if self
+                .read_seq
+                .compare_exchange_weak(
+                    current_read_seq,
+                    desired_read_seq,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                debug!(
+                    "JitterBuffer: Clamped read_seq from {} to {} (write_seq={}, target_latency={})",
+                    current_read_seq, desired_read_seq, write_seq, target_latency
+                );
+                return;
+            }
+            debug!("clamp_read_seq: Spinning to update read_seq");
+        }
     }
 
     /// Try to fetch the frame at current read_seq from slots.
@@ -350,78 +338,30 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         let mut partial = self.partial.lock().unwrap();
         let mut collected: Vec<Sample> = Vec::with_capacity(len);
         let mut result_seq = partial.seq;
-        let mut event: Option<JitterEvent> = None;
 
-        // Capture buffer state BEFORE consuming any frames
-        let snapshot_read_seq = self.read_seq.load(Ordering::Acquire);
-        let snapshot_write_seq = self.write_seq.load(Ordering::Acquire);
-        let snapshot_buffer_state = self.buffer_state();
-
-        // Drain partial frame first
         let needed = len - collected.len();
         collected.extend(partial.take(needed));
 
-        // Record latency once per pull (before consuming frames)
         let latency = self.latency();
         self.stats.record_latency(latency);
+        self.stats.adjust_target_latency();
 
-        let stability = self.stats.stability();
-
-        // 1. Huge Gap Detection (Remote Start / Jump Forward)
-        // If latency is absurdly high, remote probably started before us - jump forward
-        if latency > HUGE_GAP_THRESHOLD as i64 {
-            let skip_amount = latency - 1;
-            if skip_amount > 0 {
-                debug!(
-                    "JitterBuffer: Huge latency detected ({}), skipping {} frames",
-                    latency, skip_amount
-                );
-                event = Some(JitterEvent::HugeGapSkip {
-                    latency,
-                    skip_amount,
-                });
-                self.skip(skip_amount);
-            }
-        }
-
-        // Re-read latency after potential skip
-        let latency = self.latency();
-
-        // 2. Control: Hold Back when stability is low
-        // If stability drops below threshold, don't advance read_seq to let buffer build up
-        if stability < TARGET_STABILITY && latency > 0 {
-            debug!(
-                "JitterBuffer: Low stability ({:.4}), latency={}, holding back.",
-                stability, latency
-            );
-            event = Some(JitterEvent::LowStabilityHoldBack { stability, latency });
-            let remaining = len - collected.len();
-            collected.extend(std::iter::repeat(Sample::silence()).take(remaining));
-            self.stats.record_hit();
-
-            self.stats.record_timeline(
-                snapshot_read_seq,
-                snapshot_write_seq,
-                snapshot_buffer_state,
-                event,
-            );
-
-            return Some((collected, result_seq));
-        }
-
-        // 3. Control: Bump Forward when stability is very high
-        // If stability is excellent and we have excess buffer, reduce latency
-        if stability > HIGH_STABILITY && latency > 1 {
-            debug!(
-                "JitterBuffer: High stability ({:.4}), latency={}, bumping forward",
-                stability, latency
-            );
-            event = Some(JitterEvent::HighStabilityBump { stability, latency });
-            self.skip(1);
-        }
-
-        // Fetch frames until we have enough samples
         while collected.len() < len {
+            let read_seq = self.read_seq.load(Ordering::Acquire);
+            let write_seq = self.write_seq.load(Ordering::Acquire);
+
+            // Underrun: read_seq > write_seq, hold back (don't advance)
+            // Note: read_seq == write_seq means we have exactly one frame at write_seq to read
+            if read_seq > write_seq {
+                debug!(
+                    "JitterBuffer: Underrun, read_seq={} > write_seq={}, holding back",
+                    read_seq, write_seq
+                );
+                let remaining = len - collected.len();
+                collected.extend(std::iter::repeat(Sample::silence()).take(remaining));
+                break;
+            }
+
             match self.try_fetch_frame() {
                 Some(frame) => {
                     self.skip(1);
@@ -429,20 +369,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                     result_seq = frame.sequence_number;
 
                     let samples = frame.samples.into_inner();
-
-                    // Calculate and record audio level (RMS normalized to 0.0-1.0)
-                    if !samples.is_empty() {
-                        let sum_sq: f64 = samples
-                            .iter()
-                            .map(|s| {
-                                let normalized = s.to_f64_normalized();
-                                normalized * normalized
-                            })
-                            .sum();
-                        let rms = (sum_sq / samples.len() as f64).sqrt();
-                        self.stats.record_audio_level(rms.min(1.0));
-                    }
-
                     let needed = len - collected.len();
 
                     if samples.len() <= needed {
@@ -453,22 +379,23 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                     }
                 }
                 None => {
-                    self.stats.record_miss();
-                    let current_read = self.read_seq.load(Ordering::Acquire);
-                    let current_write = self.write_seq.load(Ordering::Acquire);
-
-                    if current_read >= current_write {
-                        // Underrun - Hold Back (don't advance read_seq)
-                        // This lets write_seq get ahead, building buffer
+                    // Slot is empty - check if this is a hole (missing packet) or underrun
+                    // Hole: read_seq < write_seq, packet was lost
+                    // Underrun: read_seq == write_seq, we're caught up to writer
+                    if read_seq >= write_seq {
+                        debug!(
+                            "JitterBuffer: Underrun (empty slot), read_seq={} >= write_seq={}, holding back",
+                            read_seq, write_seq
+                        );
                         let remaining = len - collected.len();
                         collected.extend(std::iter::repeat(Sample::silence()).take(remaining));
                         break;
                     }
 
-                    // Hole - Skip (Never Wait for missing packets)
+                    // Missing packet - assume lost, skip immediately
+                    self.stats.record_miss();
                     self.skip(1);
 
-                    let stability = self.stats.stability();
                     let remaining = len - collected.len();
                     let frame_size = self.stats.expected_frame_size() as usize;
                     let fill_count = if frame_size > 0 {
@@ -476,11 +403,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                     } else {
                         remaining
                     };
-
-                    event = Some(JitterEvent::MissingSeq {
-                        seq: current_read,
-                        stability,
-                    });
 
                     collected.extend(std::iter::repeat(Sample::silence()).take(fill_count));
 
@@ -494,13 +416,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 }
             }
         }
-
-        self.stats.record_timeline(
-            snapshot_read_seq,
-            snapshot_write_seq,
-            snapshot_buffer_state,
-            event,
-        );
 
         if collected.is_empty() {
             None
@@ -526,7 +441,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Sink
         let mut read_seq = self.read_seq.load(Ordering::Acquire);
         let write_seq = self.write_seq.load(Ordering::Acquire);
 
-        // Initialize read_seq on first frame
         if read_seq == 0 && write_seq == 0 && seq > 0 {
             self.read_seq
                 .compare_exchange(0, seq, Ordering::AcqRel, Ordering::Relaxed)
@@ -534,7 +448,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Sink
             read_seq = self.read_seq.load(Ordering::Acquire);
         }
 
-        // Drop late packets (but allow some tolerance for out-of-order)
         if seq < read_seq {
             let diff = read_seq - seq;
             if diff > RESET_THRESHOLD_DIFF {
@@ -547,8 +460,8 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Sink
                     self.read_seq.store(0, Ordering::Release);
                     self.write_seq.store(0, Ordering::Release);
                     self.late_packet_count.store(0, Ordering::Release);
-                    let mut partial = self.partial.lock().unwrap();
-                    *partial = PartialFrameState::new();
+                    // let mut partial = self.partial.lock().unwrap();
+                    // *partial = PartialFrameState::new();
                 }
             }
             return;
@@ -556,7 +469,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Sink
 
         self.late_packet_count.store(0, Ordering::Release);
 
-        // Drop duplicates - only reject if the slot has a newer or equal sequence
         if let Some(previous_written_seq) = slot.stored_seq() {
             if previous_written_seq >= seq {
                 debug!(
@@ -569,7 +481,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Sink
 
         slot.write(seq, input);
 
-        // Update write_seq to track the highest sequence number seen
+        let mut new_write_seq = write_seq;
         loop {
             let current_write_seq = self.write_seq.load(Ordering::Acquire);
             if seq <= current_write_seq {
@@ -580,12 +492,14 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Sink
                 .compare_exchange_weak(current_write_seq, seq, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
-                // if seq % 10 == 0 || true {
-                //     debug!("Updated write_seq to {}", seq);
-                // }
+                new_write_seq = seq;
                 break;
             }
+            debug!("push: Spinning to update write_seq");
         }
+
+        // Clamp read_seq forward if outside target latency window
+        self.clamp_read_seq(new_write_seq);
     }
 }
 
@@ -595,7 +509,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Source
     type Output = AudioFrame<Sample, CHANNELS, SAMPLE_RATE>;
 
     fn pull(&self, len: usize) -> Option<AudioFrame<Sample, CHANNELS, SAMPLE_RATE>> {
-        let (samples, seq) = self.collect_samples(len)?;
+        let (samples, seq) = self.collect_samples(len).unwrap();
 
         debug_assert_eq!(
             samples.len(),
@@ -687,9 +601,7 @@ mod tests {
     fn test_out_of_order_frames() {
         let buffer = TestBuffer::new(16);
 
-        // Push seq 1 first to initialize read_seq to 1
         buffer.push(make_frame(1, 1920));
-        // Then push out of order: 3 before 2
         buffer.push(make_frame(3, 1920));
         buffer.push(make_frame(2, 1920));
 
@@ -758,12 +670,10 @@ mod tests {
     fn test_pull_with_gaps_maintains_length() {
         let buffer = TestBuffer::new(16);
 
-        // Push frames with gaps (1, 3, 5 - missing 2, 4)
         buffer.push(make_frame(1, 1920));
         buffer.push(make_frame(3, 1920));
         buffer.push(make_frame(5, 1920));
 
-        // Pull should still return exact length requested
         let test_lengths = [100, 500, 1920, 2500, 4000];
         for &len in &test_lengths {
             let pulled = buffer.pull(len);
@@ -781,7 +691,6 @@ mod tests {
     fn test_pull_empty_buffer_returns_silence() {
         let buffer = TestBuffer::new(16);
 
-        // Empty buffer returns silence (not None) to maintain continuous audio
         let pulled = buffer.pull(1920);
         assert!(pulled.is_some(), "Empty buffer should return silence");
         let data = pulled.unwrap().samples.into_inner();
@@ -796,7 +705,6 @@ mod tests {
     fn test_continuous_push_pull_data_integrity() {
         let buffer = TestBuffer::new(16);
 
-        // Push frames with known pattern
         for seq in 1..=10u64 {
             let samples: Vec<f32> = (0..1920)
                 .map(|i| (seq as f32) + (i as f32) * 0.0001)
@@ -805,24 +713,96 @@ mod tests {
             buffer.push(frame);
         }
 
-        // Pull and verify data is continuous (no gaps, no zeros where there shouldn't be)
+        let target_latency = buffer.stats.target_latency();
+        let expected_start_seq = 10u64.saturating_sub(target_latency);
+        let available_frames = (10 - expected_start_seq + 1) as usize;
+
         let mut all_pulled: Vec<f32> = Vec::new();
-        for _ in 0..10 {
+        for _ in 0..available_frames {
             let pulled = buffer.pull(1920);
             assert!(pulled.is_some());
             all_pulled.extend(pulled.unwrap().samples.into_inner());
         }
 
-        // Check that we got all the data
-        assert_eq!(all_pulled.len(), 1920 * 10);
+        assert_eq!(all_pulled.len(), 1920 * available_frames);
 
-        // Check that data is not all zeros (would indicate a bug)
         let non_zero_count = all_pulled.iter().filter(|&&x| x != 0.0).count();
         assert!(
             non_zero_count > all_pulled.len() / 2,
             "Too many zeros in pulled data: {} zeros out of {}",
             all_pulled.len() - non_zero_count,
             all_pulled.len()
+        );
+    }
+
+    #[test]
+    fn test_read_seq_clamping_on_large_jump() {
+        let buffer = TestBuffer::new(32);
+
+        buffer.push(make_frame(1, 1920));
+
+        let read_seq_before = buffer.read_seq.load(Ordering::Acquire);
+        assert_eq!(read_seq_before, 1);
+
+        buffer.push(make_frame(100, 1920));
+
+        let read_seq_after = buffer.read_seq.load(Ordering::Acquire);
+        let target_latency = buffer.stats.target_latency();
+        let expected_min_read = 100u64.saturating_sub(target_latency);
+        assert!(
+            read_seq_after >= expected_min_read,
+            "read_seq {} should be >= {} (write_seq 100 - target_latency {})",
+            read_seq_after,
+            expected_min_read,
+            target_latency
+        );
+    }
+
+    #[test]
+    fn test_no_holdback_on_gaps() {
+        let buffer = TestBuffer::new(16);
+
+        buffer.push(make_frame(1, 1920));
+        buffer.push(make_frame(5, 1920));
+
+        let target_latency = buffer.stats.target_latency();
+        let expected_read_seq = 5u64.saturating_sub(target_latency);
+
+        let pulled1 = buffer.pull(1920);
+        assert!(pulled1.is_some());
+
+        if expected_read_seq <= 1 {
+            assert_eq!(pulled1.unwrap().sequence_number, 1);
+        }
+
+        let pulled2 = buffer.pull(1920);
+        assert!(pulled2.is_some());
+
+        let pulled3 = buffer.pull(1920);
+        assert!(pulled3.is_some());
+    }
+
+    #[test]
+    fn test_underrun_holds_back() {
+        let buffer = TestBuffer::new(16);
+
+        buffer.push(make_frame(1, 1920));
+
+        let pulled1 = buffer.pull(1920);
+        assert!(pulled1.is_some());
+        assert_eq!(pulled1.unwrap().sequence_number, 1);
+
+        let read_before = buffer.read_seq.load(Ordering::Acquire);
+
+        let pulled2 = buffer.pull(1920);
+        assert!(pulled2.is_some());
+        let data = pulled2.unwrap();
+        assert!(data.samples.data().iter().all(|&s| s == 0.0));
+
+        let read_after = buffer.read_seq.load(Ordering::Acquire);
+        assert_eq!(
+            read_before, read_after,
+            "read_seq should not advance on underrun"
         );
     }
 }

@@ -39,7 +39,7 @@ use tracing::info;
 use crate::audio::AudioSample;
 use crate::audio::frame::AudioBuffer;
 use crate::audio::opus::OpusPacket;
-use crate::pipeline::node::{JitterBuffer, TimelineSnapshot};
+use crate::pipeline::node::JitterBuffer;
 use crate::pipeline::{Sink, Source};
 use crate::state::HostId;
 
@@ -175,8 +175,8 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         let mut mixed: Vec<f64> = vec![0.0; len];
         let mut has_data = false;
 
-        for entry in self.buffers.iter_mut() {
-            if let Some(frame) = entry.buffer.pull(len) {
+        for entry in self.buffers.iter() {
+            if let Some(frame) = entry.value().buffer.pull(len) {
                 has_data = true;
                 for (i, sample) in frame.samples.data().iter().enumerate() {
                     if i < len {
@@ -239,18 +239,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             let stream_id = entry.key().stream_id;
             let stats = entry.value().buffer.stats();
 
-            let packet_loss = 1.0 - stats.stability();
-
-            let expected_frame_size = stats.expected_frame_size();
-            let hardware_latency_ms = if expected_frame_size > 0 {
-                expected_frame_size as f64 / (SAMPLE_RATE as f64) / (CHANNELS as f64) * 1000.0
-            } else {
-                0.0
-            };
-            let jitter_latency_ms = stats.latency_ema() * hardware_latency_ms;
-
-            // Include source port in the stream name if there are multiple instances
-            // We can detect this by seeing if there are other buffers with the same IP and stream_id
             let stream_name = if self.has_multiple_instances(entry.key().source_addr.ip(), stream_id) {
                 format!("{} (:{})", stream_id, entry.key().source_addr.port())
             } else {
@@ -259,11 +247,8 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
             result.push(StreamStats {
                 stream_id: stream_name,
-                audio_level: stats.audio_level_ema() as f32,
-                packet_loss: packet_loss as f32,
-                jitter_latency_ms: jitter_latency_ms as f32,
-                hardware_latency_ms: hardware_latency_ms as f32,
-                timeline: stats.timeline_snapshot(),
+                packet_loss: stats.loss_rate() as f32,
+                target_latency: stats.target_latency() as f32,
             });
         }
 
@@ -288,11 +273,8 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 #[derive(Debug, Clone)]
 pub struct StreamStats {
     pub stream_id: String,
-    pub audio_level: f32,
     pub packet_loss: f32,
-    pub jitter_latency_ms: f32,
-    pub hardware_latency_ms: f32,
-    pub timeline: TimelineSnapshot,
+    pub target_latency: f32,
 }
 
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Default
@@ -451,7 +433,8 @@ mod tests {
         let stream = RealtimeAudioStream::<f32, 2, 48000>::new();
         let source_addr = "127.0.0.1:12345".parse::<SocketAddr>().unwrap();
 
-        // Encode and send 10 frames
+        let mut all_pulled: Vec<f32> = Vec::new();
+
         for seq in 1..=10u64 {
             let samples: Vec<f32> = (0..1920)
                 .map(|i| ((i as f32 + seq as f32 * 1920.0) * 0.1).sin() * 0.5)
@@ -461,19 +444,14 @@ mod tests {
             let opus_packet = encoder.process(input).unwrap();
             let frame = RealtimeFrame::new(RealtimeStreamId::Mic, seq, opus_packet);
             stream.receive(source_addr, frame);
-        }
 
-        // Pull frame by frame and check sequence
-        let mut all_pulled: Vec<f32> = Vec::new();
-        for i in 0..10 {
             let pulled = stream.pull_and_mix(1920);
-            assert!(pulled.is_some(), "Pull {} should have data", i);
+            assert!(pulled.is_some(), "Pull {} should have data", seq);
             let data = pulled.unwrap();
-            assert_eq!(data.data().len(), 1920, "Pull {} wrong length", i);
+            assert_eq!(data.data().len(), 1920, "Pull {} wrong length", seq);
             all_pulled.extend(data.data());
         }
 
-        // Check that data is not all zeros or constant
         let non_zero_count = all_pulled.iter().filter(|&&x| x.abs() > 0.001).count();
         eprintln!(
             "Non-zero samples: {}/{}",
@@ -487,7 +465,6 @@ mod tests {
             all_pulled.len()
         );
 
-        // Check that data varies (not stuck on one value)
         let mut prev = all_pulled[0];
         let mut change_count = 0;
         for &sample in &all_pulled[1..] {

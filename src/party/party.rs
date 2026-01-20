@@ -173,11 +173,8 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
                         .into_iter()
                         .map(|s| StreamInfo {
                             stream_id: s.stream_id.to_string(),
-                            audio_level: s.audio_level,
                             packet_loss: s.packet_loss,
-                            jitter_latency_ms: s.jitter_latency_ms,
-                            hardware_latency_ms: s.hardware_latency_ms,
-                            timeline: s.timeline,
+                            target_latency: s.target_latency,
                         })
                         .collect();
 

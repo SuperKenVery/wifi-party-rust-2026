@@ -11,7 +11,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::{Arc, Mutex};
 
 use crate::party::{Party, PartyConfig};
-use crate::pipeline::node::TimelineSnapshot;
 
 /// Unique identifier for a remote host, derived from their IP address.
 /// We use IP address instead of SocketAddr to keep the host identity stable
@@ -49,11 +48,8 @@ impl From<SocketAddr> for HostId {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamInfo {
     pub stream_id: String,
-    pub audio_level: f32,
     pub packet_loss: f32,
-    pub jitter_latency_ms: f32,
-    pub hardware_latency_ms: f32,
-    pub timeline: TimelineSnapshot,
+    pub target_latency: f32,
 }
 
 /// Information about a remote host
