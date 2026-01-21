@@ -15,12 +15,12 @@ use crate::io::{AudioInput, AudioOutput, LoopbackInput};
 use crate::pipeline::Sink;
 use crate::pipeline::effect::LevelMeter;
 use crate::pipeline::node::{AudioBatcher, SimpleBuffer};
-use crate::state::{AppState, HostInfo, StreamInfo};
+use crate::state::{AppState, HostId, HostInfo, StreamInfo};
 
 use super::combinator::{MixingSource, Switch, Tee};
 use super::config::PartyConfig;
 use super::network::NetworkNode;
-use super::stream::{RealtimeAudioStream, RealtimeFramePacker, RealtimeStreamId};
+use super::stream::{RealtimeAudioStream, RealtimeFramePacker, RealtimeStreamId, StreamSnapshot};
 
 pub struct Party<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     state: Arc<AppState>,
@@ -41,6 +41,10 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             realtime_stream: Arc::new(RealtimeAudioStream::new()),
             _audio_streams: Vec::new(),
         }
+    }
+
+    pub fn stream_snapshots(&self, host_id: HostId, stream_id: &str) -> Vec<StreamSnapshot> {
+        self.realtime_stream.stream_snapshots(host_id, stream_id)
     }
 }
 
@@ -170,13 +174,14 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
                     let stream_stats = realtime_stream.host_stream_stats(host_id);
 
                     let streams: Vec<StreamInfo> = stream_stats
-                        .into_iter()
-                        .map(|s| StreamInfo {
-                            stream_id: s.stream_id.to_string(),
-                            packet_loss: s.packet_loss,
-                            target_latency: s.target_latency,
-                        })
-                        .collect();
+                    .into_iter()
+                    .map(|s| StreamInfo {
+                        stream_id: s.stream_id.to_string(),
+                        packet_loss: s.packet_loss,
+                        target_latency: s.target_latency,
+                        audio_level: s.audio_level,
+                    })
+                    .collect();
 
                     host_infos_vec.push(HostInfo {
                         id: host_id,

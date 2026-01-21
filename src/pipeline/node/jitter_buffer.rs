@@ -12,10 +12,11 @@
 use super::{Sink, Source};
 use crate::audio::AudioSample;
 use crate::audio::frame::AudioFrame;
+use crate::pipeline::effect::calculate_rms_level;
 use crossbeam::atomic::AtomicCell;
 use std::collections::VecDeque;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use tracing::debug;
 
 const EMA_ALPHA: f64 = 0.01;
@@ -30,6 +31,8 @@ const LATENCY_WINDOW_SIZE: usize = 50; // sliding window for min latency detecti
 const HIGH_MIN_LATENCY_THRESHOLD: u64 = 5; // if min latency stays above this, decrease target
 const HIGH_LOSS_THRESHOLD: f64 = 0.05; // 10% loss rate triggers target increase
 const LOW_LOSS_THRESHOLD: f64 = 0.02; // 2% loss rate allows target decrease
+
+const SNAPSHOT_WINDOW_SIZE: usize = 200; // ~1 second at ~5ms/pull (256 samples @ 48kHz)
 
 #[repr(align(64))]
 struct CachePadded<T>(T);
@@ -47,12 +50,26 @@ impl<T> std::ops::Deref for CachePadded<T> {
     }
 }
 
+/// A snapshot of the jitter buffer state at a single pull operation.
+/// Used for debugging visualization of buffer behavior over time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PullSnapshot {
+    pub write_seq: u64,
+    pub read_seq: u64,
+    /// Status of slots between read_seq and write_seq.
+    /// Index 0 = read_seq, index N = read_seq + N.
+    /// true = slot has data, false = slot is empty (missing packet).
+    pub slot_status: Vec<bool>,
+}
+
 /// Statistics for jitter buffer behavior.
 pub struct JitterBufferStats {
     expected_frame_size: AtomicU64,
     loss_rate_ema: AtomicU64,
     target_latency: AtomicU64,
     latency_window: Mutex<VecDeque<u64>>,
+    audio_level: AtomicU32,
+    snapshots: Mutex<VecDeque<PullSnapshot>>,
 }
 
 impl JitterBufferStats {
@@ -62,6 +79,8 @@ impl JitterBufferStats {
             loss_rate_ema: AtomicU64::new(0f64.to_bits()),
             target_latency: AtomicU64::new(DEFAULT_TARGET_LATENCY),
             latency_window: Mutex::new(VecDeque::with_capacity(LATENCY_WINDOW_SIZE)),
+            audio_level: AtomicU32::new(0),
+            snapshots: Mutex::new(VecDeque::with_capacity(SNAPSHOT_WINDOW_SIZE)),
         }
     }
 
@@ -78,6 +97,17 @@ impl JitterBufferStats {
     /// Returns the current target latency in frames.
     pub fn target_latency(&self) -> u64 {
         self.target_latency.load(Ordering::Acquire)
+    }
+
+    /// Returns the current audio level (0-100).
+    pub fn audio_level(&self) -> u32 {
+        self.audio_level.load(Ordering::Acquire)
+    }
+
+    /// Returns a copy of recent pull snapshots (last ~1 second).
+    pub fn recent_snapshots(&self) -> Vec<PullSnapshot> {
+        let snapshots = self.snapshots.lock().unwrap();
+        snapshots.iter().cloned().collect()
     }
 
     fn record_latency(&self, latency: u64) {
@@ -111,6 +141,18 @@ impl JitterBufferStats {
         let new_val = (1.0 - EMA_ALPHA) * curr + EMA_ALPHA;
         self.loss_rate_ema
             .store(new_val.to_bits(), Ordering::Release);
+    }
+
+    fn record_audio_level(&self, level: u32) {
+        self.audio_level.store(level, Ordering::Release);
+    }
+
+    fn record_snapshot(&self, snapshot: PullSnapshot) {
+        let mut snapshots = self.snapshots.lock().unwrap();
+        if snapshots.len() >= SNAPSHOT_WINDOW_SIZE {
+            snapshots.pop_front();
+        }
+        snapshots.push_back(snapshot);
     }
 
     fn adjust_target_latency(&self) {
@@ -292,6 +334,19 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         &self.stats
     }
 
+    /// Captures the current slot status between read_seq and write_seq.
+    fn capture_slot_status(&self, read_seq: u64, write_seq: u64) -> Vec<bool> {
+        let count = write_seq.saturating_sub(read_seq) as usize;
+        (0..count)
+            .map(|i| {
+                let seq = read_seq + i as u64;
+                let slot_idx = self.slot_index(seq);
+                let slot = &self.slots[slot_idx];
+                slot.stored_seq().map_or(false, |s| s == seq)
+            })
+            .collect()
+    }
+
     /// Clamp read_seq forward to stay within target latency of write_seq.
     fn clamp_read_seq(&self, write_seq: u64) {
         let target_latency = self.stats.target_latency();
@@ -357,6 +412,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                     "JitterBuffer: Underrun, read_seq={} > write_seq={}, holding back",
                     read_seq, write_seq
                 );
+                // self.stats.record_miss();
                 let remaining = len - collected.len();
                 collected.extend(std::iter::repeat(Sample::silence()).take(remaining));
                 break;
@@ -420,6 +476,18 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         if collected.is_empty() {
             None
         } else {
+            let read_seq = self.read_seq.load(Ordering::Acquire);
+            let write_seq = self.write_seq.load(Ordering::Acquire);
+            let slot_status = self.capture_slot_status(read_seq, write_seq);
+            self.stats.record_snapshot(PullSnapshot {
+                write_seq,
+                read_seq,
+                slot_status,
+            });
+
+            let level = calculate_rms_level(&collected);
+            self.stats.record_audio_level(level);
+
             Some((collected, result_seq))
         }
     }

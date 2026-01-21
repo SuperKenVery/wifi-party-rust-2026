@@ -41,3 +41,4 @@ pub mod stream;
 
 pub use config::PartyConfig;
 pub use party::Party;
+pub use stream::StreamSnapshot;

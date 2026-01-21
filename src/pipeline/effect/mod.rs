@@ -8,4 +8,4 @@ pub mod level_meter;
 pub mod mute;
 pub mod noise_gate;
 
-pub use level_meter::LevelMeter;
+pub use level_meter::{LevelMeter, calculate_rms_level};

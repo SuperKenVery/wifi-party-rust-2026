@@ -39,9 +39,11 @@ use tracing::info;
 use crate::audio::AudioSample;
 use crate::audio::frame::AudioBuffer;
 use crate::audio::opus::OpusPacket;
-use crate::pipeline::node::JitterBuffer;
+use crate::pipeline::node::{JitterBuffer, PullSnapshot};
 use crate::pipeline::{Sink, Source};
 use crate::state::HostId;
+
+pub use crate::pipeline::node::PullSnapshot as StreamSnapshot;
 
 const HOST_TIMEOUT: Duration = Duration::from_secs(5);
 const JITTER_BUFFER_CAPACITY: usize = 64;
@@ -249,6 +251,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 stream_id: stream_name,
                 packet_loss: stats.loss_rate() as f32,
                 target_latency: stats.target_latency() as f32,
+                audio_level: stats.audio_level(),
             });
         }
 
@@ -267,6 +270,28 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         }
         false
     }
+
+    /// Returns snapshots for a specific stream, identified by stream_id string.
+    /// The stream_id should match the format returned by host_stream_stats().
+    pub fn stream_snapshots(&self, host_id: HostId, stream_id: &str) -> Vec<PullSnapshot> {
+        for entry in self.buffers.iter() {
+            if entry.key().source_addr.ip() != host_id.ip() {
+                continue;
+            }
+
+            let sid = entry.key().stream_id;
+            let stream_name = if self.has_multiple_instances(entry.key().source_addr.ip(), sid) {
+                format!("{} (:{})", sid, entry.key().source_addr.port())
+            } else {
+                sid.to_string()
+            };
+
+            if stream_name == stream_id {
+                return entry.value().buffer.stats().recent_snapshots();
+            }
+        }
+        Vec::new()
+    }
 }
 
 /// Statistics for a single audio stream.
@@ -275,6 +300,7 @@ pub struct StreamStats {
     pub stream_id: String,
     pub packet_loss: f32,
     pub target_latency: f32,
+    pub audio_level: u32,
 }
 
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Default

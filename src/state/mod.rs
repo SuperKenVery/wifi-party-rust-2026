@@ -10,7 +10,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::{Arc, Mutex};
 
-use crate::party::{Party, PartyConfig};
+use crate::party::{Party, PartyConfig, StreamSnapshot};
 
 /// Unique identifier for a remote host, derived from their IP address.
 /// We use IP address instead of SocketAddr to keep the host identity stable
@@ -50,6 +50,7 @@ pub struct StreamInfo {
     pub stream_id: String,
     pub packet_loss: f32,
     pub target_latency: f32,
+    pub audio_level: u32,
 }
 
 /// Information about a remote host
@@ -98,5 +99,14 @@ impl AppState {
         *state.party.lock().unwrap() = Some(party);
 
         Ok(state)
+    }
+
+    pub fn stream_snapshots(&self, host_id: HostId, stream_id: &str) -> Vec<StreamSnapshot> {
+        if let Ok(party_guard) = self.party.lock() {
+            if let Some(party) = party_guard.as_ref() {
+                return party.stream_snapshots(host_id, stream_id);
+            }
+        }
+        Vec::new()
     }
 }
