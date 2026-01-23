@@ -6,8 +6,8 @@
 //! For synchronized music playback, see [`sync_stream`](super::sync_stream).
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -120,7 +120,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
     /// Receives a realtime frame and routes it to the appropriate jitter buffer.
     pub fn receive(&self, source_addr: SocketAddr, frame: RealtimeFrame) {
-        tracing::debug!("RealtimeAudioStream::receive from {} stream {:?} seq {}", source_addr, frame.stream_id, frame.sequence_number);
         let key = BufferKey {
             source_addr,
             stream_id: frame.stream_id,
@@ -129,11 +128,10 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         let mut entry = self.buffers.entry(key).or_insert_with(|| {
             info!(
                 "Creating jitter buffer for source {} stream {:?}",
-                source_addr,
-                frame.stream_id
+                source_addr, frame.stream_id
             );
-            let decoder = crate::audio::opus::OpusDecoder::new()
-                .expect("Failed to create Opus decoder");
+            let decoder =
+                crate::audio::opus::OpusDecoder::new().expect("Failed to create Opus decoder");
             BufferEntry {
                 buffer: JitterBuffer::new(JITTER_BUFFER_CAPACITY),
                 decoder,
@@ -187,8 +185,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             if !alive {
                 info!(
                     "Removing stale buffer for source {} stream {:?}",
-                    key.source_addr,
-                    key.stream_id
+                    key.source_addr, key.stream_id
                 );
             }
             alive
@@ -224,11 +221,12 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             let stream_id = entry.key().stream_id;
             let stats = entry.value().buffer.stats();
 
-            let stream_name = if self.has_multiple_instances(entry.key().source_addr.ip(), stream_id) {
-                format!("{} (:{})", stream_id, entry.key().source_addr.port())
-            } else {
-                stream_id.to_string()
-            };
+            let stream_name =
+                if self.has_multiple_instances(entry.key().source_addr.ip(), stream_id) {
+                    format!("{} (:{})", stream_id, entry.key().source_addr.port())
+                } else {
+                    stream_id.to_string()
+                };
 
             result.push(StreamStats {
                 stream_id: stream_name,
@@ -346,8 +344,8 @@ impl crate::pipeline::Node for RealtimeFramePacker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::frame::AudioBuffer;
     use crate::audio::OpusEncoder;
+    use crate::audio::frame::AudioBuffer;
     use crate::pipeline::Node;
 
     #[test]
@@ -463,11 +461,7 @@ mod tests {
         }
 
         let non_zero_count = all_pulled.iter().filter(|&&x| x.abs() > 0.001).count();
-        eprintln!(
-            "Non-zero samples: {}/{}",
-            non_zero_count,
-            all_pulled.len()
-        );
+        eprintln!("Non-zero samples: {}/{}", non_zero_count, all_pulled.len());
         assert!(
             non_zero_count > all_pulled.len() / 2,
             "Too many near-zero samples: {}/{}",
@@ -483,11 +477,7 @@ mod tests {
             }
             prev = sample;
         }
-        eprintln!(
-            "Sample changes: {}/{}",
-            change_count,
-            all_pulled.len() - 1
-        );
+        eprintln!("Sample changes: {}/{}", change_count, all_pulled.len() - 1);
         assert!(
             change_count > all_pulled.len() / 2,
             "Data doesn't vary enough: {}/{}",
@@ -698,7 +688,8 @@ mod tests {
                 let frame = RealtimeFrame::new(RealtimeStreamId::Mic, seq, opus_packet);
                 stream_clone.receive(source_addr, frame);
 
-                let expected_time = Duration::from_secs_f64(seq as f64 * frame_duration_ms / 1000.0);
+                let expected_time =
+                    Duration::from_secs_f64(seq as f64 * frame_duration_ms / 1000.0);
                 let elapsed = start.elapsed();
                 if expected_time > elapsed {
                     thread::sleep(expected_time - elapsed);
@@ -711,7 +702,8 @@ mod tests {
         let receiver = thread::spawn(move || {
             let mut pulled_samples: Vec<f32> = Vec::with_capacity(total_samples);
             let pull_size = 256;
-            let pull_interval = Duration::from_secs_f64(pull_size as f64 / 2.0 / sample_rate as f64);
+            let pull_interval =
+                Duration::from_secs_f64(pull_size as f64 / 2.0 / sample_rate as f64);
             let start = Instant::now();
 
             while stream_clone.buffers.is_empty() {
@@ -796,6 +788,9 @@ mod tests {
             discontinuities, max_jump
         );
 
-        eprintln!("Listen to {} and {} to compare", original_path, decoded_path);
+        eprintln!(
+            "Listen to {} and {} to compare",
+            original_path, decoded_path
+        );
     }
 }

@@ -76,7 +76,6 @@ impl NetworkSender {
         match rkyv::to_bytes::<rkyv::rancor::Error>(packet) {
             Ok(serialized) => match self.socket.send_to(&serialized, self.multicast_addr) {
                 Ok(bytes_sent) => {
-                    debug!("Sent {} bytes to {:?}", bytes_sent, self.multicast_addr);
                     if bytes_sent != serialized.len() {
                         warn!("Partial send: {} of {} bytes", bytes_sent, serialized.len());
                     }

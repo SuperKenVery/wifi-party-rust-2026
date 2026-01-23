@@ -179,20 +179,21 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
     pub fn restart_with_config(&mut self, config: PartyConfig) -> Result<()> {
         info!("Restarting Party with new config...");
 
-        // Signal the old host sync task to stop
         self.host_sync_shutdown.store(true, Ordering::Relaxed);
 
         self._audio_streams.clear();
-        self.network_sender = None;
         {
             let mut music_streams = self.music_streams.lock().unwrap();
             music_streams.clear();
         }
+        // Drop all NetworkSender references before shutting down NetworkNode
+        self.network_sender = None;
+        self.ntp_service = None;
+        self.synced_stream = None;
 
         self.config = config;
         self.network_node = NetworkNode::new();
         self.realtime_stream = Arc::new(RealtimeAudioStream::new());
-        // Create a new shutdown flag for the new host sync task
         self.host_sync_shutdown = Arc::new(AtomicBool::new(false));
 
         self.run()
@@ -260,14 +261,14 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
                     let stream_stats = realtime_stream.host_stream_stats(host_id);
 
                     let streams: Vec<StreamInfo> = stream_stats
-                    .into_iter()
-                    .map(|s| StreamInfo {
-                        stream_id: s.stream_id.to_string(),
-                        packet_loss: s.packet_loss,
-                        target_latency: s.target_latency,
-                        audio_level: s.audio_level,
-                    })
-                    .collect();
+                        .into_iter()
+                        .map(|s| StreamInfo {
+                            stream_id: s.stream_id.to_string(),
+                            packet_loss: s.packet_loss,
+                            target_latency: s.target_latency,
+                            audio_level: s.audio_level,
+                        })
+                        .collect();
 
                     host_infos_vec.push(HostInfo {
                         id: host_id,

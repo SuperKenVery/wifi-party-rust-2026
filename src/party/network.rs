@@ -60,11 +60,82 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tracing::{info, warn};
 
 use crate::audio::AudioSample;
-use crate::io::{MULTICAST_ADDR_V4, MULTICAST_ADDR_V6, MULTICAST_PORT, NetworkReceiver, NetworkSender, TTL};
+use crate::io::{
+    MULTICAST_ADDR_V4, MULTICAST_ADDR_V6, MULTICAST_PORT, NetworkReceiver, NetworkSender, TTL,
+};
 use crate::party::ntp::NtpService;
 use crate::party::stream::RealtimeAudioStream;
 use crate::party::sync_stream::SyncedAudioStream;
 use crate::state::AppState;
+
+const DSCP_EF: u32 = 0xB8;
+
+/// Sets the DSCP (Differentiated Services Code Point) value on a socket for QoS.
+/// Uses EF (Expedited Forwarding) = 46, which translates to TOS/Traffic Class = 0xB8.
+/// This marks packets as voice traffic for network QoS prioritization.
+fn set_socket_dscp(socket: &Socket, ipv6: bool) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = socket.as_raw_fd();
+        let dscp = DSCP_EF as libc::c_int;
+
+        let (level, optname) = if ipv6 {
+            (libc::IPPROTO_IPV6, libc::IPV6_TCLASS)
+        } else {
+            (libc::IPPROTO_IP, libc::IP_TOS)
+        };
+
+        let ret = unsafe {
+            libc::setsockopt(
+                fd,
+                level,
+                optname,
+                &dscp as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if ret != 0 {
+            warn!(
+                "Failed to set DSCP for voice QoS: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Networking::WinSock::{
+            IP_TOS, IPPROTO_IP, IPPROTO_IPV6, IPV6_TCLASS, setsockopt,
+        };
+
+        let fd = socket.as_raw_socket();
+        let dscp = DSCP_EF as i32;
+
+        let (level, optname) = if ipv6 {
+            (IPPROTO_IPV6, IPV6_TCLASS)
+        } else {
+            (IPPROTO_IP, IP_TOS)
+        };
+
+        let ret = unsafe {
+            setsockopt(
+                fd as usize,
+                level,
+                optname,
+                &dscp as *const _ as *const i8,
+                std::mem::size_of::<i32>() as i32,
+            )
+        };
+        if ret != 0 {
+            warn!(
+                "Failed to set DSCP for voice QoS: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+}
 
 /// Orchestrates network audio transport.
 ///
@@ -184,7 +255,9 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         Ok((sender, realtime_stream, synced_stream, ntp_service))
     }
 
-    fn setup_socket_v4(send_interface_index: Option<u32>) -> Result<(UdpSocket, SocketAddr, Vec<IpAddr>)> {
+    fn setup_socket_v4(
+        send_interface_index: Option<u32>,
+    ) -> Result<(UdpSocket, SocketAddr, Vec<IpAddr>)> {
         let multicast_ip: Ipv4Addr = MULTICAST_ADDR_V4
             .parse()
             .context("Invalid multicast address")?;
@@ -192,13 +265,24 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
             .context("Failed to create socket")?;
-        socket.set_reuse_address(true)?;
-        socket.set_nonblocking(false)?;
-        socket.set_multicast_ttl_v4(TTL)?;
-        socket.set_multicast_loop_v4(false)?;
+        socket
+            .set_reuse_address(true)
+            .context("Failed to set reuse_address")?;
+        socket
+            .set_nonblocking(false)
+            .context("Failed to set nonblocking")?;
+        socket
+            .set_multicast_ttl_v4(TTL)
+            .context("Failed to set multicast_ttl_v4")?;
+        socket
+            .set_multicast_loop_v4(false)
+            .context("Failed to set multicast_loop_v4")?;
+        set_socket_dscp(&socket, false);
 
         let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), MULTICAST_PORT);
-        socket.bind(&bind_addr.into())?;
+        socket
+            .bind(&bind_addr.into())
+            .context(format!("Failed to bind to {:?}", bind_addr))?;
 
         let mut local_ips = Vec::new();
         let mut send_ip: Option<Ipv4Addr> = None;
@@ -217,7 +301,10 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                             }
                             match socket.join_multicast_v4(&multicast_ip, &ip) {
                                 Ok(()) => info!("Joined multicast on {} ({})", iface.name, ip),
-                                Err(e) => warn!("Failed to join multicast on {} ({}): {}", iface.name, ip, e),
+                                Err(e) => warn!(
+                                    "Failed to join multicast on {} ({}): {}",
+                                    iface.name, ip, e
+                                ),
                             }
                         }
                     }
@@ -234,11 +321,16 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             info!("Send interface set to {}", ip);
         }
 
-        info!("IPv4 multicast socket ready on {}:{}", MULTICAST_ADDR_V4, MULTICAST_PORT);
+        info!(
+            "IPv4 multicast socket ready on {}:{}",
+            MULTICAST_ADDR_V4, MULTICAST_PORT
+        );
         Ok((socket.into(), multicast_addr, local_ips))
     }
 
-    fn setup_socket_v6(send_interface_index: Option<u32>) -> Result<(UdpSocket, SocketAddr, Vec<IpAddr>)> {
+    fn setup_socket_v6(
+        send_interface_index: Option<u32>,
+    ) -> Result<(UdpSocket, SocketAddr, Vec<IpAddr>)> {
         let multicast_ip: Ipv6Addr = MULTICAST_ADDR_V6
             .parse()
             .context("Invalid IPv6 multicast address")?;
@@ -246,18 +338,31 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
         let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))
             .context("Failed to create IPv6 socket")?;
-        socket.set_reuse_address(true)?;
-        socket.set_nonblocking(false)?;
-        socket.set_multicast_hops_v6(TTL)?;
-        socket.set_multicast_loop_v6(false)?;
+        socket
+            .set_reuse_address(true)
+            .context("Failed to set reuse_address")?;
+        socket
+            .set_nonblocking(false)
+            .context("Failed to set nonblocking")?;
+        socket
+            .set_multicast_hops_v6(TTL)
+            .context("Failed to set multicast_hops_v6")?;
+        socket
+            .set_multicast_loop_v6(false)
+            .context("Failed to set multicast_loop_v6")?;
+        set_socket_dscp(&socket, true);
 
         if let Some(index) = send_interface_index {
-            socket.set_multicast_if_v6(index)?;
+            socket
+                .set_multicast_if_v6(index)
+                .context("Failed to set multicast_if_v6")?;
             info!("Send interface set to index {}", index);
         }
 
         let bind_addr = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, MULTICAST_PORT, 0, 0);
-        socket.bind(&bind_addr.into())?;
+        socket
+            .bind(&bind_addr.into())
+            .context(format!("Failed to bind to {:?}", bind_addr))?;
 
         let mut local_ips = Vec::new();
         match network_interface::NetworkInterface::show() {
@@ -271,7 +376,10 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                             local_ips.push(IpAddr::V6(ip));
                             match socket.join_multicast_v6(&multicast_ip, iface.index) {
                                 Ok(()) => info!("Joined IPv6 multicast on {} ({})", iface.name, ip),
-                                Err(e) => warn!("Failed to join IPv6 multicast on {} ({}): {}", iface.name, ip, e),
+                                Err(e) => warn!(
+                                    "Failed to join IPv6 multicast on {} ({}): {}",
+                                    iface.name, ip, e
+                                ),
                             }
                         }
                     }
@@ -283,7 +391,10 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             }
         }
 
-        info!("IPv6 multicast socket ready on [{}]:{}", MULTICAST_ADDR_V6, MULTICAST_PORT);
+        info!(
+            "IPv6 multicast socket ready on [{}]:{}",
+            MULTICAST_ADDR_V6, MULTICAST_PORT
+        );
         Ok((socket.into(), multicast_addr, local_ips))
     }
 }

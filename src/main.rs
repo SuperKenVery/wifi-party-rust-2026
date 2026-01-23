@@ -37,12 +37,12 @@ fn main() {
 
 fn run() -> Result<()> {
     info!("Starting Wi-Fi Party KTV...");
-    Deloxide::new()
-        .callback(|info| {
-            println!("Deadlock detected! Cycle: {:?}", info.thread_cycle);
-        })
-        .start()
-        .expect("Failed to initialize detector");
+    // Deloxide::new()
+    //     .callback(|info| {
+    //         println!("Deadlock detected! Cycle: {:?}", info.thread_cycle);
+    //     })
+    //     .start()
+    //     .expect("Failed to initialize detector");
 
     let config = PartyConfig::default();
     let state = AppState::new(config).context("Failed to initialize application")?;
