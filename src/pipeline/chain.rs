@@ -3,7 +3,7 @@
 //! This module provides [`PullPipeline`] and [`PushPipeline`] which are used
 //! to compose nodes into processing chains.
 
-use crate::pipeline::node::{Node, Sink, Source};
+use super::traits::{Node, Sink, Source};
 
 /// A pull-based pipeline that chains a source with a processing node.
 ///

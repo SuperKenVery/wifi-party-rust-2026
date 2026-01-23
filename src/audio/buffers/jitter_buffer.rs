@@ -9,14 +9,14 @@
 //! - On pull: only hold back when read_seq would exceed write_seq (underrun)
 //! - Adapt target latency: increase on high loss, decrease when min latency stays high
 
-use super::{Sink, Source};
-use crate::audio::AudioSample;
+use crate::audio::effects::calculate_rms_level;
 use crate::audio::frame::AudioFrame;
-use crate::pipeline::effect::calculate_rms_level;
+use crate::audio::AudioSample;
+use crate::pipeline::{Sink, Source};
 use crossbeam::atomic::AtomicCell;
 use std::collections::VecDeque;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Mutex;
 use tracing::debug;
 
 const EMA_ALPHA: f64 = 0.01;

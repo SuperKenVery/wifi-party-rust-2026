@@ -1,6 +1,6 @@
 //! Audio effect nodes.
 //!
-//! This module provides audio processing effects that implement [`Node`](super::Node).
+//! This module provides audio processing effects that implement [`Node`](crate::pipeline::Node).
 //! Effects transform audio buffers in-place.
 
 pub mod gain;

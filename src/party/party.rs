@@ -3,31 +3,39 @@
 //! Coordinates audio capture, network transport, and playback into a complete
 //! audio sharing pipeline.
 
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
 use tracing::{info, warn};
 
-use crate::audio::{AudioSample, OpusEncoder};
-use crate::io::{AudioInput, AudioOutput, LoopbackInput};
+use crate::audio::{AudioBatcher, AudioSample, LevelMeter, OpusEncoder, SimpleBuffer};
+use crate::io::{AudioInput, AudioOutput, LoopbackInput, NetworkSender};
 use crate::pipeline::Sink;
-use crate::pipeline::effect::LevelMeter;
-use crate::pipeline::node::{AudioBatcher, SimpleBuffer};
-use crate::state::{AppState, HostId, HostInfo, StreamInfo};
+use crate::state::{AppState, HostId, HostInfo, MusicStreamProgress, StreamInfo};
 
-use super::combinator::{MixingSource, Switch, Tee};
+use super::combinator::{BoxedSource, Mixer, Switch, Tee};
 use super::config::PartyConfig;
+use super::music::MusicStream;
 use super::network::NetworkNode;
+use super::ntp::NtpService;
 use super::stream::{RealtimeAudioStream, RealtimeFramePacker, RealtimeStreamId, StreamSnapshot};
+use super::sync_stream::{SyncedAudioStream, SyncedStreamInfo};
 
 pub struct Party<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     state: Arc<AppState>,
     config: PartyConfig,
     network_node: NetworkNode<Sample, CHANNELS, SAMPLE_RATE>,
     realtime_stream: Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
+    synced_stream: Option<Arc<SyncedAudioStream<Sample, CHANNELS, SAMPLE_RATE>>>,
+    ntp_service: Option<Arc<NtpService>>,
+    network_sender: Option<NetworkSender>,
+    music_streams: Mutex<Vec<MusicStream>>,
     _audio_streams: Vec<cpal::Stream>,
+    host_sync_shutdown: Arc<AtomicBool>,
 }
 
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
@@ -39,12 +47,28 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             config,
             network_node: NetworkNode::new(),
             realtime_stream: Arc::new(RealtimeAudioStream::new()),
+            synced_stream: None,
+            ntp_service: None,
+            network_sender: None,
+            music_streams: Mutex::new(Vec::new()),
             _audio_streams: Vec::new(),
+            host_sync_shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub fn stream_snapshots(&self, host_id: HostId, stream_id: &str) -> Vec<StreamSnapshot> {
         self.realtime_stream.stream_snapshots(host_id, stream_id)
+    }
+
+    pub fn synced_stream_infos(&self) -> Vec<SyncedStreamInfo> {
+        self.synced_stream
+            .as_ref()
+            .map(|s| s.active_streams())
+            .unwrap_or_default()
+    }
+
+    pub fn ntp_service(&self) -> Option<&Arc<NtpService>> {
+        self.ntp_service.as_ref()
     }
 }
 
@@ -54,12 +78,16 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
     pub fn run(&mut self) -> Result<()> {
         info!("Starting Party pipelines with config {:#?}", self.config);
 
-        let (network_sink, realtime_stream) = self.network_node.start(
+        let (network_sink, realtime_stream, synced_stream, ntp_service) = self.network_node.start(
             self.realtime_stream.clone(),
             self.state.clone(),
             self.config.ipv6,
             self.config.send_interface_index,
         )?;
+
+        self.ntp_service = Some(ntp_service);
+        self.synced_stream = Some(synced_stream.clone());
+        self.network_sender = Some(network_sink.clone());
 
         let loopback_buffer: SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE> = SimpleBuffer::new();
 
@@ -123,10 +151,14 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
 
         // ============================================================
         // Output Pipeline: RealtimeAudioStream (mixed from all hosts/streams)
-        //                  + loopback_buffer -> Speaker
+        //                  + SyncedAudioStream (music) + loopback_buffer -> Speaker
         // ============================================================
-        let speaker_source: MixingSource<_, _, Sample, CHANNELS, SAMPLE_RATE> =
-            MixingSource::new(realtime_stream, loopback_buffer);
+        let sources: Vec<BoxedSource<Sample, CHANNELS, SAMPLE_RATE>> = vec![
+            Box::new(realtime_stream),
+            Box::new(synced_stream),
+            Box::new(loopback_buffer),
+        ];
+        let speaker_source = Mixer::new(sources);
 
         let audio_output: AudioOutput<_> = AudioOutput::new(speaker_source);
         let output_stream = audio_output.start(self.config.output_device_id.as_ref())?;
@@ -147,21 +179,75 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
     pub fn restart_with_config(&mut self, config: PartyConfig) -> Result<()> {
         info!("Restarting Party with new config...");
 
+        // Signal the old host sync task to stop
+        self.host_sync_shutdown.store(true, Ordering::Relaxed);
+
         self._audio_streams.clear();
+        self.network_sender = None;
+        {
+            let mut music_streams = self.music_streams.lock().unwrap();
+            music_streams.clear();
+        }
 
         self.config = config;
         self.network_node = NetworkNode::new();
         self.realtime_stream = Arc::new(RealtimeAudioStream::new());
+        // Create a new shutdown flag for the new host sync task
+        self.host_sync_shutdown = Arc::new(AtomicBool::new(false));
 
         self.run()
+    }
+
+    pub fn start_music_stream(
+        &self,
+        path: PathBuf,
+        progress: Arc<MusicStreamProgress>,
+    ) -> Result<()> {
+        let network_sender = self
+            .network_sender
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Network not started"))?
+            .clone();
+
+        let ntp_service = self
+            .ntp_service
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("NTP service not started"))?
+            .clone();
+
+        let synced_stream = self
+            .synced_stream
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Synced stream not started"))?
+            .clone();
+
+        let music_stream = MusicStream::start::<Sample, CHANNELS, SAMPLE_RATE>(
+            path,
+            ntp_service,
+            network_sender,
+            synced_stream,
+            progress,
+        )?;
+
+        let mut music_streams = self.music_streams.lock().unwrap();
+        music_streams.retain(|s| !s.is_complete());
+        music_streams.push(music_stream);
+
+        Ok(())
+    }
+
+    pub fn active_music_streams(&self) -> Vec<super::music::MusicStreamInfo> {
+        let music_streams = self.music_streams.lock().unwrap();
+        music_streams.iter().map(|s| s.info()).collect()
     }
 
     fn start_host_sync_task(&self) {
         let state = self.state.clone();
         let realtime_stream = self.realtime_stream.clone();
+        let shutdown = self.host_sync_shutdown.clone();
 
         thread::spawn(move || {
-            loop {
+            while !shutdown.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(100));
 
                 let mut active_host_ids = realtime_stream.active_hosts();

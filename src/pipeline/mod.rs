@@ -21,16 +21,9 @@
 //!     sink.get_data_from(node_b).get_data_from(node_a)
 //!     Data flow: producer -> node_a -> node_b -> sink
 //! ```
-//!
-//! # Submodules
-//!
-//! - [`node`] - Core traits and buffer implementations
-//! - [`effect`] - Audio processing effects (gain, mute, noise gate)
-//! - [`pipeline`] - Pipeline composition types
 
-pub mod effect;
-pub mod node;
-pub mod pipeline;
+pub mod chain;
+pub mod traits;
 
-pub use node::{Node, Sink, Source};
-pub use pipeline::{PullPipeline, PushPipeline};
+pub use chain::{PullPipeline, PushPipeline};
+pub use traits::{Node, Sink, Source};

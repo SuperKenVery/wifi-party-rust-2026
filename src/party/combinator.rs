@@ -7,7 +7,6 @@ use crate::audio::frame::AudioBuffer;
 use crate::pipeline::{Node, Sink, Source};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tracing::debug;
 
 pub struct Tee<A, B> {
     a: A,
@@ -66,50 +65,69 @@ impl<Sample: Send + Sync, const CHANNELS: usize, const SAMPLE_RATE: u32> Node
     }
 }
 
-pub struct MixingSource<A, B, Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    a: A,
-    b: B,
-    _marker: std::marker::PhantomData<Sample>,
+pub type BoxedSource<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> =
+    Box<dyn Source<Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>>;
+
+/// Mixes multiple audio sources together by summing their samples.
+///
+/// Accepts any iterable of sources via `from_iter`. Sources are stored as boxed
+/// trait objects to allow mixing different concrete types.
+pub struct Mixer<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    sources: Vec<BoxedSource<Sample, CHANNELS, SAMPLE_RATE>>,
 }
 
-impl<A, B, Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
-    MixingSource<A, B, Sample, CHANNELS, SAMPLE_RATE>
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    Mixer<Sample, CHANNELS, SAMPLE_RATE>
 {
-    pub fn new(a: A, b: B) -> Self {
+    pub fn new(sources: Vec<BoxedSource<Sample, CHANNELS, SAMPLE_RATE>>) -> Self {
+        Self { sources }
+    }
+
+    pub fn from_iter<I, S>(sources: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Source<Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> + 'static,
+    {
         Self {
-            a,
-            b,
-            _marker: std::marker::PhantomData,
+            sources: sources.into_iter().map(|s| Box::new(s) as BoxedSource<Sample, CHANNELS, SAMPLE_RATE>).collect(),
         }
     }
 }
 
-impl<A, B, Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Source
-    for MixingSource<A, B, Sample, CHANNELS, SAMPLE_RATE>
-where
-    Sample: AudioSample,
-    A: Source<Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>,
-    B: Source<Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>,
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Source
+    for Mixer<Sample, CHANNELS, SAMPLE_RATE>
 {
     type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
 
     fn pull(&self, len: usize) -> Option<Self::Output> {
-        match (self.a.pull(len), self.b.pull(len)) {
-            (Some(a), Some(b)) => {
-                let mixed: Vec<Sample> = a
-                    .data()
-                    .iter()
-                    .zip(b.data().iter())
-                    .map(|(&x, &y)| {
-                        let sum = x.to_f64_normalized() + y.to_f64_normalized();
-                        Sample::from_f64_normalized(sum)
-                    })
-                    .collect();
-                AudioBuffer::new(mixed).ok()
-            }
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
+        let buffers: Vec<_> = self.sources.iter().filter_map(|s| s.pull(len)).collect();
+
+        if buffers.is_empty() {
+            return None;
         }
+        tracing::trace!("Mixer: pulled {} buffers from {} sources", buffers.len(), self.sources.len());
+
+        if buffers.len() == 1 {
+            return Some(buffers.into_iter().next().unwrap());
+        }
+
+        let mut mixed: Vec<f64> = vec![0.0; len];
+
+        for buffer in &buffers {
+            for (i, sample) in buffer.data().iter().enumerate() {
+                if i < len {
+                    mixed[i] += sample.to_f64_normalized();
+                }
+            }
+        }
+
+        let result: Vec<Sample> = mixed
+            .into_iter()
+            .map(Sample::from_f64_normalized)
+            .collect();
+
+        AudioBuffer::new(result).ok()
     }
 }
+
+

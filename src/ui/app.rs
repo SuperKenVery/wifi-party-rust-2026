@@ -5,7 +5,8 @@ use dioxus::prelude::*;
 use std::sync::Arc;
 
 use super::participants::MainContent;
-use super::sidebar::Sidebar;
+use super::sidebar::{AudioControlPanel, DebugPanel, MenuSection, ShareMusicPanel, SidebarMenu};
+use crate::party::NtpDebugInfo;
 
 #[allow(non_snake_case)]
 pub fn App() -> Element {
@@ -18,6 +19,8 @@ pub fn App() -> Element {
     let mut loopback_enabled = use_signal(|| false);
     let mut system_audio_enabled = use_signal(|| false);
     let mut system_audio_level = use_signal(|| 0u32);
+    let mut selected_section = use_signal(|| MenuSection::Senders);
+    let mut ntp_info = use_signal(|| None::<NtpDebugInfo>);
 
     use_effect(move || {
         let state = state_arc.clone();
@@ -55,6 +58,8 @@ pub fn App() -> Element {
                     .load(std::sync::atomic::Ordering::Relaxed);
                 system_audio_level.set(sys_level);
 
+                ntp_info.set(state.ntp_debug_info());
+
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
         });
@@ -63,22 +68,35 @@ pub fn App() -> Element {
     rsx! {
         document::Stylesheet { href: asset!("/assets/custom.css") }
         document::Stylesheet { href: asset!("/assets/tailwind_output.css") }
-        // script { src: "https://cdn.tailwindcss.com" }
 
         div {
             class: "flex h-screen w-full bg-slate-900 text-slate-100 font-sans overflow-hidden selection:bg-indigo-500 selection:text-white",
 
-            Sidebar {
-                mic_enabled: mic_enabled(),
-                mic_volume: mic_volume(),
-                mic_audio_level: mic_audio_level(),
-                loopback_enabled: loopback_enabled(),
-                system_audio_enabled: system_audio_enabled(),
-                system_audio_level: system_audio_level(),
+            SidebarMenu {
+                selected: selected_section(),
+                on_select: move |section| selected_section.set(section),
             }
 
-            MainContent {
-                hosts: active_hosts(),
+            match selected_section() {
+                MenuSection::Senders => rsx! {
+                    MainContent { hosts: active_hosts() }
+                },
+                MenuSection::AudioControl => rsx! {
+                    AudioControlPanel {
+                        mic_enabled: mic_enabled(),
+                        mic_volume: mic_volume(),
+                        mic_audio_level: mic_audio_level(),
+                        loopback_enabled: loopback_enabled(),
+                        system_audio_enabled: system_audio_enabled(),
+                        system_audio_level: system_audio_level(),
+                    }
+                },
+                MenuSection::ShareMusic => rsx! {
+                    ShareMusicPanel {}
+                },
+                MenuSection::Debug => rsx! {
+                    DebugPanel { ntp_info: ntp_info() }
+                },
             }
         }
     }

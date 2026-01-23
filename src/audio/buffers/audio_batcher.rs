@@ -2,9 +2,9 @@
 
 use std::sync::Mutex;
 
-use super::Node;
 use crate::audio::frame::AudioBuffer;
 use crate::audio::AudioSample;
+use crate::pipeline::Node;
 
 /// Batches audio samples and outputs when minimum duration is reached.
 ///

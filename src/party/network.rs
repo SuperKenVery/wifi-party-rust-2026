@@ -61,7 +61,9 @@ use tracing::{info, warn};
 
 use crate::audio::AudioSample;
 use crate::io::{MULTICAST_ADDR_V4, MULTICAST_ADDR_V6, MULTICAST_PORT, NetworkReceiver, NetworkSender, TTL};
+use crate::party::ntp::NtpService;
 use crate::party::stream::RealtimeAudioStream;
+use crate::party::sync_stream::SyncedAudioStream;
 use crate::state::AppState;
 
 /// Orchestrates network audio transport.
@@ -126,6 +128,8 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     /// A tuple of:
     /// - `NetworkSender` - Push [`NetworkPacket`]s here to broadcast to other peers
     /// - `Arc<RealtimeAudioStream>` - Pull from here to get mixed audio from all peers.
+    /// - `Arc<SyncedAudioStream>` - Pull from here to get synced music audio.
+    /// - `Arc<NtpService>` - The NTP service for time synchronization.
     pub fn start(
         &mut self,
         realtime_stream: Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
@@ -135,6 +139,8 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     ) -> Result<(
         NetworkSender,
         Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
+        Arc<SyncedAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
+        Arc<NtpService>,
     )> {
         let (socket, multicast_addr, local_ips) = if ipv6 {
             Self::setup_socket_v6(send_interface_index)?
@@ -147,11 +153,18 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             .context("Failed to clone socket for sender")?;
         let sender = NetworkSender::new(send_socket, multicast_addr);
 
+        let ntp_service = NtpService::new(sender.clone());
+
+        let ntp_for_synced = ntp_service.clone();
+        let synced_stream = Arc::new(SyncedAudioStream::new(move || ntp_for_synced.party_now()));
+
         socket
             .set_read_timeout(Some(Duration::from_millis(100)))
             .context("Failed to set socket read timeout")?;
 
         let realtime_stream_clone = realtime_stream.clone();
+        let synced_stream_clone = synced_stream.clone();
+        let ntp_service_clone = ntp_service.clone();
         let state_clone = state.clone();
         let shutdown_flag = self.shutdown_flag.clone();
         let receiver_handle = thread::spawn(move || {
@@ -159,6 +172,8 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 socket,
                 state_clone,
                 realtime_stream_clone,
+                synced_stream_clone,
+                ntp_service_clone,
                 local_ips,
                 shutdown_flag,
             );
@@ -166,7 +181,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         });
 
         self.receiver_handle = Some(receiver_handle);
-        Ok((sender, realtime_stream))
+        Ok((sender, realtime_stream, synced_stream, ntp_service))
     }
 
     fn setup_socket_v4(send_interface_index: Option<u32>) -> Result<(UdpSocket, SocketAddr, Vec<IpAddr>)> {

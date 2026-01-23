@@ -7,10 +7,11 @@
 
 use anyhow::Result;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex};
 
-use crate::party::{Party, PartyConfig, StreamSnapshot};
+use crate::party::{MusicStreamInfo, NtpDebugInfo, Party, PartyConfig, StreamSnapshot, SyncedStreamInfo};
 
 /// Unique identifier for a remote host, derived from their IP address.
 /// We use IP address instead of SocketAddr to keep the host identity stable
@@ -67,6 +68,41 @@ pub enum ConnectionStatus {
     Connected,
 }
 
+/// Progress state for music stream encoding and playback
+pub struct MusicStreamProgress {
+    pub file_name: Mutex<Option<String>>,
+    pub is_encoding: AtomicBool,
+    pub encoding_current: AtomicU64,
+    pub encoding_total: AtomicU64,
+    pub is_streaming: AtomicBool,
+    pub streaming_current: AtomicU64,
+    pub streaming_total: AtomicU64,
+}
+
+impl MusicStreamProgress {
+    pub fn new() -> Self {
+        Self {
+            file_name: Mutex::new(None),
+            is_encoding: AtomicBool::new(false),
+            encoding_current: AtomicU64::new(0),
+            encoding_total: AtomicU64::new(0),
+            is_streaming: AtomicBool::new(false),
+            streaming_current: AtomicU64::new(0),
+            streaming_total: AtomicU64::new(0),
+        }
+    }
+
+    pub fn reset(&self) {
+        *self.file_name.lock().unwrap() = None;
+        self.is_encoding.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.encoding_current.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.encoding_total.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.is_streaming.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.streaming_current.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.streaming_total.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Shared application state
 pub struct AppState {
     pub connection_status: Arc<Mutex<ConnectionStatus>>,
@@ -77,6 +113,7 @@ pub struct AppState {
     pub system_audio_enabled: Arc<AtomicBool>,
     pub system_audio_level: Arc<AtomicU32>,
     pub host_infos: Arc<Mutex<Vec<HostInfo>>>,
+    pub music_progress: Arc<MusicStreamProgress>,
     pub party: Mutex<Option<Party<f32, 2, 48000>>>,
 }
 
@@ -91,6 +128,7 @@ impl AppState {
             system_audio_enabled: Arc::new(AtomicBool::new(false)),
             system_audio_level: Arc::new(AtomicU32::new(0)),
             host_infos: Arc::new(Mutex::new(Vec::new())),
+            music_progress: Arc::new(MusicStreamProgress::new()),
             party: Mutex::new(None),
         });
 
@@ -108,5 +146,41 @@ impl AppState {
             }
         }
         Vec::new()
+    }
+
+    pub fn start_music_stream(&self, path: PathBuf) -> Result<()> {
+        if let Ok(party_guard) = self.party.lock() {
+            if let Some(party) = party_guard.as_ref() {
+                return party.start_music_stream(path, self.music_progress.clone());
+            }
+        }
+        anyhow::bail!("Party not running")
+    }
+
+    pub fn synced_stream_infos(&self) -> Vec<SyncedStreamInfo> {
+        if let Ok(party_guard) = self.party.lock() {
+            if let Some(party) = party_guard.as_ref() {
+                return party.synced_stream_infos();
+            }
+        }
+        Vec::new()
+    }
+
+    pub fn active_music_streams(&self) -> Vec<MusicStreamInfo> {
+        if let Ok(party_guard) = self.party.lock() {
+            if let Some(party) = party_guard.as_ref() {
+                return party.active_music_streams();
+            }
+        }
+        Vec::new()
+    }
+
+    pub fn ntp_debug_info(&self) -> Option<NtpDebugInfo> {
+        if let Ok(party_guard) = self.party.lock() {
+            if let Some(party) = party_guard.as_ref() {
+                return party.ntp_service().map(|ntp| ntp.debug_info());
+            }
+        }
+        None
     }
 }

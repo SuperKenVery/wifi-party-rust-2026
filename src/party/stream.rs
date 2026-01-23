@@ -1,49 +1,28 @@
-//! Audio stream abstraction for network transport.
+//! Realtime audio stream for network transport.
 //!
-//! This module defines the core abstraction for audio streams that can be sent
-//! over the network. Each stream type (e.g., realtime, synced) has its own
-//! frame format and processing logic.
+//! This module handles realtime audio streams (mic, system audio) that are
+//! played immediately upon receipt with minimal latency.
 //!
-//! # Architecture
-//!
-//! ```text
-//! Sender:
-//!   AudioBuffer -> OpusEncoder -> RealtimeFramePacker -> NetworkSender
-//!
-//! Receiver:
-//!   NetworkReceiver -> RealtimeAudioStream (Opus JitterBuffer + Decoder) -> AudioBuffer
-//!
-//! NetworkPacket (enum)
-//!     ├── Realtime(RealtimeFrame)  ──► RealtimeAudioStream
-//!     │       └── stream_id: Mic/System/...
-//!     │       └── Each (HostId, StreamId) gets its own OpusJitterBuffer
-//!     │
-//!     └── Future: Synced(SyncedFrame) ──► SyncedAudioStream
-//! ```
-//!
-//! # Key Types
-//!
-//! - [`NetworkPacket`] - Top-level enum sent over the wire (carries Opus-encoded audio)
-//! - [`RealtimeStreamId`] - Identifies realtime stream instances (Mic, System, etc.)
-//! - [`RealtimeFrame`] - Frame format for realtime audio (Opus-encoded)
-//! - [`RealtimeAudioStream`] - Manages all realtime streams across all hosts
+//! For synchronized music playback, see [`sync_stream`](super::sync_stream).
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use rkyv::{Archive, Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 
-use crate::audio::AudioSample;
 use crate::audio::frame::AudioBuffer;
 use crate::audio::opus::OpusPacket;
-use crate::pipeline::node::{JitterBuffer, PullSnapshot};
+use crate::audio::{AudioSample, JitterBuffer, PullSnapshot};
+use crate::party::ntp::NtpPacket;
+use crate::party::sync_stream::{SyncedFrame, SyncedStreamMeta};
 use crate::pipeline::{Sink, Source};
 use crate::state::HostId;
 
-pub use crate::pipeline::node::PullSnapshot as StreamSnapshot;
+pub use crate::audio::PullSnapshot as StreamSnapshot;
 
 const HOST_TIMEOUT: Duration = Duration::from_secs(5);
 const JITTER_BUFFER_CAPACITY: usize = 64;
@@ -104,6 +83,9 @@ impl RealtimeFrame {
 #[derive(Archive, Serialize, Deserialize, Debug, Clone)]
 pub enum NetworkPacket {
     Realtime(RealtimeFrame),
+    Synced(SyncedFrame),
+    SyncedMeta(SyncedStreamMeta),
+    Ntp(NtpPacket),
 }
 
 /// Key for identifying a specific jitter buffer.
@@ -138,6 +120,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
     /// Receives a realtime frame and routes it to the appropriate jitter buffer.
     pub fn receive(&self, source_addr: SocketAddr, frame: RealtimeFrame) {
+        tracing::debug!("RealtimeAudioStream::receive from {} stream {:?} seq {}", source_addr, frame.stream_id, frame.sequence_number);
         let key = BufferKey {
             source_addr,
             stream_id: frame.stream_id,
@@ -394,6 +377,7 @@ mod tests {
                 assert_eq!(f.stream_id, RealtimeStreamId::System);
                 assert_eq!(f.sequence_number, 42);
             }
+            _ => panic!("Expected Realtime packet"),
         }
     }
 

@@ -29,9 +29,11 @@ use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
+use crate::party::ntp::NtpService;
 use crate::party::stream::NetworkPacket;
+use crate::party::sync_stream::SyncedAudioStream;
 use crate::pipeline::Sink;
 use crate::state::{AppState, ConnectionStatus, HostId};
 
@@ -74,6 +76,7 @@ impl NetworkSender {
         match rkyv::to_bytes::<rkyv::rancor::Error>(packet) {
             Ok(serialized) => match self.socket.send_to(&serialized, self.multicast_addr) {
                 Ok(bytes_sent) => {
+                    debug!("Sent {} bytes to {:?}", bytes_sent, self.multicast_addr);
                     if bytes_sent != serialized.len() {
                         warn!("Partial send: {} of {} bytes", bytes_sent, serialized.len());
                     }
@@ -114,6 +117,8 @@ pub struct NetworkReceiver<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32
     socket: UdpSocket,
     state: Arc<AppState>,
     realtime_stream: Arc<crate::party::stream::RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
+    synced_stream: Arc<SyncedAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
+    ntp_service: Arc<NtpService>,
     local_ips: Vec<std::net::IpAddr>,
     shutdown_flag: Arc<AtomicBool>,
 }
@@ -127,6 +132,8 @@ impl<Sample: crate::audio::AudioSample, const CHANNELS: usize, const SAMPLE_RATE
         realtime_stream: Arc<
             crate::party::stream::RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>,
         >,
+        synced_stream: Arc<SyncedAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
+        ntp_service: Arc<NtpService>,
         local_ips: Vec<std::net::IpAddr>,
         shutdown_flag: Arc<AtomicBool>,
     ) -> Self {
@@ -136,6 +143,8 @@ impl<Sample: crate::audio::AudioSample, const CHANNELS: usize, const SAMPLE_RATE
             socket,
             state,
             realtime_stream,
+            synced_stream,
+            ntp_service,
             local_ips,
             shutdown_flag,
         }
@@ -156,8 +165,11 @@ impl<Sample: crate::audio::AudioSample, const CHANNELS: usize, const SAMPLE_RATE
                 }
             }
 
+            self.ntp_service.tick();
+
             if last_cleanup.elapsed() > Duration::from_secs(1) {
                 self.realtime_stream.cleanup_stale();
+                self.synced_stream.cleanup_stale();
                 last_cleanup = Instant::now();
             }
         }
@@ -188,6 +200,15 @@ impl<Sample: crate::audio::AudioSample, const CHANNELS: usize, const SAMPLE_RATE
         match packet {
             NetworkPacket::Realtime(frame) => {
                 self.realtime_stream.receive(source_addr, frame);
+            }
+            NetworkPacket::Synced(frame) => {
+                self.synced_stream.receive(source_addr, frame);
+            }
+            NetworkPacket::SyncedMeta(meta) => {
+                self.synced_stream.receive_meta(source_addr, meta);
+            }
+            NetworkPacket::Ntp(ntp_packet) => {
+                self.ntp_service.handle_packet(ntp_packet);
             }
         }
 

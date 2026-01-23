@@ -19,7 +19,7 @@ use opus::{Application, Bitrate, Channels, Decoder, Encoder};
 
 use super::AudioSample;
 use super::frame::AudioBuffer;
-use crate::pipeline::node::Node;
+use crate::pipeline::Node;
 
 const OPUS_BITRATE: i32 = 64000;
 const OPUS_EXPECTED_PACKET_LOSS: i32 = 60;
