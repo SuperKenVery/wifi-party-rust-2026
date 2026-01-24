@@ -4,12 +4,11 @@
 //!
 //! - [`NetworkSender`] - Broadcasts audio packets to all peers via UDP multicast
 //! - [`NetworkReceiver`] - Receives packets from peers and dispatches to stream handlers
-//! - [`get_local_ip`] / [`get_local_ip_v6`] - Utility to discover local IP address for multicast
 //!
 //! # Protocol
 //!
-//! Audio data is wrapped in [`NetworkPacket`] (Opus-encoded) and serialized using `rkyv`
-//! (zero-copy deserialization). Each packet is sent over UDP multicast.
+//! Audio data is wrapped in [`NetworkPacket`] (Opus-encoded) and serialized using `rkyv`.
+//! Each packet is sent over UDP multicast.
 //!
 //! # Multicast Configuration
 //!
@@ -29,7 +28,7 @@ use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::party::ntp::NtpService;
 use crate::party::stream::NetworkPacket;
@@ -38,7 +37,7 @@ use crate::pipeline::Sink;
 use crate::state::{AppState, ConnectionStatus, HostId};
 
 pub const MULTICAST_ADDR_V4: &str = "239.255.43.2";
-pub const MULTICAST_ADDR_V6: &str = "ff02::fb";
+pub const MULTICAST_ADDR_V6: &str = "ff02::7667";
 pub const MULTICAST_PORT: u16 = 7667;
 pub const TTL: u32 = 1;
 
@@ -49,8 +48,7 @@ pub const TTL: u32 = 1;
 ///
 /// # Error Handling
 ///
-/// Send failures are logged but don't propagate errors - audio streaming
-/// continues even if individual packets are lost (UDP is unreliable by design).
+/// Send failures are logged but don't propagate errors.
 ///
 /// # Cloning
 ///
@@ -73,24 +71,26 @@ impl NetworkSender {
     }
 
     fn send_packet(&self, packet: &NetworkPacket) {
-        match rkyv::to_bytes::<rkyv::rancor::Error>(packet) {
-            Ok(serialized) => match self.socket.send_to(&serialized, self.multicast_addr) {
-                Ok(bytes_sent) => {
-                    if bytes_sent != serialized.len() {
-                        warn!("Partial send: {} of {} bytes", bytes_sent, serialized.len());
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    warn!("Socket would block, dropping packet");
-                }
-                Err(e) => {
-                    warn!("Failed to send packet: {}", e);
-                }
-            },
-            Err(e) => {
-                warn!("Failed to serialize packet: {}", e);
-            }
+        if let Err(error) = self.send_inner(packet) {
+            error!("{}", error);
         }
+    }
+
+    fn send_inner(&self, packet: &NetworkPacket) -> Result<()> {
+        let serialized =
+            rkyv::to_bytes::<rkyv::rancor::Error>(packet).context("Failed to serialize packet")?;
+
+        let addr = self.multicast_addr;
+        let sent_length = self
+            .socket
+            .send_to(&serialized, addr)
+            .context(format!("Failed to send packet to {addr:?}"))?;
+
+        if sent_length < serialized.len() {
+            warn!("Partial sent: {}/{}", sent_length, serialized.len());
+        }
+
+        Ok(())
     }
 }
 
@@ -164,8 +164,6 @@ impl<Sample: crate::audio::AudioSample, const CHANNELS: usize, const SAMPLE_RATE
                 }
             }
 
-            self.ntp_service.tick();
-
             if last_cleanup.elapsed() > Duration::from_secs(1) {
                 self.realtime_stream.cleanup_stale();
                 self.synced_stream.cleanup_stale();
@@ -191,10 +189,9 @@ impl<Sample: crate::audio::AudioSample, const CHANNELS: usize, const SAMPLE_RATE
 
         let received_data = &buf[..size];
 
-        let packet: NetworkPacket = unsafe {
-            rkyv::from_bytes_unchecked::<NetworkPacket, rkyv::rancor::Error>(received_data)
-        }
-        .map_err(|e| anyhow::anyhow!("Deserialization error: {:?}", e))?;
+        let packet: NetworkPacket =
+            rkyv::from_bytes::<NetworkPacket, rkyv::rancor::Error>(received_data)
+                .map_err(|e| anyhow::anyhow!("Deserialization error: {:?}", e))?;
 
         match packet {
             NetworkPacket::Realtime(frame) => {
@@ -213,34 +210,4 @@ impl<Sample: crate::audio::AudioSample, const CHANNELS: usize, const SAMPLE_RATE
 
         Ok(())
     }
-}
-
-pub fn get_local_ip() -> Result<HostId> {
-    let socket = UdpSocket::bind("0.0.0.0:0").context("Failed to create socket")?;
-
-    socket
-        .connect(format!("{}:{}", MULTICAST_ADDR_V4, MULTICAST_PORT))
-        .context("Failed to connect socket")?;
-
-    let local_addr = socket.local_addr().context("Failed to get local address")?;
-
-    Ok(HostId::from(local_addr))
-}
-
-pub fn get_local_ip_v6(scope_id: u32) -> Result<HostId> {
-    let bind_addr = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, scope_id);
-    let socket = UdpSocket::bind(bind_addr).context("Failed to create IPv6 socket")?;
-
-    let multicast_ip: Ipv6Addr = MULTICAST_ADDR_V6
-        .parse()
-        .context("Invalid IPv6 multicast address")?;
-    let multicast_addr = SocketAddrV6::new(multicast_ip, MULTICAST_PORT, 0, scope_id);
-
-    socket
-        .connect(multicast_addr)
-        .context("Failed to connect IPv6 socket")?;
-
-    let local_addr = socket.local_addr().context("Failed to get local address")?;
-
-    Ok(HostId::from(local_addr))
 }

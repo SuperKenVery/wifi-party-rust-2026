@@ -224,7 +224,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             .context("Failed to clone socket for sender")?;
         let sender = NetworkSender::new(send_socket, multicast_addr);
 
-        let ntp_service = NtpService::new(sender.clone());
+        let ntp_service = NtpService::new(sender.clone(), self.shutdown_flag.clone());
 
         let ntp_for_synced = ntp_service.clone();
         let synced_stream = Arc::new(SyncedAudioStream::new(move || ntp_for_synced.party_now()));
@@ -362,7 +362,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         let bind_addr = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, MULTICAST_PORT, 0, 0);
         socket
             .bind(&bind_addr.into())
-            .context(format!("Failed to bind to {:?}", bind_addr))?;
+            .context(format!("Failed to bind tor {:?}", bind_addr))?;
 
         let mut local_ips = Vec::new();
         match network_interface::NetworkInterface::show() {

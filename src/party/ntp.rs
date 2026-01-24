@@ -7,15 +7,15 @@
 //!
 //! ```text
 //! Host A (wants to sync)         Host B, C, D (have party clock)
-//!       │                                                        
+//!       │
 //!       │──── NtpRequest { id, t1 } ──── multicast ────────────►│
-//!       │                                                        
-//!       │                        Each host: schedule response    
-//!       │                               delay = random(10-50ms)  
-//!       │                                                        
+//!       │
+//!       │                        Each host: schedule response
+//!       │                               delay = random(10-50ms)
+//!       │
 //!       │◄─── NtpResponse { id, t1, t2, t3 } ── (first responder)
-//!       │                                                        
-//!       │                        Others: see response, cancel    
+//!       │
+//!       │                        Others: see response, cancel
 //! ```
 //!
 //! # Offset Calculation (standard NTP)
@@ -32,11 +32,13 @@
 //! - Party clock persists even if original host leaves
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use rand::Rng;
 use chrono::{DateTime, Local, TimeZone};
+use rand::Rng;
 use rkyv::{Archive, Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -125,15 +127,27 @@ impl Default for NtpServiceInner {
 
 pub struct NtpService {
     inner: Mutex<NtpServiceInner>,
+    condvar: Condvar,
     sender: NetworkSender,
+    shutdown_flag: Arc<AtomicBool>,
 }
 
 impl NtpService {
-    pub fn new(sender: NetworkSender) -> Arc<Self> {
-        Arc::new(Self {
+    pub fn new(sender: NetworkSender, shutdown_flag: Arc<AtomicBool>) -> Arc<Self> {
+        let service = Arc::new(Self {
             inner: Mutex::new(NtpServiceInner::default()),
+            condvar: Condvar::new(),
             sender,
-        })
+            shutdown_flag,
+        });
+
+        let service_clone = service.clone();
+        thread::Builder::new()
+            .name("ntp-service".to_string())
+            .spawn(move || service_clone.run())
+            .expect("Failed to spawn NTP service thread");
+
+        service
     }
 
     pub fn local_now_micros() -> u64 {
@@ -146,11 +160,7 @@ impl NtpService {
     pub fn party_now(&self) -> u64 {
         let local = Self::local_now_micros();
         let inner = self.inner.lock().unwrap();
-        if inner.offset >= 0 {
-            local + inner.offset as u64
-        } else {
-            local.saturating_sub((-inner.offset) as u64)
-        }
+        local.saturating_add_signed(inner.offset)
     }
 
     pub fn is_synced(&self) -> bool {
@@ -194,6 +204,7 @@ impl NtpService {
         }
     }
 
+    /// Ask other hosts for the party clock
     pub fn create_sync_request(&self) -> Option<NtpPacket> {
         let mut inner = self.inner.lock().unwrap();
 
@@ -212,10 +223,9 @@ impl NtpService {
         let t1 = Self::local_now_micros();
         let now = Instant::now();
 
-        inner.pending_requests.insert(request_id, PendingRequest {
-            t1,
-            sent_at: now,
-        });
+        inner
+            .pending_requests
+            .insert(request_id, PendingRequest { t1, sent_at: now });
         inner.last_sync_request = Some(now);
         if inner.first_request_sent_at.is_none() {
             inner.first_request_sent_at = Some(now);
@@ -264,7 +274,12 @@ impl NtpService {
             delay,
         });
 
-        debug!("Scheduled NTP response for request {} with {}ms delay", request_id, delay_ms);
+        debug!(
+            "Scheduled NTP response for request {} with {}ms delay",
+            request_id, delay_ms
+        );
+        drop(inner);
+        self.condvar.notify_one();
     }
 
     pub fn on_response_received(&self, request_id: u64, t1: u64, t2: u64, t3: u64) {
@@ -300,14 +315,55 @@ impl NtpService {
         inner.synced = true;
     }
 
-    pub fn poll_pending_responses(&self) -> Vec<NtpPacket> {
-        let now = Instant::now();
-        let mut responses = Vec::new();
+    pub fn handle_packet(&self, packet: NtpPacket) {
+        match packet {
+            NtpPacket::Request { request_id, t1 } => {
+                debug!("Received NTP request {} from peer", request_id);
+                self.on_request_received(request_id, t1);
+            }
+            NtpPacket::Response {
+                request_id,
+                t1,
+                t2,
+                t3,
+            } => {
+                debug!("Received NTP response for request {}", request_id);
+                self.on_response_received(request_id, t1, t2, t3);
+            }
+        }
+    }
 
+    fn run(&self) {
+        info!("NTP service thread started");
+
+        while !self.shutdown_flag.load(Ordering::SeqCst) {
+            let wait_duration = self.process_tick();
+
+            let inner = self.inner.lock().unwrap();
+            let _ = self.condvar.wait_timeout(inner, wait_duration);
+        }
+
+        info!("NTP service thread shutting down");
+    }
+
+    fn process_tick(&self) -> Duration {
+        let now = Instant::now();
+
+        self.send_ready_responses(now);
+        self.maybe_send_sync_request();
+        self.check_first_host_timeout();
+        self.cleanup_if_needed(now);
+
+        self.compute_next_wake_time(now)
+    }
+
+    fn send_ready_responses(&self, now: Instant) {
         let mut inner = self.inner.lock().unwrap();
 
         let ttl = Duration::from_millis(SEEN_RESPONSE_TTL_MS);
-        inner.seen_responses.retain(|s| now.duration_since(s.seen_at) < ttl);
+        inner
+            .seen_responses
+            .retain(|s| now.duration_since(s.seen_at) < ttl);
 
         let seen_ids: HashSet<u64> = inner.seen_responses.iter().map(|s| s.request_id).collect();
 
@@ -317,7 +373,10 @@ impl NtpService {
             let resp = &inner.pending_responses[i];
 
             if seen_ids.contains(&resp.request_id) {
-                debug!("Cancelling NTP response for request {} (already answered)", resp.request_id);
+                debug!(
+                    "Cancelling NTP response for request {} (already answered)",
+                    resp.request_id
+                );
                 inner.pending_responses.remove(i);
                 continue;
             }
@@ -329,39 +388,27 @@ impl NtpService {
                 } else {
                     local.saturating_sub((-offset) as u64)
                 };
-                responses.push(NtpPacket::Response {
+                let packet = NtpPacket::Response {
                     request_id: resp.request_id,
                     t1: resp.t1,
                     t2: resp.t2,
                     t3,
-                });
+                };
                 debug!("Sending NTP response for request {}", resp.request_id);
                 inner.pending_responses.remove(i);
+                drop(inner);
+                self.sender.push(NetworkPacket::Ntp(packet));
+                inner = self.inner.lock().unwrap();
             } else {
                 i += 1;
             }
         }
-
-        responses
     }
 
-    fn cleanup_stale_requests(&self) {
-        let now = Instant::now();
-        let timeout = Duration::from_millis(REQUEST_TIMEOUT_MS);
-
-        let mut inner = self.inner.lock().unwrap();
-        inner.pending_requests.retain(|_, req| now.duration_since(req.sent_at) < timeout);
-    }
-
-    pub fn handle_packet(&self, packet: NtpPacket) {
-        match packet {
-            NtpPacket::Request { request_id, t1 } => {
-                debug!("Received NTP request {} from peer", request_id);
-                self.on_request_received(request_id, t1);
-            }
-            NtpPacket::Response { request_id, t1, t2, t3 } => {
-                debug!("Received NTP response for request {}", request_id);
-                self.on_response_received(request_id, t1, t2, t3);
+    fn maybe_send_sync_request(&self) {
+        if self.should_send_periodic_sync() {
+            if let Some(req) = self.create_sync_request() {
+                self.sender.push(NetworkPacket::Ntp(req));
             }
         }
     }
@@ -374,56 +421,96 @@ impl NtpService {
 
         if let Some(first_sent) = inner.first_request_sent_at {
             if first_sent.elapsed() >= Duration::from_millis(FIRST_HOST_TIMEOUT_MS) {
-                info!("No NTP response received after {}ms, becoming first host", FIRST_HOST_TIMEOUT_MS);
+                info!(
+                    "No NTP response received after {}ms, becoming first host",
+                    FIRST_HOST_TIMEOUT_MS
+                );
                 inner.offset = 0;
                 inner.synced = true;
             }
         }
     }
 
-    pub fn tick(&self) {
-        for response in self.poll_pending_responses() {
-            self.sender.push(NetworkPacket::Ntp(response));
-        }
-
-        if self.should_send_periodic_sync() {
-            if let Some(req) = self.create_sync_request() {
-                self.sender.push(NetworkPacket::Ntp(req));
-            }
-        }
-
-        self.check_first_host_timeout();
-
-        let now = Instant::now();
+    fn cleanup_if_needed(&self, now: Instant) {
         let should_cleanup = {
             let inner = self.inner.lock().unwrap();
             now.duration_since(inner.last_cleanup) > Duration::from_secs(1)
         };
 
         if should_cleanup {
-            self.cleanup_stale_requests();
+            let timeout = Duration::from_millis(REQUEST_TIMEOUT_MS);
             let mut inner = self.inner.lock().unwrap();
+            inner
+                .pending_requests
+                .retain(|_, req| now.duration_since(req.sent_at) < timeout);
             inner.last_cleanup = now;
         }
     }
+
+    fn compute_next_wake_time(&self, now: Instant) -> Duration {
+        let inner = self.inner.lock().unwrap();
+
+        let mut next_wake = Duration::from_millis(100);
+
+        // Wake for pending response deadlines
+        for resp in &inner.pending_responses {
+            let deadline = resp.scheduled_at + resp.delay;
+            if deadline > now {
+                let until = deadline - now;
+                if until < next_wake {
+                    next_wake = until;
+                }
+            } else {
+                next_wake = Duration::ZERO;
+                break;
+            }
+        }
+
+        // Wake for first host timeout
+        if !inner.synced {
+            if let Some(first_sent) = inner.first_request_sent_at {
+                let timeout_at = first_sent + Duration::from_millis(FIRST_HOST_TIMEOUT_MS);
+                if timeout_at > now {
+                    let until = timeout_at - now;
+                    if until < next_wake {
+                        next_wake = until;
+                    }
+                }
+            }
+        }
+
+        // Wake for periodic sync
+        if let Some(last) = inner.last_sync_request {
+            let next_sync = last + Duration::from_millis(SYNC_INTERVAL_MS);
+            if next_sync > now {
+                let until = next_sync - now;
+                if until < next_wake {
+                    next_wake = until;
+                }
+            }
+        }
+
+        next_wake
+    }
 }
-
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::UdpSocket;
 
-    fn test_sender() -> NetworkSender {
+    fn test_service() -> (Arc<NtpService>, Arc<AtomicBool>) {
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         let addr = "127.0.0.1:9999".parse().unwrap();
-        NetworkSender::new(socket, addr)
+        let sender = NetworkSender::new(socket, addr);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let service = NtpService::new(sender, shutdown.clone());
+        (service, shutdown)
     }
 
     #[test]
     fn test_first_host_sync() {
-        let service = NtpService::new(test_sender());
+        let (service, shutdown) = test_service();
         assert!(!service.is_synced());
 
         service.become_first_host();
@@ -432,31 +519,39 @@ mod tests {
         let party_time = service.party_now();
         let local_time = NtpService::local_now_micros();
         assert!((party_time as i64 - local_time as i64).abs() < 1000);
+
+        shutdown.store(true, Ordering::SeqCst);
     }
 
     #[test]
     fn test_sync_request_creation() {
-        let service = NtpService::new(test_sender());
+        let (service, shutdown) = test_service();
 
-        let req = service.create_sync_request();
-        assert!(req.is_some());
+        thread::sleep(Duration::from_millis(50));
 
-        match req.unwrap() {
-            NtpPacket::Request { request_id, t1 } => {
-                assert_eq!(request_id, 1);
-                assert!(t1 > 0);
-            }
-            _ => panic!("Expected Request"),
-        }
+        let debug = service.debug_info();
+        assert!(
+            debug.pending_requests >= 1,
+            "NTP service should have sent at least one sync request"
+        );
+
+        shutdown.store(true, Ordering::SeqCst);
     }
 
     #[test]
     fn test_offset_calculation() {
-        let service = NtpService::new(test_sender());
+        let (service, shutdown) = test_service();
 
-        let req = service.create_sync_request();
-        let NtpPacket::Request { request_id, t1 } = req.unwrap() else {
-            panic!("Expected Request");
+        thread::sleep(Duration::from_millis(50));
+
+        let (request_id, t1) = {
+            let inner = service.inner.lock().unwrap();
+            let (&id, req) = inner
+                .pending_requests
+                .iter()
+                .next()
+                .expect("Should have at least one pending request");
+            (id, req.t1)
         };
 
         let simulated_offset: i64 = 10000;
@@ -466,5 +561,7 @@ mod tests {
         service.on_response_received(request_id, t1, t2, t3);
 
         assert!(service.is_synced());
+
+        shutdown.store(true, Ordering::SeqCst);
     }
 }

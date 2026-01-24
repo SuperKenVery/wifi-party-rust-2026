@@ -49,6 +49,6 @@ pub use stream::{
     NetworkPacket, RealtimeAudioStream, RealtimeFrame, RealtimeStreamId, StreamSnapshot,
 };
 pub use sync_stream::{
-    SyncedAudioStream, SyncedFrame, SyncedStreamId, SyncedStreamInfo, SyncedStreamMeta,
-    new_stream_id,
+    SyncedAudioStream, SyncedFrame, SyncedStreamId, SyncedStreamMeta,
+    SyncedStreamProgress, SyncedStreamState, new_stream_id,
 };

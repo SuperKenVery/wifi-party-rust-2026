@@ -23,7 +23,7 @@ use super::music::MusicStream;
 use super::network::NetworkNode;
 use super::ntp::NtpService;
 use super::stream::{RealtimeAudioStream, RealtimeFramePacker, RealtimeStreamId, StreamSnapshot};
-use super::sync_stream::{SyncedAudioStream, SyncedStreamInfo};
+use super::sync_stream::{SyncedAudioStream, SyncedStreamState};
 
 pub struct Party<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     state: Arc<AppState>,
@@ -60,7 +60,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         self.realtime_stream.stream_snapshots(host_id, stream_id)
     }
 
-    pub fn synced_stream_infos(&self) -> Vec<SyncedStreamInfo> {
+    pub fn synced_stream_states(&self) -> Vec<SyncedStreamState> {
         self.synced_stream
             .as_ref()
             .map(|s| s.active_streams())

@@ -155,25 +155,28 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
     /// Pulls `len` samples from all buffers and mixes them together.
     pub fn pull_and_mix(&self, len: usize) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
-        let mut mixed: Vec<f64> = vec![0.0; len];
-        let mut has_data = false;
+        let mut mixed: Vec<i64> = vec![0; len];
+        let mut source_count = 0usize;
 
         for entry in self.buffers.iter() {
             if let Some(frame) = entry.value().buffer.pull(len) {
-                has_data = true;
+                source_count += 1;
                 for (i, sample) in frame.samples.data().iter().enumerate() {
                     if i < len {
-                        mixed[i] += sample.to_f64_normalized();
+                        mixed[i] += sample.to_i64_for_mix();
                     }
                 }
             }
         }
 
-        if !has_data {
+        if source_count == 0 {
             return None;
         }
 
-        let samples: Vec<Sample> = mixed.into_iter().map(Sample::from_f64_normalized).collect();
+        let samples: Vec<Sample> = mixed
+            .into_iter()
+            .map(|s| Sample::from_i64_mixed(s, source_count))
+            .collect();
         AudioBuffer::new(samples).ok()
     }
 

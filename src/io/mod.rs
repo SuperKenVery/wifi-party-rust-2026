@@ -13,5 +13,4 @@ pub mod network;
 pub use audio::{AudioInput, AudioOutput, LoopbackInput};
 pub use network::{
     MULTICAST_ADDR_V4, MULTICAST_ADDR_V6, MULTICAST_PORT, NetworkReceiver, NetworkSender, TTL,
-    get_local_ip,
 };

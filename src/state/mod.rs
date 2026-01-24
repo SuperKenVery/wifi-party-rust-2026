@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex};
 
-use crate::party::{MusicStreamInfo, NtpDebugInfo, Party, PartyConfig, StreamSnapshot, SyncedStreamInfo};
+use crate::party::{MusicStreamInfo, NtpDebugInfo, Party, PartyConfig, StreamSnapshot, SyncedStreamState};
 
 /// Unique identifier for a remote host, derived from their IP address.
 /// We use IP address instead of SocketAddr to keep the host identity stable
@@ -157,10 +157,10 @@ impl AppState {
         anyhow::bail!("Party not running")
     }
 
-    pub fn synced_stream_infos(&self) -> Vec<SyncedStreamInfo> {
+    pub fn synced_stream_states(&self) -> Vec<SyncedStreamState> {
         if let Ok(party_guard) = self.party.lock() {
             if let Some(party) = party_guard.as_ref() {
-                return party.synced_stream_infos();
+                return party.synced_stream_states();
             }
         }
         Vec::new()
