@@ -117,7 +117,7 @@ fn StreamIndicator(
     audio_level: u32,
 ) -> Element {
     let state_arc = use_context::<Arc<AppState>>();
-    let mut snapshots = use_signal(|| Vec::<StreamSnapshot>::new());
+    let mut snapshots = use_signal(Vec::<StreamSnapshot>::new);
     let mut show_graph = use_signal(|| false);
 
     let icon = if stream_id == "Mic" {

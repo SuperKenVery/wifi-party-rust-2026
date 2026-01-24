@@ -18,7 +18,7 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     ///
     /// Returns an error if the data length is not a multiple of the channel count.
     pub fn new(data: Vec<Sample>) -> Result<Self> {
-        if !data.is_empty() && data.len() % CHANNELS != 0 {
+        if !data.is_empty() && !data.len().is_multiple_of(CHANNELS) {
             anyhow::bail!(
                 "Data length {} must be a multiple of channels {}",
                 data.len(),

@@ -24,17 +24,17 @@
 
 use anyhow::{Context, Result};
 use std::io::ErrorKind;
-use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::party::ntp::NtpService;
 use crate::party::stream::NetworkPacket;
 use crate::party::sync_stream::SyncedAudioStream;
 use crate::pipeline::Sink;
-use crate::state::{AppState, ConnectionStatus, HostId};
+use crate::state::{AppState, ConnectionStatus};
 
 pub const MULTICAST_ADDR_V4: &str = "239.255.43.2";
 pub const MULTICAST_ADDR_V6: &str = "ff02::7667";
@@ -162,11 +162,10 @@ impl<Sample: crate::audio::AudioSample, const CHANNELS: usize, const SAMPLE_RATE
         let mut last_retransmit_request = Instant::now();
 
         while !self.shutdown_flag.load(Ordering::SeqCst) {
-            if let Err(e) = self.handle_packet(&mut buf) {
-                if !self.shutdown_flag.load(Ordering::SeqCst) {
+            if let Err(e) = self.handle_packet(&mut buf)
+                && !self.shutdown_flag.load(Ordering::SeqCst) {
                     warn!("Error processing packet: {:?}", e);
                 }
-            }
 
             if last_cleanup.elapsed() > Duration::from_secs(1) {
                 self.realtime_stream.cleanup_stale();
@@ -220,11 +219,10 @@ impl<Sample: crate::audio::AudioSample, const CHANNELS: usize, const SAMPLE_RATE
             }
             NetworkPacket::RequestFrames { stream_id, seqs } => {
                 // Handle retransmission requests if we are the sender
-                if let Ok(party) = self.state.party.lock() {
-                    if let Some(party) = party.as_ref() {
+                if let Ok(party) = self.state.party.lock()
+                    && let Some(party) = party.as_ref() {
                         party.handle_retransmission_request(stream_id, seqs);
                     }
-                }
             }
             NetworkPacket::Ntp(ntp_packet) => {
                 self.ntp_service.handle_packet(ntp_packet);

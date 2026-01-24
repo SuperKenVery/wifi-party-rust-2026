@@ -73,8 +73,8 @@ fn get_network_interfaces() -> Vec<NetworkInterfaceInfo> {
                         _ => None,
                     })
                     .collect();
-                if !v4_addrs.is_empty() || !v6_addrs.is_empty() {
-                    if !result.iter().any(|r| r.index == iface.index) {
+                if (!v4_addrs.is_empty() || !v6_addrs.is_empty())
+                    && !result.iter().any(|r| r.index == iface.index) {
                         result.push(NetworkInterfaceInfo {
                             name: iface.name.clone(),
                             index: iface.index,
@@ -82,7 +82,6 @@ fn get_network_interfaces() -> Vec<NetworkInterfaceInfo> {
                             v6_addrs,
                         });
                     }
-                }
             }
             result
         })
@@ -121,11 +120,10 @@ pub fn AudioControlPanel(
 
     let state_vol = state_arc.clone();
     let on_volume_change = move |evt: Event<FormData>| {
-        if let Ok(value_str) = evt.value().parse::<f32>() {
-            if let Ok(mut vol) = state_vol.mic_volume.lock() {
+        if let Ok(value_str) = evt.value().parse::<f32>()
+            && let Ok(mut vol) = state_vol.mic_volume.lock() {
                 *vol = value_str / 100.0;
             }
-        }
     };
 
     let state_loop = state_arc.clone();
@@ -314,9 +312,9 @@ fn DeviceSettings() -> Element {
     let output_devices = use_signal(get_output_devices);
     let network_interfaces = use_signal(get_network_interfaces);
 
-    let mut selected_input = use_signal(|| String::new());
-    let mut selected_output = use_signal(|| String::new());
-    let mut selected_interface = use_signal(|| String::new());
+    let mut selected_input = use_signal(String::new);
+    let mut selected_output = use_signal(String::new);
+    let mut selected_interface = use_signal(String::new);
     let mut use_ipv6 = use_signal(|| false);
 
     let input_options: Vec<(String, String)> =
@@ -358,8 +356,8 @@ fn DeviceSettings() -> Element {
 
     let on_apply = {
         let state = state_arc.clone();
-        let input_devices = input_devices.clone();
-        let output_devices = output_devices.clone();
+        let input_devices = input_devices;
+        let output_devices = output_devices;
         move |_| {
             let input_id: Option<DeviceId> = {
                 let sel = selected_input.read();
@@ -403,13 +401,11 @@ fn DeviceSettings() -> Element {
                 send_interface_index,
             };
 
-            if let Ok(mut party_guard) = state.party.lock() {
-                if let Some(party) = party_guard.as_mut() {
-                    if let Err(e) = party.restart_with_config(config) {
+            if let Ok(mut party_guard) = state.party.lock()
+                && let Some(party) = party_guard.as_mut()
+                    && let Err(e) = party.restart_with_config(config) {
                         tracing::error!("Failed to restart party: {}", e);
                     }
-                }
-            }
         }
     };
 

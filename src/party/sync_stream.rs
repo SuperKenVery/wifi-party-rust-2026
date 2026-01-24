@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use rkyv::{Archive, Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::audio::AudioSample;
 use crate::audio::frame::AudioBuffer;

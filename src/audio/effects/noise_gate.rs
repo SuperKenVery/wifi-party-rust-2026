@@ -60,11 +60,10 @@ where
             state.window.push_back(sq);
             state.sum_sq += sq;
 
-            if state.window.len() > self.window_size {
-                if let Some(old_sq) = state.window.pop_front() {
+            if state.window.len() > self.window_size
+                && let Some(old_sq) = state.window.pop_front() {
                     state.sum_sq -= old_sq;
                 }
-            }
 
             let count = state.window.len() as f64;
             let rms = if count > 0.0 {

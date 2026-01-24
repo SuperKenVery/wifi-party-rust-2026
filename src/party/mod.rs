@@ -42,13 +42,11 @@ pub mod stream;
 pub mod sync_stream;
 
 pub use config::PartyConfig;
-pub use music::{MusicStream, MusicStreamInfo};
-pub use ntp::{NtpDebugInfo, NtpPacket, NtpService};
+pub use music::MusicStreamInfo;
+pub use ntp::NtpDebugInfo;
 pub use party::Party;
-pub use stream::{
-    NetworkPacket, RealtimeAudioStream, RealtimeFrame, RealtimeStreamId, StreamSnapshot,
-};
+pub use stream::StreamSnapshot;
 pub use sync_stream::{
-    SyncedAudioStream, SyncedFrame, SyncedStreamId, SyncedStreamMeta, SyncedStreamProgress,
-    SyncedStreamState, new_stream_id,
+    SyncedStreamId,
+    SyncedStreamState,
 };

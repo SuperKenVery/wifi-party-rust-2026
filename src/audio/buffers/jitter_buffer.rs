@@ -173,9 +173,9 @@ impl JitterBufferStats {
         }
 
         // Decrease target latency when loss is low and min latency is high
-        if loss_rate < LOW_LOSS_THRESHOLD && current_target > MIN_TARGET_LATENCY {
-            if let Some(min_lat) = self.min_latency_in_window() {
-                if min_lat >= HIGH_MIN_LATENCY_THRESHOLD {
+        if loss_rate < LOW_LOSS_THRESHOLD && current_target > MIN_TARGET_LATENCY
+            && let Some(min_lat) = self.min_latency_in_window()
+                && min_lat >= HIGH_MIN_LATENCY_THRESHOLD {
                     let new_target = (current_target - 1).max(MIN_TARGET_LATENCY);
                     self.target_latency.store(new_target, Ordering::Release);
                     debug!(
@@ -183,8 +183,6 @@ impl JitterBufferStats {
                         current_target, new_target, min_lat
                     );
                 }
-            }
-        }
     }
 }
 
@@ -342,7 +340,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 let seq = read_seq + i as u64;
                 let slot_idx = self.slot_index(seq);
                 let slot = &self.slots[slot_idx];
-                slot.stored_seq().map_or(false, |s| s == seq)
+                slot.stored_seq() == Some(seq)
             })
             .collect()
     }
@@ -414,7 +412,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 );
                 self.stats.record_miss();
                 let remaining = len - collected.len();
-                collected.extend(std::iter::repeat(Sample::silence()).take(remaining));
+                collected.extend(std::iter::repeat_n(Sample::silence(), remaining));
                 break;
             }
 
@@ -444,7 +442,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                             read_seq, write_seq
                         );
                         let remaining = len - collected.len();
-                        collected.extend(std::iter::repeat(Sample::silence()).take(remaining));
+                        collected.extend(std::iter::repeat_n(Sample::silence(), remaining));
                         break;
                     }
 
@@ -460,12 +458,12 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                         remaining
                     };
 
-                    collected.extend(std::iter::repeat(Sample::silence()).take(fill_count));
+                    collected.extend(std::iter::repeat_n(Sample::silence(), fill_count));
 
                     if frame_size > fill_count {
                         let leftover = frame_size - fill_count;
                         partial.store(
-                            std::iter::repeat(Sample::silence()).take(leftover),
+                            std::iter::repeat_n(Sample::silence(), leftover),
                             result_seq,
                         );
                     }
@@ -537,15 +535,14 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Sink
 
         self.late_packet_count.store(0, Ordering::Release);
 
-        if let Some(previous_written_seq) = slot.stored_seq() {
-            if previous_written_seq >= seq {
+        if let Some(previous_written_seq) = slot.stored_seq()
+            && previous_written_seq >= seq {
                 debug!(
                     "Slot already has seq {} >= incoming seq {}, dropping",
                     previous_written_seq, seq
                 );
                 return;
             }
-        }
 
         slot.write(seq, input);
 

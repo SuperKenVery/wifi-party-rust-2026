@@ -53,7 +53,7 @@ where
 
     fn process(&self, input: Self::Input) -> Option<Self::Output> {
         let count = self.counter.fetch_add(1, Ordering::Relaxed);
-        if count % UPDATE_INTERVAL != 0 {
+        if !count.is_multiple_of(UPDATE_INTERVAL) {
             return Some(input);
         }
 

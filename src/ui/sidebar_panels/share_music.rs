@@ -22,10 +22,10 @@ pub fn ShareMusicPanel() -> Element {
     let encoding_total = progress
         .encoding_total
         .load(std::sync::atomic::Ordering::Relaxed);
-    let streaming_current = progress
+    let _streaming_current = progress
         .streaming_current
         .load(std::sync::atomic::Ordering::Relaxed);
-    let streaming_total = progress
+    let _streaming_total = progress
         .streaming_total
         .load(std::sync::atomic::Ordering::Relaxed);
     let file_name = progress.file_name.lock().unwrap().clone();

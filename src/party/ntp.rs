@@ -31,7 +31,7 @@
 //! - Any synced host can respond to sync requests
 //! - Party clock persists even if original host leaves
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -197,11 +197,10 @@ impl NtpService {
             return None;
         }
 
-        if let Some(last) = inner.last_sync_request {
-            if last.elapsed() < Duration::from_millis(REQUEST_TIMEOUT_MS) {
+        if let Some(last) = inner.last_sync_request
+            && last.elapsed() < Duration::from_millis(REQUEST_TIMEOUT_MS) {
                 return None;
             }
-        }
 
         let request_id = inner.next_request_id;
         inner.next_request_id += 1;
@@ -357,15 +356,13 @@ impl NtpService {
                 }
                 _ = first_host_check.tick() => {
                     let mut inner = self.inner.lock().unwrap();
-                    if !inner.synced {
-                        if let Some(first_sent) = inner.first_request_sent_at {
-                            if first_sent.elapsed() >= Duration::from_millis(FIRST_HOST_TIMEOUT_MS) {
+                    if !inner.synced
+                        && let Some(first_sent) = inner.first_request_sent_at
+                            && first_sent.elapsed() >= Duration::from_millis(FIRST_HOST_TIMEOUT_MS) {
                                 info!("No NTP response received after {}ms, becoming first host", FIRST_HOST_TIMEOUT_MS);
                                 inner.offset = 0;
                                 inner.synced = true;
                             }
-                        }
-                    }
                 }
             }
         }

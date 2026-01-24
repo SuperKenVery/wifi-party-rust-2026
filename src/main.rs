@@ -21,7 +21,6 @@ mod state;
 mod ui;
 
 use anyhow::{Context, Result};
-use deloxide::Deloxide;
 use party::PartyConfig;
 use state::AppState;
 use tracing::{Level, error, info};

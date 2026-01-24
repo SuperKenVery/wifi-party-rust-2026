@@ -32,7 +32,6 @@ pub mod opus;
 pub mod sample;
 
 pub use buffers::{AudioBatcher, JitterBuffer, PullSnapshot, SimpleBuffer};
-pub use effects::{LevelMeter, calculate_rms_level};
-pub use file::{AudioFileInfo, AudioFileReader};
-pub use opus::{OpusDecoder, OpusEncoder, OpusPacket};
+pub use effects::LevelMeter;
+pub use opus::OpusEncoder;
 pub use sample::AudioSample;

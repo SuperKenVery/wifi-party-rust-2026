@@ -13,7 +13,7 @@ use crate::party::NtpDebugInfo;
 pub fn App() -> Element {
     let state_arc = use_context::<Arc<AppState>>();
 
-    let mut active_hosts = use_signal(|| Vec::<HostInfo>::new());
+    let mut active_hosts = use_signal(Vec::<HostInfo>::new);
     let mut mic_enabled = use_signal(|| false);
     let mut mic_volume = use_signal(|| 1.0f32);
     let mut mic_audio_level = use_signal(|| 0u32);

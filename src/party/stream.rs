@@ -6,13 +6,12 @@
 //! For synchronized music playback, see [`sync_stream`](super::sync_stream).
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use rkyv::{Archive, Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::audio::frame::AudioBuffer;
 use crate::audio::opus::OpusPacket;
