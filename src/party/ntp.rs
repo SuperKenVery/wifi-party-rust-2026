@@ -121,18 +121,20 @@ pub struct NtpService {
 
 impl NtpService {
     pub fn new(sender: NetworkSender, shutdown_flag: Arc<AtomicBool>) -> Arc<Self> {
-        let service = Arc::new(Self {
+        Arc::new(Self {
             inner: Mutex::new(NtpServiceInner::default()),
             sender,
             shutdown_flag,
-        });
+        })
+    }
 
-        let service_clone = service.clone();
+    /// Start the NTP service background task.
+    /// Must be called from within a Tokio runtime context.
+    pub fn start(self: &Arc<Self>) {
+        let service_clone = self.clone();
         tokio::spawn(async move {
             service_clone.run().await;
         });
-
-        service
     }
 
     pub fn local_now_micros() -> u64 {
@@ -198,9 +200,10 @@ impl NtpService {
         }
 
         if let Some(last) = inner.last_sync_request
-            && last.elapsed() < Duration::from_millis(REQUEST_TIMEOUT_MS) {
-                return None;
-            }
+            && last.elapsed() < Duration::from_millis(REQUEST_TIMEOUT_MS)
+        {
+            return None;
+        }
 
         let request_id = inner.next_request_id;
         inner.next_request_id += 1;
@@ -382,6 +385,7 @@ mod tests {
         let sender = NetworkSender::new(socket, addr);
         let shutdown = Arc::new(AtomicBool::new(false));
         let service = NtpService::new(sender, shutdown.clone());
+        service.start();
         (service, shutdown)
     }
 

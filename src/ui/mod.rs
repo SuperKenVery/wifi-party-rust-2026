@@ -7,7 +7,6 @@
 //! - [`participants`] - Main content area showing connected hosts
 
 mod app;
-mod participants;
 mod sidebar;
 mod sidebar_panels;
 

@@ -155,6 +155,17 @@ impl<Sample: crate::audio::AudioSample, const CHANNELS: usize, const SAMPLE_RATE
     pub fn run(mut self) {
         info!("Network receive thread started");
 
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create Tokio runtime for network receiver");
+
+        // Enter the runtime context so tokio::spawn works
+        let _guard = rt.enter();
+
+        // Start the NTP service within this runtime
+        self.ntp_service.start();
+
         *self.state.connection_status.lock().unwrap() = ConnectionStatus::Connected;
 
         let mut buf = [0u8; 65536];
@@ -162,6 +173,11 @@ impl<Sample: crate::audio::AudioSample, const CHANNELS: usize, const SAMPLE_RATE
         let mut last_retransmit_request = Instant::now();
 
         while !self.shutdown_flag.load(Ordering::SeqCst) {
+            // Poll the runtime to process any pending async tasks (like NTP timers)
+            rt.block_on(async {
+                tokio::task::yield_now().await;
+            });
+
             if let Err(e) = self.handle_packet(&mut buf)
                 && !self.shutdown_flag.load(Ordering::SeqCst) {
                     warn!("Error processing packet: {:?}", e);

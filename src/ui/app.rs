@@ -4,9 +4,8 @@ use crate::state::{AppState, HostInfo};
 use dioxus::prelude::*;
 use std::sync::Arc;
 
-use super::participants::MainContent;
 use super::sidebar::{MenuSection, SidebarMenu};
-use super::sidebar_panels::{AudioControlPanel, DebugPanel, ShareMusicPanel};
+use super::sidebar_panels::{AudioControlPanel, DebugPanel, ParticipantsPanel, ShareMusicPanel};
 use crate::party::NtpDebugInfo;
 
 #[allow(non_snake_case)]
@@ -80,7 +79,7 @@ pub fn App() -> Element {
 
             match selected_section() {
                 MenuSection::Senders => rsx! {
-                    MainContent { hosts: active_hosts() }
+                    ParticipantsPanel { hosts: active_hosts() }
                 },
                 MenuSection::AudioControl => rsx! {
                     AudioControlPanel {

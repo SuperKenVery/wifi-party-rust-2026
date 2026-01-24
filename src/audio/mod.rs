@@ -32,6 +32,6 @@ pub mod opus;
 pub mod sample;
 
 pub use buffers::{AudioBatcher, JitterBuffer, PullSnapshot, SimpleBuffer};
-pub use effects::LevelMeter;
+pub use effects::{Gain, LevelMeter};
 pub use opus::OpusEncoder;
 pub use sample::AudioSample;

@@ -1,25 +1,36 @@
 //! Gain (volume) effect.
 
+use std::sync::{Arc, Mutex};
+
 use crate::audio::frame::AudioBuffer;
 use crate::audio::sample::AudioSample;
 use crate::pipeline::Node;
 
-/// Applies a gain (volume multiplier) to all samples.
+/// Applies a dynamic gain (volume multiplier) to all samples.
+///
+/// The gain factor is read from an `Arc<Mutex<f32>>` on each process call,
+/// allowing real-time volume control from the UI.
 ///
 /// # Example
 ///
 /// ```ignore
-/// let gain = Gain::<f32, 2, 48000>::new(0.5); // 50% volume
+/// let volume = Arc::new(Mutex::new(1.0f32));
+/// let gain = Gain::<f32, 2, 48000>::new(volume.clone());
 /// let pipeline = source.pipe(gain);
+/// // Later, adjust volume dynamically:
+/// *volume.lock().unwrap() = 0.5; // 50% volume
 /// ```
-#[derive(Debug, Clone, Copy)]
 pub struct Gain<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    factor: Sample,
+    factor: Arc<Mutex<f32>>,
+    _marker: std::marker::PhantomData<Sample>,
 }
 
 impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Gain<Sample, CHANNELS, SAMPLE_RATE> {
-    pub fn new(factor: Sample) -> Self {
-        Self { factor }
+    pub fn new(factor: Arc<Mutex<f32>>) -> Self {
+        Self {
+            factor,
+            _marker: std::marker::PhantomData,
+        }
     }
 }
 
@@ -32,9 +43,9 @@ where
     type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
 
     fn process(&self, mut input: Self::Input) -> Option<Self::Output> {
-        let center = Sample::silence();
+        let factor = *self.factor.lock().unwrap();
         for sample in input.data_mut() {
-            *sample = (*sample - center) * self.factor + center;
+            *sample = Sample::from_f64_normalized(sample.to_f64_normalized() * factor as f64);
         }
         Some(input)
     }

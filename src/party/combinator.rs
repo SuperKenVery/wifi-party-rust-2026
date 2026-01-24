@@ -4,9 +4,7 @@
 
 use crate::audio::AudioSample;
 use crate::audio::frame::AudioBuffer;
-use crate::pipeline::{Node, Sink, Source};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use crate::pipeline::{Sink, Source};
 
 pub struct Tee<A, B> {
     a: A,
@@ -33,38 +31,6 @@ where
     }
 }
 
-/// Conditionally passes or blocks audio based on an AtomicBool flag.
-/// Passes audio when flag is true, blocks when false.
-/// When it's disabled, downstream get no data at all, not even silence data.
-pub struct Switch<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    enabled: Arc<AtomicBool>,
-    _marker: std::marker::PhantomData<Sample>,
-}
-
-impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Switch<Sample, CHANNELS, SAMPLE_RATE> {
-    pub fn new(enabled: Arc<AtomicBool>) -> Self {
-        Self {
-            enabled,
-            _marker: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<Sample: Send + Sync, const CHANNELS: usize, const SAMPLE_RATE: u32> Node
-    for Switch<Sample, CHANNELS, SAMPLE_RATE>
-{
-    type Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
-    type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
-
-    fn process(&self, input: Self::Input) -> Option<Self::Output> {
-        if self.enabled.load(Ordering::Acquire) {
-            Some(input)
-        } else {
-            None
-        }
-    }
-}
-
 pub type BoxedSource<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> =
     Box<dyn Source<Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>>;
 
@@ -81,19 +47,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 {
     pub fn new(sources: Vec<BoxedSource<Sample, CHANNELS, SAMPLE_RATE>>) -> Self {
         Self { sources }
-    }
-
-    pub fn from_iter<I, S>(sources: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Source<Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> + 'static,
-    {
-        Self {
-            sources: sources
-                .into_iter()
-                .map(|s| Box::new(s) as BoxedSource<Sample, CHANNELS, SAMPLE_RATE>)
-                .collect(),
-        }
     }
 }
 

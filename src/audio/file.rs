@@ -2,6 +2,7 @@
 //!
 //! Provides [`AudioFileReader`] for decoding common audio formats (mp3, flac, wav, ogg, aac)
 //! and resampling to the target sample rate.
+#![allow(dead_code)]
 
 use std::fs::File;
 use std::path::Path;

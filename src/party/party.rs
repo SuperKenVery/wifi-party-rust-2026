@@ -12,12 +12,13 @@ use std::time::Duration;
 use anyhow::Result;
 use tracing::{info, warn};
 
-use crate::audio::{AudioBatcher, AudioSample, LevelMeter, OpusEncoder, SimpleBuffer};
+use crate::audio::effects::Switch;
+use crate::audio::{AudioBatcher, AudioSample, Gain, LevelMeter, OpusEncoder, SimpleBuffer};
 use crate::io::{AudioInput, AudioOutput, LoopbackInput, NetworkSender};
 use crate::pipeline::Sink;
 use crate::state::{AppState, HostId, HostInfo, MusicStreamProgress, StreamInfo};
 
-use super::combinator::{BoxedSource, Mixer, Switch, Tee};
+use super::combinator::{BoxedSource, Mixer, Tee};
 use super::config::PartyConfig;
 use super::music::MusicStream;
 use super::network::NetworkNode;
@@ -143,7 +144,7 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
         let loopback_buffer: SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE> = SimpleBuffer::new();
 
         // ============================================================
-        // Mic Pipeline: Mic -> LevelMeter -> MicSwitch -> Tee
+        // Mic Pipeline: Mic -> LevelMeter -> Gain -> MicSwitch -> Tee
         //   -> AudioBatcher -> OpusEncoder -> RealtimeFramePacker(Mic) -> NetworkSink
         //   -> LoopbackSwitch -> loopback_buffer
         // ============================================================
@@ -163,6 +164,9 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
         )
         .get_data_from(Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(
             self.state.mic_enabled.clone(),
+        ))
+        .get_data_from(Gain::<Sample, CHANNELS, SAMPLE_RATE>::new(
+            self.state.mic_volume.clone(),
         ))
         .get_data_from(LevelMeter::<Sample, CHANNELS, SAMPLE_RATE>::new(
             self.state.mic_audio_level.clone(),
