@@ -79,12 +79,31 @@ impl RealtimeFrame {
     }
 }
 
+/// Control commands for synced streams.
+#[derive(Archive, Serialize, Deserialize, Debug, Clone)]
+#[rkyv(compare(PartialEq))]
+pub enum SyncedControl {
+    Start {
+        stream_id: crate::party::sync_stream::SyncedStreamId,
+        party_clock_time: u64,
+        seq: u64,
+    },
+    Pause {
+        stream_id: crate::party::sync_stream::SyncedStreamId,
+    },
+}
+
 /// Top-level network packet enum.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone)]
 pub enum NetworkPacket {
     Realtime(RealtimeFrame),
     Synced(SyncedFrame),
     SyncedMeta(SyncedStreamMeta),
+    SyncedControl(SyncedControl),
+    RequestFrames {
+        stream_id: crate::party::sync_stream::SyncedStreamId,
+        seqs: Vec<u64>,
+    },
     Ntp(NtpPacket),
 }
 

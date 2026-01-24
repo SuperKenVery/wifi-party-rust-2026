@@ -70,6 +70,57 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     pub fn ntp_service(&self) -> Option<&Arc<NtpService>> {
         self.ntp_service.as_ref()
     }
+
+    pub fn handle_retransmission_request(
+        &self,
+        stream_id: super::sync_stream::SyncedStreamId,
+        seqs: Vec<u64>,
+    ) {
+        let music_streams = self.music_streams.lock().unwrap();
+        for stream in music_streams.iter() {
+            if stream.stream_id() == stream_id {
+                stream.handle_retransmission_request(seqs);
+                break;
+            }
+        }
+    }
+
+    pub fn pause_music(&self, stream_id: super::sync_stream::SyncedStreamId) -> Result<()> {
+        let music_streams = self.music_streams.lock().unwrap();
+        for stream in music_streams.iter() {
+            if stream.stream_id() == stream_id {
+                stream.pause()?;
+                return Ok(());
+            }
+        }
+        anyhow::bail!("Stream not found")
+    }
+
+    pub fn resume_music(&self, stream_id: super::sync_stream::SyncedStreamId) -> Result<()> {
+        let music_streams = self.music_streams.lock().unwrap();
+        for stream in music_streams.iter() {
+            if stream.stream_id() == stream_id {
+                stream.resume()?;
+                return Ok(());
+            }
+        }
+        anyhow::bail!("Stream not found")
+    }
+
+    pub fn seek_music(
+        &self,
+        stream_id: super::sync_stream::SyncedStreamId,
+        position_ms: u64,
+    ) -> Result<()> {
+        let music_streams = self.music_streams.lock().unwrap();
+        for stream in music_streams.iter() {
+            if stream.stream_id() == stream_id {
+                stream.seek(position_ms)?;
+                return Ok(());
+            }
+        }
+        anyhow::bail!("Stream not found")
+    }
 }
 
 impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, const SAMPLE_RATE: u32>

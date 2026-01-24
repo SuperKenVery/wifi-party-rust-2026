@@ -237,11 +237,13 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         let synced_stream_clone = synced_stream.clone();
         let ntp_service_clone = ntp_service.clone();
         let state_clone = state.clone();
+        let sender_clone = sender.clone();
         let shutdown_flag = self.shutdown_flag.clone();
         let receiver_handle = thread::spawn(move || {
             let receiver = NetworkReceiver::<Sample, CHANNELS, SAMPLE_RATE>::new(
                 socket,
                 state_clone,
+                sender_clone,
                 realtime_stream_clone,
                 synced_stream_clone,
                 ntp_service_clone,

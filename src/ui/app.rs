@@ -5,7 +5,8 @@ use dioxus::prelude::*;
 use std::sync::Arc;
 
 use super::participants::MainContent;
-use super::sidebar::{AudioControlPanel, DebugPanel, MenuSection, ShareMusicPanel, SidebarMenu};
+use super::sidebar::{MenuSection, SidebarMenu};
+use super::sidebar_panels::{AudioControlPanel, DebugPanel, ShareMusicPanel};
 use crate::party::NtpDebugInfo;
 
 #[allow(non_snake_case)]

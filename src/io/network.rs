@@ -115,6 +115,7 @@ impl Sink for NetworkSender {
 pub struct NetworkReceiver<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     socket: UdpSocket,
     state: Arc<AppState>,
+    network_sender: NetworkSender,
     realtime_stream: Arc<crate::party::stream::RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
     synced_stream: Arc<SyncedAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
     ntp_service: Arc<NtpService>,
@@ -128,6 +129,7 @@ impl<Sample: crate::audio::AudioSample, const CHANNELS: usize, const SAMPLE_RATE
     pub fn new(
         socket: UdpSocket,
         state: Arc<AppState>,
+        network_sender: NetworkSender,
         realtime_stream: Arc<
             crate::party::stream::RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>,
         >,
@@ -141,6 +143,7 @@ impl<Sample: crate::audio::AudioSample, const CHANNELS: usize, const SAMPLE_RATE
         Self {
             socket,
             state,
+            network_sender,
             realtime_stream,
             synced_stream,
             ntp_service,
@@ -156,6 +159,7 @@ impl<Sample: crate::audio::AudioSample, const CHANNELS: usize, const SAMPLE_RATE
 
         let mut buf = [0u8; 65536];
         let mut last_cleanup = Instant::now();
+        let mut last_retransmit_request = Instant::now();
 
         while !self.shutdown_flag.load(Ordering::SeqCst) {
             if let Err(e) = self.handle_packet(&mut buf) {
@@ -168,6 +172,14 @@ impl<Sample: crate::audio::AudioSample, const CHANNELS: usize, const SAMPLE_RATE
                 self.realtime_stream.cleanup_stale();
                 self.synced_stream.cleanup_stale();
                 last_cleanup = Instant::now();
+            }
+
+            if last_retransmit_request.elapsed() > Duration::from_millis(200) {
+                for (_addr, stream_id, seqs) in self.synced_stream.get_missing_frames() {
+                    self.network_sender
+                        .push(NetworkPacket::RequestFrames { stream_id, seqs });
+                }
+                last_retransmit_request = Instant::now();
             }
         }
 
@@ -202,6 +214,17 @@ impl<Sample: crate::audio::AudioSample, const CHANNELS: usize, const SAMPLE_RATE
             }
             NetworkPacket::SyncedMeta(meta) => {
                 self.synced_stream.receive_meta(source_addr, meta);
+            }
+            NetworkPacket::SyncedControl(control) => {
+                self.synced_stream.receive_control(source_addr, control);
+            }
+            NetworkPacket::RequestFrames { stream_id, seqs } => {
+                // Handle retransmission requests if we are the sender
+                if let Ok(party) = self.state.party.lock() {
+                    if let Some(party) = party.as_ref() {
+                        party.handle_retransmission_request(stream_id, seqs);
+                    }
+                }
             }
             NetworkPacket::Ntp(ntp_packet) => {
                 self.ntp_service.handle_packet(ntp_packet);

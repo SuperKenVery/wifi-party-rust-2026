@@ -9,5 +9,6 @@
 mod app;
 mod participants;
 mod sidebar;
+mod sidebar_panels;
 
 pub use app::App;

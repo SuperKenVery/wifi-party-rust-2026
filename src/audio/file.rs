@@ -9,14 +9,14 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow};
 use rubato::{FftFixedIn, Resampler};
 use symphonia::core::audio::{AudioBufferRef, Signal};
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
-use super::frame::AudioBuffer;
 use super::AudioSample;
+use super::frame::AudioBuffer;
 
 fn extract_samples<const CHANNELS: usize>(decoded: &AudioBufferRef, output: &mut [Vec<f64>]) {
     match decoded {
@@ -78,7 +78,6 @@ pub struct AudioFileInfo {
     pub duration_secs: Option<f64>,
     pub file_name: String,
 }
-
 pub struct AudioFileReader {
     format: Box<dyn symphonia::core::formats::FormatReader>,
     decoder: Box<dyn symphonia::core::codecs::Decoder>,
@@ -86,6 +85,9 @@ pub struct AudioFileReader {
     source_sample_rate: u32,
     source_channels: usize,
     pub info: AudioFileInfo,
+    resampler: Option<FftFixedIn<f64>>,
+    input_buffer: Vec<Vec<f64>>,
+    output_buffer: Vec<f64>,
 }
 
 impl AudioFileReader {
@@ -128,15 +130,12 @@ impl AudioFileReader {
             .sample_rate
             .ok_or_else(|| anyhow!("Unknown sample rate"))?;
 
-        let source_channels = track
-            .codec_params
-            .channels
-            .map(|c| c.count())
-            .unwrap_or(2);
+        let source_channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(2);
 
-        let duration_secs = track.codec_params.n_frames.map(|frames| {
-            frames as f64 / source_sample_rate as f64
-        });
+        let duration_secs = track
+            .codec_params
+            .n_frames
+            .map(|frames| frames as f64 / source_sample_rate as f64);
 
         let decoder = symphonia::default::get_codecs()
             .make(&track.codec_params, &decoder_opts)
@@ -156,21 +155,38 @@ impl AudioFileReader {
             source_sample_rate,
             source_channels,
             info,
+            resampler: None,
+            input_buffer: Vec::new(),
+            output_buffer: Vec::new(),
         })
     }
 
-    pub fn decode_all_resampled<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>(
-        mut self,
-    ) -> Result<Vec<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>> {
-        let mut all_samples: Vec<Vec<f64>> = vec![Vec::new(); CHANNELS];
+    pub fn next_buffer<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>(
+        &mut self,
+    ) -> Result<Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>> {
+        if self.input_buffer.is_empty() {
+            self.input_buffer = vec![Vec::new(); CHANNELS];
+        }
 
-        loop {
+        let frame_samples = 960 * CHANNELS;
+
+        while self.output_buffer.len() < frame_samples {
             let packet = match self.format.next_packet() {
                 Ok(p) => p,
                 Err(symphonia::core::errors::Error::IoError(e))
                     if e.kind() == std::io::ErrorKind::UnexpectedEof =>
                 {
-                    break;
+                    if self.output_buffer.is_empty() {
+                        return Ok(None);
+                    }
+                    let mut padded = self.output_buffer.clone();
+                    padded.resize(frame_samples, 0.0);
+                    self.output_buffer.clear();
+                    let samples: Vec<Sample> = padded
+                        .into_iter()
+                        .map(Sample::from_f64_normalized)
+                        .collect();
+                    return Ok(Some(AudioBuffer::new(samples)?));
                 }
                 Err(e) => return Err(e.into()),
             };
@@ -185,93 +201,91 @@ impl AudioFileReader {
                 Err(e) => return Err(e.into()),
             };
 
-            extract_samples::<CHANNELS>(&decoded, &mut all_samples);
-        }
+            extract_samples::<CHANNELS>(&decoded, &mut self.input_buffer);
 
-        if all_samples[0].is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let resampled = self.resample::<CHANNELS, SAMPLE_RATE>(&all_samples)?;
-
-        let frame_samples = 960 * CHANNELS;
-        let mut buffers = Vec::new();
-
-        for chunk in resampled.chunks(frame_samples) {
-            if chunk.len() < frame_samples {
-                let mut padded = chunk.to_vec();
-                padded.resize(frame_samples, 0.0);
-                let samples: Vec<Sample> = padded.into_iter().map(Sample::from_f64_normalized).collect();
-                if let Ok(buf) = AudioBuffer::new(samples) {
-                    buffers.push(buf);
+            if self.source_sample_rate == SAMPLE_RATE && self.source_channels == CHANNELS {
+                let num_frames = self.input_buffer[0].len();
+                for frame_idx in 0..num_frames {
+                    for ch in 0..CHANNELS {
+                        self.output_buffer.push(self.input_buffer[ch][frame_idx]);
+                    }
+                }
+                for ch in 0..CHANNELS {
+                    self.input_buffer[ch].clear();
                 }
             } else {
-                let samples: Vec<Sample> = chunk.iter().map(|&s| Sample::from_f64_normalized(s)).collect();
-                if let Ok(buf) = AudioBuffer::new(samples) {
-                    buffers.push(buf);
+                let chunk_size = 1024;
+                if self.resampler.is_none() {
+                    self.resampler = Some(FftFixedIn::<f64>::new(
+                        self.source_sample_rate as usize,
+                        SAMPLE_RATE as usize,
+                        chunk_size,
+                        2,
+                        CHANNELS,
+                    )?);
+                }
+
+                let resampler = self.resampler.as_mut().unwrap();
+                while self.input_buffer[0].len() >= chunk_size {
+                    let chunk: Vec<Vec<f64>> = (0..CHANNELS)
+                        .map(|ch| self.input_buffer[ch].drain(0..chunk_size).collect())
+                        .collect();
+
+                    let resampled = resampler.process(&chunk, None)?;
+                    let out_frames = resampled[0].len();
+                    for frame_idx in 0..out_frames {
+                        for ch in 0..CHANNELS {
+                            self.output_buffer.push(resampled[ch][frame_idx]);
+                        }
+                    }
                 }
             }
         }
 
-        Ok(buffers)
+        let chunk: Vec<f64> = self.output_buffer.drain(0..frame_samples).collect();
+        let samples: Vec<Sample> = chunk.into_iter().map(Sample::from_f64_normalized).collect();
+        Ok(Some(AudioBuffer::new(samples)?))
     }
 
+    pub fn seek(&mut self, time_secs: f64) -> Result<()> {
+        use symphonia::core::formats::{SeekMode, SeekTo};
 
-
-    fn resample<const CHANNELS: usize, const SAMPLE_RATE: u32>(
-        &self,
-        input: &[Vec<f64>],
-    ) -> Result<Vec<f64>> {
-        if self.source_sample_rate == SAMPLE_RATE && self.source_channels == CHANNELS {
-            let num_frames = input[0].len();
-            let mut interleaved = Vec::with_capacity(num_frames * CHANNELS);
-            for frame_idx in 0..num_frames {
-                for ch in 0..CHANNELS {
-                    interleaved.push(input[ch][frame_idx]);
-                }
-            }
-            return Ok(interleaved);
-        }
-
-        let chunk_size = 1024;
-        let mut resampler = FftFixedIn::<f64>::new(
-            self.source_sample_rate as usize,
-            SAMPLE_RATE as usize,
-            chunk_size,
-            2,
-            CHANNELS,
+        let timestamp = (time_secs * self.source_sample_rate as f64) as u64;
+        self.format.seek(
+            SeekMode::Accurate,
+            SeekTo::TimeStamp {
+                ts: timestamp,
+                track_id: self.track_id,
+            },
         )?;
-
-        let num_frames = input[0].len();
-        let mut output_interleaved = Vec::new();
-
-        let mut pos = 0;
-        while pos < num_frames {
-            let end = (pos + chunk_size).min(num_frames);
-            let actual_len = end - pos;
-
-            let mut chunk: Vec<Vec<f64>> = (0..CHANNELS)
-                .map(|ch| {
-                    let src_ch = ch % input.len();
-                    let mut data = input[src_ch][pos..end].to_vec();
-                    data.resize(chunk_size, 0.0);
-                    data
-                })
-                .collect();
-
-            let resampled = resampler.process(&chunk, None)?;
-
-            let out_frames = resampled[0].len();
-            for frame_idx in 0..out_frames {
-                for ch in 0..CHANNELS {
-                    output_interleaved.push(resampled[ch][frame_idx]);
-                }
-            }
-
-            pos += chunk_size;
+        self.decoder.reset();
+        if let Some(resampler) = self.resampler.as_mut() {
+            resampler.reset();
         }
+        for ch in 0..self.input_buffer.len() {
+            self.input_buffer[ch].clear();
+        }
+        self.output_buffer.clear();
+        Ok(())
+    }
 
-        Ok(output_interleaved)
+    pub fn seek_micros(&mut self, micros: u64) -> Result<()> {
+        let time_secs = micros as f64 / 1_000_000.0;
+        self.seek(time_secs)
+    }
+
+    pub fn decode_all_resampled<
+        Sample: AudioSample,
+        const CHANNELS: usize,
+        const SAMPLE_RATE: u32,
+    >(
+        mut self,
+    ) -> Result<Vec<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>> {
+        let mut buffers = Vec::new();
+        while let Some(buf) = self.next_buffer::<Sample, CHANNELS, SAMPLE_RATE>()? {
+            buffers.push(buf);
+        }
+        Ok(buffers)
     }
 }
 

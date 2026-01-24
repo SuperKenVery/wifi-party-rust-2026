@@ -5,13 +5,15 @@
 //! - [`AppState`] - Global application state (configs, connection status, etc.)
 //! - [`HostId`] / [`HostInfo`] - Remote peer identification and metadata
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex};
 
-use crate::party::{MusicStreamInfo, NtpDebugInfo, Party, PartyConfig, StreamSnapshot, SyncedStreamState};
+use crate::party::{
+    MusicStreamInfo, NtpDebugInfo, Party, PartyConfig, StreamSnapshot, SyncedStreamState,
+};
 
 /// Unique identifier for a remote host, derived from their IP address.
 /// We use IP address instead of SocketAddr to keep the host identity stable
@@ -94,12 +96,18 @@ impl MusicStreamProgress {
 
     pub fn reset(&self) {
         *self.file_name.lock().unwrap() = None;
-        self.is_encoding.store(false, std::sync::atomic::Ordering::Relaxed);
-        self.encoding_current.store(0, std::sync::atomic::Ordering::Relaxed);
-        self.encoding_total.store(0, std::sync::atomic::Ordering::Relaxed);
-        self.is_streaming.store(false, std::sync::atomic::Ordering::Relaxed);
-        self.streaming_current.store(0, std::sync::atomic::Ordering::Relaxed);
-        self.streaming_total.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.is_encoding
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.encoding_current
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.encoding_total
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.is_streaming
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.streaming_current
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.streaming_total
+            .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -140,47 +148,77 @@ impl AppState {
     }
 
     pub fn stream_snapshots(&self, host_id: HostId, stream_id: &str) -> Vec<StreamSnapshot> {
-        if let Ok(party_guard) = self.party.lock() {
-            if let Some(party) = party_guard.as_ref() {
-                return party.stream_snapshots(host_id, stream_id);
-            }
-        }
-        Vec::new()
+        self.party
+            .lock()
+            .expect("Party lock poisoned")
+            .as_ref()
+            .map(|party| party.stream_snapshots(host_id, stream_id))
+            .unwrap_or_default()
     }
 
     pub fn start_music_stream(&self, path: PathBuf) -> Result<()> {
-        if let Ok(party_guard) = self.party.lock() {
-            if let Some(party) = party_guard.as_ref() {
-                return party.start_music_stream(path, self.music_progress.clone());
-            }
-        }
-        anyhow::bail!("Party not running")
+        self.party
+            .lock()
+            .expect("Party lock poisoned")
+            .as_ref()
+            .context("Party not initialized")?
+            .start_music_stream(path, self.music_progress.clone())
+    }
+
+    pub fn pause_music(&self, stream_id: crate::party::SyncedStreamId) -> Result<()> {
+        self.party
+            .lock()
+            .expect("Party lock poisoned")
+            .as_ref()
+            .context("Party not initialized")?
+            .pause_music(stream_id)
+    }
+
+    pub fn resume_music(&self, stream_id: crate::party::SyncedStreamId) -> Result<()> {
+        self.party
+            .lock()
+            .expect("Party lock poisoned")
+            .as_ref()
+            .context("Party not initialized")?
+            .resume_music(stream_id)
+    }
+
+    pub fn seek_music(
+        &self,
+        stream_id: crate::party::SyncedStreamId,
+        position_ms: u64,
+    ) -> Result<()> {
+        self.party
+            .lock()
+            .expect("Party lock poisoned")
+            .as_ref()
+            .context("Party not initialized")?
+            .seek_music(stream_id, position_ms)
     }
 
     pub fn synced_stream_states(&self) -> Vec<SyncedStreamState> {
-        if let Ok(party_guard) = self.party.lock() {
-            if let Some(party) = party_guard.as_ref() {
-                return party.synced_stream_states();
-            }
-        }
-        Vec::new()
+        self.party
+            .lock()
+            .expect("Party lock poisoned")
+            .as_ref()
+            .map(|party| party.synced_stream_states())
+            .unwrap_or_default()
     }
 
     pub fn active_music_streams(&self) -> Vec<MusicStreamInfo> {
-        if let Ok(party_guard) = self.party.lock() {
-            if let Some(party) = party_guard.as_ref() {
-                return party.active_music_streams();
-            }
-        }
-        Vec::new()
+        self.party
+            .lock()
+            .expect("Party lock poisoned")
+            .as_ref()
+            .map(|party| party.active_music_streams())
+            .unwrap_or_default()
     }
 
     pub fn ntp_debug_info(&self) -> Option<NtpDebugInfo> {
-        if let Ok(party_guard) = self.party.lock() {
-            if let Some(party) = party_guard.as_ref() {
-                return party.ntp_service().map(|ntp| ntp.debug_info());
-            }
-        }
-        None
+        self.party
+            .lock()
+            .expect("Party lock poisoned")
+            .as_ref()
+            .and_then(|party| party.ntp_service().map(|ntp| ntp.debug_info()))
     }
 }
