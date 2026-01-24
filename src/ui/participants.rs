@@ -11,7 +11,7 @@ pub fn MainContent(hosts: Vec<HostInfo>) -> Element {
     rsx! {
         div {
             class: "flex-1 flex flex-col relative overflow-hidden bg-slate-900",
-            
+
             div {
                 class: "h-20 px-8 flex items-center justify-between z-10",
                 div {
@@ -22,7 +22,7 @@ pub fn MainContent(hosts: Vec<HostInfo>) -> Element {
                         "{hosts.len()} Active"
                     }
                 }
-                
+
                 div {
                     class: "flex gap-2",
                     button {
@@ -34,7 +34,7 @@ pub fn MainContent(hosts: Vec<HostInfo>) -> Element {
 
             div {
                 class: "flex-1 overflow-y-auto p-8 pt-0",
-                
+
                 if hosts.is_empty() {
                     div {
                         class: "h-full flex flex-col items-center justify-center text-slate-400",
@@ -64,7 +64,7 @@ fn HostCard(host: HostInfo) -> Element {
     rsx! {
         div {
             class: "glass-card p-5 rounded-2xl relative group",
-            
+
             div {
                 class: "flex items-start justify-between mb-4",
                 div {
@@ -120,7 +120,11 @@ fn StreamIndicator(
     let mut snapshots = use_signal(|| Vec::<StreamSnapshot>::new());
     let mut show_graph = use_signal(|| false);
 
-    let icon = if stream_id == "Mic" { "🎙️" } else { "🔊" };
+    let icon = if stream_id == "Mic" {
+        "🎙️"
+    } else {
+        "🔊"
+    };
     let packet_loss_pct = (packet_loss * 100.0) as i32;
     let target_lat = target_latency as i32;
 
@@ -232,9 +236,7 @@ fn PacketGraph(snapshots: Vec<StreamSnapshot>) -> Element {
         top_margin + graph_height - (seq.saturating_sub(min_seq) as f64 * y_scale)
     };
 
-    let idx_to_x = |i: usize| -> f64 {
-        left_margin + i as f64 * x_scale
-    };
+    let idx_to_x = |i: usize| -> f64 { left_margin + i as f64 * x_scale };
 
     let write_points: String = snapshots
         .iter()

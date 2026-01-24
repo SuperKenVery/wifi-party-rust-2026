@@ -107,8 +107,6 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;

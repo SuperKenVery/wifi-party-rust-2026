@@ -208,7 +208,10 @@ impl<S> AudioOutput<S> {
                 cpal::SupportedBufferSize::Range { min, max } => {
                     let target = 256u32;
                     let size = target.clamp(*min, *max);
-                    debug!("Using output buffer size: {} (min={}, max={})", size, min, max);
+                    debug!(
+                        "Using output buffer size: {} (min={}, max={})",
+                        size, min, max
+                    );
                     BufferSize::Fixed(size)
                 }
                 cpal::SupportedBufferSize::Unknown => {

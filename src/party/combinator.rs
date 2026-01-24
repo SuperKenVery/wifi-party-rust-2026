@@ -89,7 +89,10 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         S: Source<Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> + 'static,
     {
         Self {
-            sources: sources.into_iter().map(|s| Box::new(s) as BoxedSource<Sample, CHANNELS, SAMPLE_RATE>).collect(),
+            sources: sources
+                .into_iter()
+                .map(|s| Box::new(s) as BoxedSource<Sample, CHANNELS, SAMPLE_RATE>)
+                .collect(),
         }
     }
 }
@@ -105,7 +108,11 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Source
         if buffers.is_empty() {
             return None;
         }
-        tracing::trace!("Mixer: pulled {} buffers from {} sources", buffers.len(), self.sources.len());
+        tracing::trace!(
+            "Mixer: pulled {} buffers from {} sources",
+            buffers.len(),
+            self.sources.len()
+        );
 
         if buffers.len() == 1 {
             return Some(buffers.into_iter().next().unwrap());
@@ -121,13 +128,8 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Source
             }
         }
 
-        let result: Vec<Sample> = mixed
-            .into_iter()
-            .map(Sample::from_f64_normalized)
-            .collect();
+        let result: Vec<Sample> = mixed.into_iter().map(Sample::from_f64_normalized).collect();
 
         AudioBuffer::new(result).ok()
     }
 }
-
-

@@ -2,8 +2,8 @@
 //!
 //! Stores individual samples and returns variable-length AudioBuffers on pull.
 
-use crate::audio::frame::AudioBuffer;
 use crate::audio::AudioSample;
+use crate::audio::frame::AudioBuffer;
 use crate::pipeline::{Sink, Source};
 use std::collections::VecDeque;
 use std::sync::Mutex;
