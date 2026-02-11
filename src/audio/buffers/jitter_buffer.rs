@@ -173,16 +173,18 @@ impl JitterBufferStats {
         }
 
         // Decrease target latency when loss is low and min latency is high
-        if loss_rate < LOW_LOSS_THRESHOLD && current_target > MIN_TARGET_LATENCY
+        if loss_rate < LOW_LOSS_THRESHOLD
+            && current_target > MIN_TARGET_LATENCY
             && let Some(min_lat) = self.min_latency_in_window()
-                && min_lat >= HIGH_MIN_LATENCY_THRESHOLD {
-                    let new_target = (current_target - 1).max(MIN_TARGET_LATENCY);
-                    self.target_latency.store(new_target, Ordering::Release);
-                    debug!(
-                        "JitterBuffer: Target latency decreased {} -> {} (min_latency={})",
-                        current_target, new_target, min_lat
-                    );
-                }
+            && min_lat >= HIGH_MIN_LATENCY_THRESHOLD
+        {
+            let new_target = (current_target - 1).max(MIN_TARGET_LATENCY);
+            self.target_latency.store(new_target, Ordering::Release);
+            debug!(
+                "JitterBuffer: Target latency decreased {} -> {} (min_latency={})",
+                current_target, new_target, min_lat
+            );
+        }
     }
 }
 
@@ -462,10 +464,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
                     if frame_size > fill_count {
                         let leftover = frame_size - fill_count;
-                        partial.store(
-                            std::iter::repeat_n(Sample::silence(), leftover),
-                            result_seq,
-                        );
+                        partial.store(std::iter::repeat_n(Sample::silence(), leftover), result_seq);
                     }
                 }
             }
@@ -536,13 +535,14 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Sink
         self.late_packet_count.store(0, Ordering::Release);
 
         if let Some(previous_written_seq) = slot.stored_seq()
-            && previous_written_seq >= seq {
-                debug!(
-                    "Slot already has seq {} >= incoming seq {}, dropping",
-                    previous_written_seq, seq
-                );
-                return;
-            }
+            && previous_written_seq >= seq
+        {
+            debug!(
+                "Slot already has seq {} >= incoming seq {}, dropping",
+                previous_written_seq, seq
+            );
+            return;
+        }
 
         slot.write(seq, input);
 

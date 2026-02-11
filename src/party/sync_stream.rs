@@ -334,11 +334,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 let frame_offset_in_opus = (elapsed_samples % samples_per_opus_frame) as usize;
 
                 let opus_pcm = if let Some((cached_seq, ref pcm)) = entry.current_decode {
-                    if cached_seq == seq {
-                        Some(pcm)
-                    } else {
-                        None
-                    }
+                    if cached_seq == seq { Some(pcm) } else { None }
                 } else {
                     None
                 };

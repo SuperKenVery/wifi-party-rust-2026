@@ -74,14 +74,15 @@ fn get_network_interfaces() -> Vec<NetworkInterfaceInfo> {
                     })
                     .collect();
                 if (!v4_addrs.is_empty() || !v6_addrs.is_empty())
-                    && !result.iter().any(|r| r.index == iface.index) {
-                        result.push(NetworkInterfaceInfo {
-                            name: iface.name.clone(),
-                            index: iface.index,
-                            v4_addrs,
-                            v6_addrs,
-                        });
-                    }
+                    && !result.iter().any(|r| r.index == iface.index)
+                {
+                    result.push(NetworkInterfaceInfo {
+                        name: iface.name.clone(),
+                        index: iface.index,
+                        v4_addrs,
+                        v6_addrs,
+                    });
+                }
             }
             result
         })
@@ -121,9 +122,10 @@ pub fn AudioControlPanel(
     let state_vol = state_arc.clone();
     let on_volume_change = move |evt: Event<FormData>| {
         if let Ok(value_str) = evt.value().parse::<f32>()
-            && let Ok(mut vol) = state_vol.mic_volume.lock() {
-                *vol = value_str / 100.0;
-            }
+            && let Ok(mut vol) = state_vol.mic_volume.lock()
+        {
+            *vol = value_str / 100.0;
+        }
     };
 
     let state_loop = state_arc.clone();
@@ -403,9 +405,10 @@ fn DeviceSettings() -> Element {
 
             if let Ok(mut party_guard) = state.party.lock()
                 && let Some(party) = party_guard.as_mut()
-                    && let Err(e) = party.restart_with_config(config) {
-                        tracing::error!("Failed to restart party: {}", e);
-                    }
+                && let Err(e) = party.restart_with_config(config)
+            {
+                tracing::error!("Failed to restart party: {}", e);
+            }
         }
     };
 

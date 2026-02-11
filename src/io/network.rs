@@ -179,9 +179,10 @@ impl<Sample: crate::audio::AudioSample, const CHANNELS: usize, const SAMPLE_RATE
             });
 
             if let Err(e) = self.handle_packet(&mut buf)
-                && !self.shutdown_flag.load(Ordering::SeqCst) {
-                    warn!("Error processing packet: {:?}", e);
-                }
+                && !self.shutdown_flag.load(Ordering::SeqCst)
+            {
+                warn!("Error processing packet: {:?}", e);
+            }
 
             if last_cleanup.elapsed() > Duration::from_secs(1) {
                 self.realtime_stream.cleanup_stale();
@@ -236,9 +237,10 @@ impl<Sample: crate::audio::AudioSample, const CHANNELS: usize, const SAMPLE_RATE
             NetworkPacket::RequestFrames { stream_id, seqs } => {
                 // Handle retransmission requests if we are the sender
                 if let Ok(party) = self.state.party.lock()
-                    && let Some(party) = party.as_ref() {
-                        party.handle_retransmission_request(stream_id, seqs);
-                    }
+                    && let Some(party) = party.as_ref()
+                {
+                    party.handle_retransmission_request(stream_id, seqs);
+                }
             }
             NetworkPacket::Ntp(ntp_packet) => {
                 self.ntp_service.handle_packet(ntp_packet);

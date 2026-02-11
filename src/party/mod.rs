@@ -46,7 +46,4 @@ pub use music::MusicStreamInfo;
 pub use ntp::NtpDebugInfo;
 pub use party::Party;
 pub use stream::StreamSnapshot;
-pub use sync_stream::{
-    SyncedStreamId,
-    SyncedStreamState,
-};
+pub use sync_stream::{SyncedStreamId, SyncedStreamState};

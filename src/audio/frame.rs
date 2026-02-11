@@ -84,7 +84,12 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     /// Get sample at (frame_idx, channel).
     /// frame_idx is the time position (0..samples_per_channel), channel is 0..CHANNELS.
     pub fn get(&self, frame_idx: usize, channel: usize) -> &Sample {
-        debug_assert!(channel < CHANNELS, "channel {} >= CHANNELS {}", channel, CHANNELS);
+        debug_assert!(
+            channel < CHANNELS,
+            "channel {} >= CHANNELS {}",
+            channel,
+            CHANNELS
+        );
         debug_assert!(
             frame_idx < self.samples_per_channel(),
             "frame_idx {} >= samples_per_channel {}",
@@ -96,7 +101,12 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
     /// Get mutable sample at (frame_idx, channel).
     pub fn get_mut(&mut self, frame_idx: usize, channel: usize) -> &mut Sample {
-        debug_assert!(channel < CHANNELS, "channel {} >= CHANNELS {}", channel, CHANNELS);
+        debug_assert!(
+            channel < CHANNELS,
+            "channel {} >= CHANNELS {}",
+            channel,
+            CHANNELS
+        );
         debug_assert!(
             frame_idx < self.samples_per_channel(),
             "frame_idx {} >= samples_per_channel {}",
