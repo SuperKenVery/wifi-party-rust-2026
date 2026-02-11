@@ -28,7 +28,7 @@ const MIN_TARGET_LATENCY: u64 = 1;
 const MAX_TARGET_LATENCY: u64 = 25; // ~500ms at 20ms/frame
 
 const LATENCY_WINDOW_SIZE: usize = 50; // sliding window for min latency detection
-const HIGH_MIN_LATENCY_THRESHOLD: u64 = 5; // if min latency stays above this, decrease target
+const HIGH_MIN_LATENCY_THRESHOLD: u64 = 2; // if min latency stays above this, decrease target
 const HIGH_LOSS_THRESHOLD: f64 = 0.05; // 10% loss rate triggers target increase
 const LOW_LOSS_THRESHOLD: f64 = 0.02; // 2% loss rate allows target decrease
 
