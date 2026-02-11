@@ -1,0 +1,174 @@
+# Wi-Fi Party KTV
+
+Real-time audio sharing application using UDP multicast on local networks.
+
+## What It Does
+
+- Records mic or system audio, encodes with Opus, sends via UDP multicast
+- Receives audio from network peers, decodes, buffers, mixes, plays to speaker
+- Supports synchronized music playback with NTP-based time sync
+
+## Key Engineering Challenge
+
+Reducing latency. Techniques used:
+- Lock-free queues (atomic cells in JitterBuffer)
+- Low-level cpal API with minimal buffer sizes (3ms)
+- Adaptive jitter buffering
+- Static pipeline dispatching (zero-overhead)
+- DSCP/QoS marking for network priority
+
+## Module Overview
+
+### `src/audio/` - Audio Data & Processing
+
+Core audio types and processing nodes.
+
+Files:
+- `sample.rs` - `AudioSample` trait for sample types (f32, i16)
+- `frame.rs` - `AudioBuffer` (raw PCM) and `AudioFrame` (buffer + sequence number)
+- `opus.rs` - Opus encoder/decoder with FEC
+- `file.rs` - Audio file decoding via symphonia
+
+Subdirectories:
+- `buffers/` - Buffer implementations
+  - `simple_buffer.rs` - Basic FIFO buffer
+  - `audio_batcher.rs` - Batches samples to reduce packet frequency
+  - `jitter_buffer.rs` - Reorders packets, adaptive latency, lock-free design
+- `effects/` - Audio effects
+  - `gain.rs` - Volume control
+  - `level_meter.rs` - Audio level metering
+  - `noise_gate.rs` - RMS-based noise gate
+  - `switch.rs` - Enable/disable audio stream
+
+### `src/io/` - Hardware & Network I/O
+
+Files:
+- `audio.rs` - cpal-based audio device access
+  - `AudioInput` - Microphone capture
+  - `LoopbackInput` - System audio capture
+  - `AudioOutput` - Speaker playback
+- `network.rs` - UDP multicast transport
+  - `NetworkSender` - Broadcasts packets to multicast group
+  - `NetworkReceiver` - Receives and dispatches packets
+
+### `src/party/` - Orchestration
+
+The main coordination layer that wires everything together.
+
+Files:
+- `party.rs` - Main `Party` struct that sets up all pipelines
+- `config.rs` - Configuration (device IDs, network settings)
+- `network.rs` - `NetworkNode` manages sender/receiver lifecycle
+- `stream.rs` - `RealtimeAudioStream` manages per-host jitter buffers
+- `sync_stream.rs` - `SyncedAudioStream` for synchronized music playback
+- `ntp.rs` - NTP service for time synchronization
+- `music.rs` - Music file streaming
+- `combinator.rs` - Pipeline utilities (Tee, Mixer, Switch)
+
+### `src/pipeline/` - Processing Framework
+
+Generic pipeline architecture for data flow.
+
+Files:
+- `traits.rs` - Core traits
+  - `Node` - Transforms input to output
+  - `Source` - Pull-based data producer
+  - `Sink` - Push-based data consumer
+- `chain.rs` - Pipeline composition (`PullPipeline`, `PushPipeline`)
+
+### `src/state/` - Application State
+
+Single file `mod.rs` containing:
+- `AppState` - Global state (volumes, enabled flags, host list)
+- `HostId` - Remote peer identifier (IP-based)
+- `HostInfo` - Peer metadata and stream info
+- `MusicStreamProgress` - Music encoding/streaming progress
+
+### `src/ui/` - User Interface
+
+Dioxus-based desktop UI.
+
+Files:
+- `app.rs` - Main app component
+- `sidebar.rs` - Navigation sidebar
+- `sidebar_panels/` - Panel components
+  - `audio_control.rs` - Mic/system audio controls
+  - `participants.rs` - Connected peers list
+  - `share_music.rs` - Music upload/control
+  - `debug.rs` - Debug info display
+
+## Data Flow
+
+### Sending (Mic Pipeline)
+
+1. `AudioInput` captures from mic via cpal callback
+2. `LevelMeter` measures audio level
+3. `Gain` applies volume
+4. `Switch` enables/disables based on `mic_enabled`
+5. `Tee` splits to:
+   - Network path: `AudioBatcher` → `OpusEncoder` → `RealtimeFramePacker` → `NetworkSender`
+   - Loopback path: `Switch` (loopback_enabled) → `SimpleBuffer`
+
+### Sending (System Audio Pipeline)
+
+1. `LoopbackInput` captures system audio via cpal
+2. `LevelMeter` → `Switch` → `AudioBatcher` → `OpusEncoder` → `RealtimeFramePacker` → `NetworkSender`
+
+### Receiving
+
+1. `NetworkReceiver` runs in background thread, receives UDP packets
+2. Packets dispatched by type:
+   - `Realtime` → `RealtimeAudioStream` → per-host `JitterBuffer` with `OpusDecoder`
+   - `Synced` → `SyncedAudioStream` (NTP-synchronized playback)
+   - `Ntp` → `NtpService`
+3. `Mixer` combines: `RealtimeAudioStream` + `SyncedAudioStream` + `LoopbackBuffer`
+4. `AudioOutput` plays mixed audio via cpal callback
+
+## Network Protocol
+
+Multicast addresses:
+- IPv4: `239.255.43.2:7667`, TTL=1
+- IPv6: `ff02::7667:7667`, hop_limit=1
+
+Packet types (serialized with rkyv):
+- `Realtime` - Opus audio for realtime streams (mic/system)
+- `Synced` - Opus audio for synchronized music
+- `SyncedMeta` - Music stream metadata
+- `SyncedControl` - Play/pause/seek commands
+- `RequestFrames` - Retransmission requests
+- `Ntp` - Time sync messages
+
+## Key Components Detail
+
+### JitterBuffer (`src/audio/buffers/jitter_buffer.rs`)
+
+Slot-based buffer indexed by sequence number. Key behaviors:
+- On push: clamp read_seq forward if outside target latency window
+- On pull: only hold back on underrun (read_seq > write_seq)
+- Adaptive latency: increases on high loss (>5%), decreases when stable
+- Uses `AtomicCell` and `AtomicU64` for lock-free read/write
+
+### RealtimeAudioStream (`src/party/stream.rs`)
+
+Maintains per-host, per-stream JitterBuffers. Creates buffer on first packet from new source. Implements `Source` trait - pull returns mixed audio from all active streams.
+
+### SyncedAudioStream (`src/party/sync_stream.rs`)
+
+For synchronized music playback. Uses NTP time to schedule frame playback. Supports retransmission requests for missing frames.
+
+### Party (`src/party/party.rs`)
+
+Main orchestrator. `Party::run()` sets up all pipelines:
+1. Starts `NetworkNode` which spawns receiver thread
+2. Creates mic pipeline with all effects
+3. Creates system audio pipeline
+4. Creates output pipeline with Mixer
+5. Starts host sync task (updates UI with active hosts)
+
+## Entry Point
+
+`src/main.rs`:
+1. Initialize logger
+2. Create `PartyConfig::default()`
+3. Create `AppState::new(config)` which internally creates and runs `Party`
+4. Launch Dioxus desktop app with `AppState` as context
