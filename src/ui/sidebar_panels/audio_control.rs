@@ -358,8 +358,6 @@ fn DeviceSettings() -> Element {
 
     let on_apply = {
         let state = state_arc.clone();
-        let input_devices = input_devices;
-        let output_devices = output_devices;
         move |_| {
             let input_id: Option<DeviceId> = {
                 let sel = selected_input.read();
