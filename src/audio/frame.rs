@@ -28,6 +28,16 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         Ok(Self { data })
     }
 
+    /// Create a new audio buffer with `num_frames` frames, all samples initialized to zero.
+    pub fn new_zeroed(num_frames: usize) -> Self
+    where
+        Sample: Default + Clone,
+    {
+        Self {
+            data: vec![Sample::default(); num_frames * CHANNELS],
+        }
+    }
+
     /// Returns an iterator over the samples of a specific channel.
     ///
     /// This is fully static and compiler-optimized.
@@ -69,6 +79,31 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     /// Consumes the buffer and returns the raw vector.
     pub fn into_inner(self) -> Vec<Sample> {
         self.data
+    }
+
+    /// Get sample at (frame_idx, channel).
+    /// frame_idx is the time position (0..samples_per_channel), channel is 0..CHANNELS.
+    pub fn get(&self, frame_idx: usize, channel: usize) -> &Sample {
+        debug_assert!(channel < CHANNELS, "channel {} >= CHANNELS {}", channel, CHANNELS);
+        debug_assert!(
+            frame_idx < self.samples_per_channel(),
+            "frame_idx {} >= samples_per_channel {}",
+            frame_idx,
+            self.samples_per_channel()
+        );
+        &self.data[frame_idx * CHANNELS + channel]
+    }
+
+    /// Get mutable sample at (frame_idx, channel).
+    pub fn get_mut(&mut self, frame_idx: usize, channel: usize) -> &mut Sample {
+        debug_assert!(channel < CHANNELS, "channel {} >= CHANNELS {}", channel, CHANNELS);
+        debug_assert!(
+            frame_idx < self.samples_per_channel(),
+            "frame_idx {} >= samples_per_channel {}",
+            frame_idx,
+            self.samples_per_channel()
+        );
+        &mut self.data[frame_idx * CHANNELS + channel]
     }
 }
 

@@ -300,69 +300,82 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     /// reached according to the party clock. Frames that are entirely in the
     /// past are skipped (dropped). Partially elapsed frames are sampled from
     /// the correct offset.
-    pub fn pull_and_mix(&self, len: usize) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
+    ///
+    /// `num_frames` is the number of audio frames (time positions) to pull.
+    pub fn pull_and_mix(
+        &self,
+        num_frames: usize,
+    ) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
         let party_now = (self.party_now_fn)();
-        let us_per_frame = 20_000u64; // 20ms frames
-        let us_per_sample = 1_000_000u64 / SAMPLE_RATE as u64;
-        let mut mixed: Vec<i64> = vec![0; len];
+        let us_per_opus_frame = 20_000u64; // 20ms Opus frames
+        let samples_per_opus_frame = (SAMPLE_RATE as u64 * us_per_opus_frame) / 1_000_000; // 960 at 48kHz
+        let mut mixed: AudioBuffer<i64, CHANNELS, SAMPLE_RATE> =
+            AudioBuffer::new_zeroed(num_frames);
         let mut source_count = 0usize;
-        let mut samples_collected = 0;
+        let mut frames_collected = 0usize;
 
         for mut entry in self.buffers.iter_mut() {
             if !entry.playing || entry.start_party_time > party_now {
                 continue;
             }
 
-            let mut local_samples: Vec<i64> = vec![0; len];
-            let mut local_collected = 0;
+            let mut local_buf: AudioBuffer<i64, CHANNELS, SAMPLE_RATE> =
+                AudioBuffer::new_zeroed(num_frames);
+            let mut local_frames = 0usize;
 
-            while local_collected < len {
-                let current_party_time = party_now + (local_collected as u64 * us_per_sample);
-                let elapsed_us = current_party_time - entry.start_party_time;
-                let seq_offset = elapsed_us / us_per_frame;
+            while local_frames < num_frames {
+                // Calculate elapsed samples (not microseconds) to avoid precision loss
+                let elapsed_us = party_now - entry.start_party_time;
+                let elapsed_samples =
+                    (elapsed_us * SAMPLE_RATE as u64 / 1_000_000) + local_frames as u64;
+                let seq_offset = elapsed_samples / samples_per_opus_frame;
                 let seq = entry.start_seq + seq_offset;
-                let sample_offset_in_frame = ((elapsed_us % us_per_frame) / us_per_sample) as usize;
+                // Frame offset within current Opus packet
+                let frame_offset_in_opus = (elapsed_samples % samples_per_opus_frame) as usize;
 
-                let frame_pcm = if let Some((cached_seq, ref pcm)) = entry.current_decode {
-                    if cached_seq == seq { Some(pcm) } else { None }
+                let opus_pcm = if let Some((cached_seq, ref pcm)) = entry.current_decode {
+                    if cached_seq == seq {
+                        Some(pcm)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 };
 
-                let frame_pcm = if let Some(pcm) = frame_pcm {
+                let opus_pcm = if let Some(pcm) = opus_pcm {
                     pcm
-                } else {
-                    if let Some(opus_packet) = entry.opus_frames.get(&seq) {
-                        if let Some(pcm) = entry.decoder.decode_packet(opus_packet) {
-                            entry.current_decode = Some((seq, pcm));
-                            &entry.current_decode.as_ref().unwrap().1
-                        } else {
-                            break;
-                        }
+                } else if let Some(opus_packet) = entry.opus_frames.get(&seq) {
+                    if let Some(pcm) = entry.decoder.decode_packet(opus_packet) {
+                        entry.current_decode = Some((seq, pcm));
+                        &entry.current_decode.as_ref().unwrap().1
                     } else {
-                        // Missing frame - send request for missing frames
-                        // (In a real implementation, we'd batch these)
                         break;
                     }
+                } else {
+                    break;
                 };
 
-                let frame_data = frame_pcm.data();
-                let remaining_in_frame = frame_data.len() - sample_offset_in_frame;
-                let take_count = (len - local_collected).min(remaining_in_frame);
+                let remaining_in_opus = opus_pcm.samples_per_channel() - frame_offset_in_opus;
+                let take_frames = (num_frames - local_frames).min(remaining_in_opus);
 
-                for i in 0..take_count {
-                    local_samples[local_collected + i] =
-                        frame_data[sample_offset_in_frame + i].to_i64_for_mix();
+                for f in 0..take_frames {
+                    for ch in 0..CHANNELS {
+                        *local_buf.get_mut(local_frames + f, ch) =
+                            opus_pcm.get(frame_offset_in_opus + f, ch).to_i64_for_mix();
+                    }
                 }
-                local_collected += take_count;
+                local_frames += take_frames;
             }
 
-            if local_collected > 0 {
+            if local_frames > 0 {
                 source_count += 1;
-                for i in 0..local_collected {
-                    mixed[i] += local_samples[i];
+                for f in 0..local_frames {
+                    for ch in 0..CHANNELS {
+                        *mixed.get_mut(f, ch) += *local_buf.get(f, ch);
+                    }
                 }
-                samples_collected = samples_collected.max(local_collected);
+                frames_collected = frames_collected.max(local_frames);
             }
         }
 
@@ -371,6 +384,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         }
 
         let samples: Vec<Sample> = mixed
+            .into_inner()
             .into_iter()
             .map(|s| Sample::from_i64_mixed(s, source_count))
             .collect();
@@ -467,7 +481,8 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Source
     type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
 
     fn pull(&self, len: usize) -> Option<Self::Output> {
-        self.pull_and_mix(len)
+        let num_frames = len / CHANNELS;
+        self.pull_and_mix(num_frames)
     }
 }
 
@@ -477,6 +492,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Source
     type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
 
     fn pull(&self, len: usize) -> Option<Self::Output> {
-        self.pull_and_mix(len)
+        let num_frames = len / CHANNELS;
+        self.pull_and_mix(num_frames)
     }
 }
