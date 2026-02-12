@@ -5,12 +5,6 @@
 //! - **Inband FEC**: Each packet contains redundant data from the previous frame,
 //!   allowing recovery if the previous packet was lost.
 //! - **Low latency**: Uses the "restricted lowdelay" application mode.
-//!
-//! # Bandwidth Savings
-//!
-//! Raw PCM at 48kHz stereo 16-bit: ~1.5 Mbps
-//! Opus at 64kbps with FEC: ~80 kbps (including FEC overhead)
-//! Savings: ~95% bandwidth reduction
 
 use std::sync::Mutex;
 
@@ -21,7 +15,7 @@ use super::AudioSample;
 use super::frame::AudioBuffer;
 use crate::pipeline::Node;
 
-const OPUS_BITRATE: i32 = 64000;
+const OPUS_BITRATE: i32 = 128000;
 const OPUS_EXPECTED_PACKET_LOSS: i32 = 60;
 const MAX_OPUS_PACKET_SIZE: usize = 4000;
 const MAX_FRAME_SIZE: usize = 48000;

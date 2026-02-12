@@ -117,7 +117,7 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     }
 }
 
-/// Audio frame structure for network transmission.
+/// Audio frame structure for network transmission. Contains a piece of audio.
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(compare(PartialEq))]
 pub struct AudioFrame<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {

@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Conditionally passes or blocks audio based on an AtomicBool flag.
 /// Passes audio when flag is true, blocks when false.
 /// When it's disabled, downstream get no data at all, not even silence data.
+#[derive(Clone)]
 pub struct Switch<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     enabled: Arc<AtomicBool>,
     _marker: std::marker::PhantomData<Sample>,
