@@ -36,6 +36,7 @@ pub struct Party<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     ntp_service: Option<Arc<NtpService>>,
     network_sender: Option<NetworkSender>,
     music_streams: Mutex<Vec<MusicStream>>,
+    mic_input: Option<Arc<AudioInput<Sample, CHANNELS, SAMPLE_RATE>>>,
     _audio_streams: Vec<cpal::Stream>,
     host_sync_shutdown: Arc<AtomicBool>,
 }
@@ -53,9 +54,14 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             ntp_service: None,
             network_sender: None,
             music_streams: Mutex::new(Vec::new()),
+            mic_input: None,
             _audio_streams: Vec::new(),
             host_sync_shutdown: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn mic_input(&self) -> Option<&Arc<AudioInput<Sample, CHANNELS, SAMPLE_RATE>>> {
+        self.mic_input.as_ref()
     }
 
     pub fn stream_snapshots(&self, host_id: HostId, stream_id: &str) -> Vec<StreamSnapshot> {
@@ -145,7 +151,7 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
         let loopback_buffer: SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE> = SimpleBuffer::new();
 
         // ============================================================
-        // Mic Pipeline: Mic -> LevelMeter -> Gain -> MicSwitch -> Tee
+        // Mic Pipeline: Mic -> LevelMeter -> Gain -> Tee
         //   -> AudioBatcher -> OpusEncoder -> RealtimeFramePacker(Mic) -> NetworkSink
         //   -> LoopbackSwitch -> loopback_buffer
         // ============================================================
@@ -163,17 +169,17 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
                     self.state.loopback_enabled.clone(),
                 )),
         )
-        .get_data_from(Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(
-            self.state.mic_enabled.clone(),
-        ))
         .get_data_from(Gain::<Sample, CHANNELS, SAMPLE_RATE>::new(
             self.state.mic_volume.clone(),
         ))
         .get_data_from(LevelMeter::<Sample, CHANNELS, SAMPLE_RATE>::new(
             self.state.mic_audio_level.clone(),
         ));
-        let audio_input = AudioInput::new(mic_sink);
-        let input_stream = audio_input.start(self.config.input_device_id.as_ref())?;
+        let mic_input = Arc::new(AudioInput::new(
+            mic_sink,
+            self.config.input_device_id.clone(),
+        ));
+        self.mic_input = Some(mic_input);
 
         // ============================================================
         // System Audio Pipeline: SystemAudio -> LevelMeter -> SystemSwitch -> AudioBatcher -> OpusEncoder -> RealtimeFramePacker(System) -> NetworkSink
@@ -222,7 +228,7 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
         let audio_output: AudioOutput<_> = AudioOutput::new(speaker_source);
         let output_stream = audio_output.start(self.config.output_device_id.as_ref())?;
 
-        let mut streams = vec![input_stream, output_stream];
+        let mut streams = vec![output_stream];
         if let Some(sys_stream) = system_stream {
             streams.push(sys_stream);
         }
@@ -241,6 +247,7 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
         self.host_sync_shutdown.store(true, Ordering::Relaxed);
 
         self._audio_streams.clear();
+        self.mic_input = None;
         {
             let mut music_streams = self.music_streams.lock().unwrap();
             music_streams.clear();

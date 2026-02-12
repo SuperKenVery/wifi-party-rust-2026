@@ -112,7 +112,6 @@ impl MusicStreamProgress {
 /// Shared application state
 pub struct AppState {
     pub connection_status: Arc<Mutex<ConnectionStatus>>,
-    pub mic_enabled: Arc<AtomicBool>,
     pub mic_volume: Arc<Mutex<f32>>,
     pub mic_audio_level: Arc<AtomicU32>,
     pub loopback_enabled: Arc<AtomicBool>,
@@ -128,7 +127,6 @@ impl AppState {
     pub fn new(config: PartyConfig) -> Result<Arc<Self>> {
         let state = Arc::new(Self {
             connection_status: Arc::new(Mutex::new(ConnectionStatus::Disconnected)),
-            mic_enabled: Arc::new(AtomicBool::new(false)),
             mic_volume: Arc::new(Mutex::new(1.0)),
             mic_audio_level: Arc::new(AtomicU32::new(0)),
             loopback_enabled: Arc::new(AtomicBool::new(true)),
@@ -145,6 +143,25 @@ impl AppState {
         *state.party.lock().unwrap() = Some(party);
 
         Ok(state)
+    }
+
+    pub fn enable_mic(&self) -> Result<()> {
+        self.party
+            .lock()
+            .expect("Party lock poisoned")
+            .as_ref()
+            .context("Party not initialized")?
+            .mic_input()
+            .context("Mic input not initialized")?
+            .enable()
+    }
+
+    pub fn disable_mic(&self) {
+        if let Some(party) = self.party.lock().expect("Party lock poisoned").as_ref() {
+            if let Some(mic_input) = party.mic_input() {
+                mic_input.disable();
+            }
+        }
     }
 
     pub fn stream_snapshots(&self, host_id: HostId, stream_id: &str) -> Vec<StreamSnapshot> {

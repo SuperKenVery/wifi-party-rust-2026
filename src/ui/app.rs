@@ -13,7 +13,6 @@ pub fn App() -> Element {
     let state_arc = use_context::<Arc<AppState>>();
 
     let mut active_hosts = use_signal(Vec::<HostInfo>::new);
-    let mut mic_enabled = use_signal(|| false);
     let mut mic_volume = use_signal(|| 1.0f32);
     let mut mic_audio_level = use_signal(|| 0u32);
     let mut loopback_enabled = use_signal(|| false);
@@ -30,8 +29,6 @@ pub fn App() -> Element {
                 if let Ok(infos) = state.host_infos.lock() {
                     active_hosts.set(infos.clone());
                 }
-
-                mic_enabled.set(state.mic_enabled.load(std::sync::atomic::Ordering::Relaxed));
 
                 if let Ok(vol) = state.mic_volume.lock() {
                     mic_volume.set(*vol);
@@ -90,7 +87,6 @@ pub fn App() -> Element {
                 },
                 MenuSection::AudioControl => rsx! {
                     AudioControlPanel {
-                        mic_enabled: mic_enabled(),
                         mic_volume: mic_volume(),
                         mic_audio_level: mic_audio_level(),
                         loopback_enabled: loopback_enabled(),

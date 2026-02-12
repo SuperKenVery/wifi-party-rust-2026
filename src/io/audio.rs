@@ -11,7 +11,8 @@ use crate::pipeline::{Sink, Source};
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, Device, DeviceId, StreamConfig};
-use std::sync::Arc;
+use std::marker::PhantomData;
+use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
 
 fn find_device_by_id<I: Iterator<Item = Device>>(
@@ -54,27 +55,41 @@ fn get_output_device(device_id: Option<&DeviceId>) -> Result<Device> {
     }
 }
 
+pub type BoxedSink<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> =
+    Box<dyn Sink<Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>>;
+
 /// Captures audio from an input device (microphone).
-pub struct AudioInput<S> {
-    sink: Arc<S>,
+///
+/// Supports enable/disable to start/stop the device on demand.
+pub struct AudioInput<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    sink: Arc<BoxedSink<Sample, CHANNELS, SAMPLE_RATE>>,
+    device_id: Option<DeviceId>,
+    stream: Mutex<Option<cpal::Stream>>,
+    _marker: PhantomData<Sample>,
 }
 
-impl<S> AudioInput<S> {
-    pub fn new(sink: S) -> Self {
+impl<Sample: AudioSample + cpal::SizedSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    AudioInput<Sample, CHANNELS, SAMPLE_RATE>
+{
+    pub fn new<S>(sink: S, device_id: Option<DeviceId>) -> Self
+    where
+        S: Sink<Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> + 'static,
+    {
         Self {
-            sink: Arc::new(sink),
+            sink: Arc::new(Box::new(sink)),
+            device_id,
+            stream: Mutex::new(None),
+            _marker: PhantomData,
         }
     }
 
-    pub fn start<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>(
-        self,
-        device_id: Option<&DeviceId>,
-    ) -> Result<cpal::Stream>
-    where
-        Sample: AudioSample + cpal::SizedSample,
-        S: Sink<Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> + 'static,
-    {
-        let input_device = get_input_device(device_id)?;
+    pub fn enable(&self) -> Result<()> {
+        let mut stream_guard = self.stream.lock().unwrap();
+        if stream_guard.is_some() {
+            return Ok(());
+        }
+
+        let input_device = get_input_device(self.device_id.as_ref())?;
         let input_config = input_device.default_input_config()?;
         debug!("Input config: {input_config:#?}");
 
@@ -95,7 +110,7 @@ impl<S> AudioInput<S> {
             },
         };
 
-        let sink = self.sink;
+        let sink = self.sink.clone();
         let stream = input_device.build_input_stream(
             &config,
             move |data: &[Sample], _: &cpal::InputCallbackInfo| {
@@ -108,7 +123,20 @@ impl<S> AudioInput<S> {
             None,
         )?;
         stream.play()?;
-        Ok(stream)
+        info!("Microphone input enabled");
+        *stream_guard = Some(stream);
+        Ok(())
+    }
+
+    pub fn disable(&self) {
+        let mut stream_guard = self.stream.lock().unwrap();
+        if stream_guard.take().is_some() {
+            info!("Microphone input disabled");
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.stream.lock().unwrap().is_some()
     }
 }
 

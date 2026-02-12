@@ -100,7 +100,6 @@ fn device_display_name(device: &Device) -> String {
 #[allow(non_snake_case)]
 #[component]
 pub fn AudioControlPanel(
-    mic_enabled: bool,
     mic_volume: f32,
     mic_audio_level: u32,
     loopback_enabled: bool,
@@ -109,15 +108,20 @@ pub fn AudioControlPanel(
     listen_enabled: bool,
 ) -> Element {
     let state_arc = use_context::<Arc<AppState>>();
+    let mut mic_enabled = use_signal(|| false);
 
     let state_mic = state_arc.clone();
     let on_mic_toggle = move |_| {
-        let current = state_mic
-            .mic_enabled
-            .load(std::sync::atomic::Ordering::Relaxed);
-        state_mic
-            .mic_enabled
-            .store(!current, std::sync::atomic::Ordering::Relaxed);
+        let new_state = !mic_enabled();
+        if new_state {
+            if let Err(e) = state_mic.enable_mic() {
+                tracing::error!("Failed to enable mic: {}", e);
+                return;
+            }
+        } else {
+            state_mic.disable_mic();
+        }
+        mic_enabled.set(new_state);
     };
 
     let state_vol = state_arc.clone();
@@ -191,12 +195,12 @@ pub fn AudioControlPanel(
                             button {
                                 class: format!(
                                     "p-4 rounded-xl flex flex-col items-center justify-center gap-2 transition-all duration-200 border {}",
-                                    if mic_enabled { "bg-emerald-500/10 border-emerald-500/50 text-emerald-400 hover:bg-emerald-500/20" }
+                                    if mic_enabled() { "bg-emerald-500/10 border-emerald-500/50 text-emerald-400 hover:bg-emerald-500/20" }
                                     else { "bg-rose-500/10 border-rose-500/50 text-rose-400 hover:bg-rose-500/20" }
                                 ),
                                 onclick: on_mic_toggle,
-                                div { class: "text-2xl", if mic_enabled { "🎙️" } else { "🔇" } }
-                                span { class: "text-xs font-bold", if mic_enabled { "Mic On" } else { "Mic Off" } }
+                                div { class: "text-2xl", if mic_enabled() { "🎙️" } else { "🔇" } }
+                                span { class: "text-xs font-bold", if mic_enabled() { "Mic On" } else { "Mic Off" } }
                             }
 
                             button {
