@@ -84,7 +84,7 @@ impl SyncedFrame {
 }
 
 /// Playback progress for a synced stream (output type for GUI).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SyncedStreamProgress {
     pub frames_played: u64,
     pub buffered_frames: u64,
@@ -99,6 +99,17 @@ pub struct SyncedStreamState {
     pub meta: SyncedStreamMeta,
     pub progress: SyncedStreamProgress,
     pub is_local_sender: bool,
+}
+
+impl PartialEq for SyncedStreamState {
+    fn eq(&self, other: &Self) -> bool {
+        self.stream_id == other.stream_id
+            && self.meta.stream_id == other.meta.stream_id
+            && self.meta.file_name == other.meta.file_name
+            && self.meta.total_frames == other.meta.total_frames
+            && self.progress == other.progress
+            && self.is_local_sender == other.is_local_sender
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

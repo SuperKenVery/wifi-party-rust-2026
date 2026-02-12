@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use super::sidebar::{MenuSection, SidebarMenu};
 use super::sidebar_panels::{AudioControlPanel, DebugPanel, ParticipantsPanel, ShareMusicPanel};
-use crate::party::NtpDebugInfo;
+use crate::party::{NtpDebugInfo, SyncedStreamState};
 
 #[allow(non_snake_case)]
 pub fn App() -> Element {
@@ -21,6 +21,7 @@ pub fn App() -> Element {
     let mut listen_enabled = use_signal(|| true);
     let mut selected_section = use_signal(|| MenuSection::Senders);
     let mut ntp_info = use_signal(|| None::<NtpDebugInfo>);
+    let mut synced_streams = use_signal(Vec::<SyncedStreamState>::new);
 
     use_effect(move || {
         let state = state_arc.clone();
@@ -64,6 +65,8 @@ pub fn App() -> Element {
 
                 ntp_info.set(state.ntp_debug_info());
 
+                synced_streams.set(state.synced_stream_states());
+
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
         });
@@ -96,7 +99,7 @@ pub fn App() -> Element {
                     }
                 },
                 MenuSection::ShareMusic => rsx! {
-                    ShareMusicPanel {}
+                    ShareMusicPanel { active_streams: synced_streams() }
                 },
                 MenuSection::Debug => rsx! {
                     DebugPanel { ntp_info: ntp_info() }

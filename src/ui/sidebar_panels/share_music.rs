@@ -1,3 +1,4 @@
+use crate::party::SyncedStreamState;
 use crate::state::AppState;
 use dioxus::prelude::*;
 use std::sync::Arc;
@@ -21,7 +22,7 @@ struct ReceiverProgressInfo {
 
 #[allow(non_snake_case)]
 #[component]
-pub fn ShareMusicPanel() -> Element {
+pub fn ShareMusicPanel(active_streams: Vec<SyncedStreamState>) -> Element {
     let state_arc = use_context::<Arc<AppState>>();
     let mut is_picking = use_signal(|| false);
 
@@ -45,9 +46,6 @@ pub fn ShareMusicPanel() -> Element {
         .streaming_total
         .load(std::sync::atomic::Ordering::Relaxed);
     let file_name = progress.file_name.lock().unwrap().clone();
-
-    // Get active streams for playback control
-    let active_streams = state_arc.synced_stream_states();
 
     let is_busy = is_encoding || is_streaming;
 
