@@ -1,63 +1,58 @@
 //! Music streaming pipeline for synced playback.
 //!
 //! Provides [`MusicStream`] which handles:
-//! - On-the-fly decoding of audio files
-//! - Fast-than-realtime encoding and sending (2x speed)
+//! - Reading compressed audio packets from files (no re-encoding)
+//! - Fast-than-realtime streaming (2x speed)
 //! - Redundant packet transmission (2x redundancy)
 //! - Handling retransmission requests from peers
 //! - Playback control (Play, Pause, Seek)
 
 use std::collections::VecDeque;
+use std::fs::File;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use dashmap::DashMap;
+use symphonia::core::codecs::CODEC_TYPE_NULL;
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::MetadataOptions;
+use symphonia::core::probe::Hint;
 use tracing::{info, warn};
 
 use crate::audio::AudioSample;
-use crate::audio::file::AudioFileReader;
-use crate::audio::opus::{OpusEncoder, OpusPacket};
+use crate::audio::symphonia_compat::WireCodecParams;
 use crate::io::NetworkSender;
 use crate::party::ntp::NtpService;
 use crate::party::stream::{NetworkPacket, SyncedControl};
 use crate::party::sync_stream::{
-    SyncedAudioStream, SyncedFrame, SyncedStreamId, SyncedStreamMeta, new_stream_id,
+    RawPacket, SyncedAudioStreamManager, SyncedFrame, SyncedStreamId, SyncedStreamMeta,
+    new_stream_id,
 };
-use crate::pipeline::{Node, Sink};
+use crate::pipeline::Sink;
 use crate::state::MusicStreamProgress;
 
 const LOCAL_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-const FRAME_DURATION_US: u64 = 20_000; // 20ms
-const SEND_RATE_MULTIPLIER: u32 = 2; // Send at 2x speed
-const REDUNDANCY_COUNT: usize = 2; // Send every packet twice
-
-pub struct MusicStreamInfo {
-    pub stream_id: SyncedStreamId,
-    pub file_name: String,
-    pub total_frames: u64,
-    pub frames_sent: u64,
-    pub is_complete: bool,
-}
+const SEND_RATE_MULTIPLIER: u32 = 2;
+const REDUNDANCY_COUNT: usize = 2;
 
 enum MusicCommand {
     Retransmit(Vec<u64>),
     Pause,
     Resume,
-    Seek(u64), // position in ms
+    Seek(u64),
 }
 
+/// Handle for controlling an active music stream.
+/// Created by `MusicStream::start()`, kept by caller.
 pub struct MusicStream {
     stream_id: SyncedStreamId,
-    file_name: String,
-    total_frames: Arc<AtomicU64>,
-    frames_encoded: Arc<AtomicU64>,
     is_running: Arc<AtomicBool>,
-    is_complete: Arc<AtomicBool>,
     command_tx: std::sync::mpsc::Sender<MusicCommand>,
     _handle: Option<thread::JoinHandle<()>>,
 }
@@ -67,7 +62,7 @@ impl MusicStream {
         path: PathBuf,
         ntp_service: Arc<NtpService>,
         network_sender: NetworkSender,
-        synced_stream: Arc<SyncedAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
+        synced_stream: Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>,
         progress: Arc<MusicStreamProgress>,
     ) -> Result<Self> {
         let file_name = path
@@ -78,13 +73,13 @@ impl MusicStream {
 
         info!("Starting music stream for: {}", file_name);
 
-        let stream_id = new_stream_id();
-        let total_frames = Arc::new(AtomicU64::new(0));
-        let frames_encoded = Arc::new(AtomicU64::new(0));
-        let is_running = Arc::new(AtomicBool::new(true));
-        let is_complete = Arc::new(AtomicBool::new(false));
-        let vault = Arc::new(DashMap::new());
+        let source = AudioSource::open(&path)?;
+        let codec_params = WireCodecParams::from_symphonia(&source.codec_params())
+            .ok_or_else(|| anyhow!("Unsupported codec"))?;
 
+        let stream_id = new_stream_id();
+        let is_running = Arc::new(AtomicBool::new(true));
+        let vault: Arc<DashMap<u64, RawPacket>> = Arc::new(DashMap::new());
         let (command_tx, command_rx) = std::sync::mpsc::channel();
 
         progress.is_streaming.store(true, Ordering::Relaxed);
@@ -92,11 +87,12 @@ impl MusicStream {
 
         let meta = SyncedStreamMeta {
             stream_id,
-            file_name: file_name.clone(),
+            file_name,
             total_frames: 0,
+            codec_params,
         };
         network_sender.push(NetworkPacket::SyncedMeta(meta.clone()));
-        synced_stream.receive_meta(LOCAL_ADDR, meta);
+        synced_stream.receive_meta(LOCAL_ADDR, meta.clone());
 
         let start_at = ntp_service.party_now() + 500_000;
         let control = SyncedControl::Start {
@@ -105,23 +101,26 @@ impl MusicStream {
             seq: 1,
         };
         network_sender.push(NetworkPacket::SyncedControl(control.clone()));
-        synced_stream.receive_control(LOCAL_ADDR, control.clone());
+        synced_stream.receive_control(LOCAL_ADDR, control);
 
         let ctx = StreamContext {
-            path,
-            stream_id,
-            file_name: file_name.clone(),
+            source,
+            meta,
             ntp_service,
             network_sender,
             synced_stream,
             progress,
-            total_frames: total_frames.clone(),
-            frames_encoded: frames_encoded.clone(),
             is_running: is_running.clone(),
-            is_complete: is_complete.clone(),
             vault,
             command_rx,
-            initial_start_at: start_at,
+            frames_read: 0,
+            is_complete: false,
+            next_seq_to_send: 1,
+            last_send_time: Instant::now(),
+            retransmit_queue: VecDeque::new(),
+            last_pause_seq: 1,
+            last_start_party_time: start_at,
+            last_start_seq: 1,
         };
 
         let handle = thread::spawn(move || {
@@ -132,11 +131,7 @@ impl MusicStream {
 
         Ok(Self {
             stream_id,
-            file_name,
-            total_frames,
-            frames_encoded,
             is_running,
-            is_complete,
             command_tx,
             _handle: Some(handle),
         })
@@ -168,257 +163,148 @@ impl MusicStream {
         self.is_running.store(false, Ordering::Relaxed);
     }
 
-    pub fn info(&self) -> MusicStreamInfo {
-        MusicStreamInfo {
-            stream_id: self.stream_id,
-            file_name: self.file_name.clone(),
-            total_frames: self.total_frames.load(Ordering::Relaxed),
-            frames_sent: self.frames_encoded.load(Ordering::Relaxed),
-            is_complete: self.is_complete.load(Ordering::Relaxed),
-        }
-    }
-
-    pub fn is_complete(&self) -> bool {
-        self.is_complete.load(Ordering::Relaxed)
-    }
-
     pub fn stream_id(&self) -> SyncedStreamId {
         self.stream_id
     }
 }
 
+impl Drop for MusicStream {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Audio source - wraps symphonia format reader for a single track.
+struct AudioSource {
+    format: Box<dyn FormatReader>,
+    track_id: u32,
+    duration_secs: Option<f64>,
+}
+
+impl AudioSource {
+    fn open(path: &PathBuf) -> Result<Self> {
+        let file = File::open(path).context("Failed to open audio file")?;
+        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+        let mut hint = Hint::new();
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            hint.with_extension(ext);
+        }
+
+        let probed = symphonia::default::get_probe()
+            .format(
+                &hint,
+                mss,
+                &FormatOptions::default(),
+                &MetadataOptions::default(),
+            )
+            .context("Failed to probe audio format")?;
+
+        let format = probed.format;
+
+        let track = format
+            .tracks()
+            .iter()
+            .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+            .ok_or_else(|| anyhow!("No supported audio track found"))?;
+
+        let track_id = track.id;
+        let sample_rate = track
+            .codec_params
+            .sample_rate
+            .ok_or_else(|| anyhow!("Unknown sample rate"))?;
+
+        let duration_secs = track
+            .codec_params
+            .n_frames
+            .map(|frames| frames as f64 / sample_rate as f64);
+
+        Ok(Self {
+            format,
+            track_id,
+            duration_secs,
+        })
+    }
+
+    fn codec_params(&self) -> &symphonia::core::codecs::CodecParameters {
+        &self.format.tracks()[0].codec_params
+    }
+
+    fn next_packet(&mut self) -> Result<Option<RawPacket>, symphonia::core::errors::Error> {
+        loop {
+            match self.format.next_packet() {
+                Ok(packet) => {
+                    if packet.track_id() != self.track_id {
+                        continue;
+                    }
+                    return Ok(Some(RawPacket {
+                        dur: packet.dur as u32,
+                        data: packet.data.to_vec(),
+                    }));
+                }
+                Err(symphonia::core::errors::Error::IoError(e))
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    return Ok(None);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    fn seek(&mut self, timestamp: u64) -> Result<(), symphonia::core::errors::Error> {
+        self.format.seek(
+            SeekMode::Accurate,
+            SeekTo::TimeStamp {
+                ts: timestamp,
+                track_id: self.track_id,
+            },
+        )?;
+        Ok(())
+    }
+}
+
+/// Worker context for the streaming thread.
+/// Moved into the thread and consumed by `run()`.
 struct StreamContext<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    path: PathBuf,
-    stream_id: SyncedStreamId,
-    file_name: String,
+    source: AudioSource,
+    meta: SyncedStreamMeta,
+
     ntp_service: Arc<NtpService>,
     network_sender: NetworkSender,
-    synced_stream: Arc<SyncedAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
+    synced_stream: Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>,
     progress: Arc<MusicStreamProgress>,
-    total_frames: Arc<AtomicU64>,
-    frames_encoded: Arc<AtomicU64>,
+
     is_running: Arc<AtomicBool>,
-    is_complete: Arc<AtomicBool>,
-    vault: Arc<DashMap<u64, OpusPacket>>,
+    vault: Arc<DashMap<u64, RawPacket>>,
     command_rx: std::sync::mpsc::Receiver<MusicCommand>,
-    initial_start_at: u64,
+
+    frames_read: u64,
+    is_complete: bool,
+    next_seq_to_send: u64,
+    last_send_time: Instant,
+    retransmit_queue: VecDeque<u64>,
+    last_pause_seq: u64,
+    last_start_party_time: u64,
+    last_start_seq: u64,
 }
 
 impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u32>
     StreamContext<Sample, CHANNELS, SAMPLE_RATE>
 {
-    fn run(self) -> Result<()> {
-        let mut reader = AudioFileReader::open(&self.path)?;
-        let encoder = OpusEncoder::<Sample, CHANNELS, SAMPLE_RATE>::new()?;
-
-        // Calculate total frames if possible and update meta
-        if let Some(duration) = reader.info.duration_secs {
-            let total = (duration * 1_000_000.0 / FRAME_DURATION_US as f64) as u64;
-            self.total_frames.store(total, Ordering::Relaxed);
-            self.progress.encoding_total.store(total, Ordering::Relaxed);
-            self.progress
-                .streaming_total
-                .store(total, Ordering::Relaxed);
-
-            let meta = SyncedStreamMeta {
-                stream_id: self.stream_id,
-                file_name: self.file_name.clone(),
-                total_frames: total,
-            };
-            self.network_sender
-                .push(NetworkPacket::SyncedMeta(meta.clone()));
-            self.synced_stream.receive_meta(LOCAL_ADDR, meta);
-        }
-
+    fn run(mut self) -> Result<()> {
+        self.init_with_duration();
         self.progress.is_encoding.store(true, Ordering::Relaxed);
 
-        let mut next_seq_to_send = 1u64;
-        let mut last_send_time = Instant::now();
-        let mut retransmit_queue = VecDeque::<u64>::new();
-
-        let mut last_pause_seq = 1u64;
-        let mut last_start_party_time = self.initial_start_at;
-        let mut last_start_seq = 1u64;
-        let mut _is_playing = true;
-
         while self.is_running.load(Ordering::Relaxed) {
-            // 0. Conflict Detection
-            // If any stream exists with a different ID, someone else (or a newer song) has taken over
-            if self
-                .synced_stream
-                .active_streams()
-                .iter()
-                .any(|s| s.stream_id != self.stream_id)
-            {
-                info!(
-                    "Another stream detected, stopping our stream {}",
-                    self.stream_id
-                );
+            if self.should_stop_for_other_stream() {
                 break;
             }
 
-            // 1. Process Commands
-            while let Ok(cmd) = self.command_rx.try_recv() {
-                match cmd {
-                    MusicCommand::Retransmit(seqs) => {
-                        retransmit_queue.extend(seqs);
-                    }
-                    MusicCommand::Pause => {
-                        let control = SyncedControl::Pause {
-                            stream_id: self.stream_id,
-                        };
-                        self.network_sender
-                            .push(NetworkPacket::SyncedControl(control.clone()));
-                        self.synced_stream.receive_control(LOCAL_ADDR, control);
-
-                        // Calculate where we paused
-                        let party_now = self.ntp_service.party_now();
-                        if party_now > last_start_party_time {
-                            let elapsed = party_now - last_start_party_time;
-                            last_pause_seq = last_start_seq + (elapsed / FRAME_DURATION_US);
-                        } else {
-                            last_pause_seq = last_start_seq;
-                        }
-                        _is_playing = false;
-                    }
-                    MusicCommand::Resume => {
-                        let resume_at = self.ntp_service.party_now() + 200_000;
-                        let control = SyncedControl::Start {
-                            stream_id: self.stream_id,
-                            party_clock_time: resume_at,
-                            seq: last_pause_seq,
-                        };
-                        self.network_sender
-                            .push(NetworkPacket::SyncedControl(control.clone()));
-                        self.synced_stream.receive_control(LOCAL_ADDR, control);
-
-                        last_start_party_time = resume_at;
-                        last_start_seq = last_pause_seq;
-                        _is_playing = true;
-                    }
-                    MusicCommand::Seek(pos_ms) => {
-                        let seek_at = self.ntp_service.party_now() + 300_000;
-                        let seq = ((pos_ms * 1000) / FRAME_DURATION_US).max(1);
-
-                        // If we haven't encoded this far yet, seek the reader
-                        let current_encoded = self.frames_encoded.load(Ordering::Relaxed);
-                        if seq > current_encoded {
-                            let seek_micros = (seq.saturating_sub(1)) * FRAME_DURATION_US;
-                            if let Err(e) = reader.seek_micros(seek_micros) {
-                                warn!(
-                                    "Failed to seek reader to {} micros (seq {}): {}",
-                                    seek_micros, seq, e
-                                );
-                            } else {
-                                info!("Seeked reader to {} micros (seq {})", seek_micros, seq);
-                                self.frames_encoded.store(seq - 1, Ordering::Relaxed);
-                                self.is_complete.store(false, Ordering::Relaxed);
-                                self.progress.is_encoding.store(true, Ordering::Relaxed);
-                                // Note: This might leave gaps in the vault if we seek forward,
-                                // but the protocol handles missing frames via retransmission
-                                // or simply skipping them if they never arrive.
-                            }
-                        }
-
-                        let control = SyncedControl::Start {
-                            stream_id: self.stream_id,
-                            party_clock_time: seek_at,
-                            seq,
-                        };
-                        self.network_sender
-                            .push(NetworkPacket::SyncedControl(control.clone()));
-                        self.synced_stream.receive_control(LOCAL_ADDR, control);
-
-                        last_start_party_time = seek_at;
-                        last_start_seq = seq;
-                        last_pause_seq = seq;
-                        _is_playing = true;
-
-                        // Reset next_seq_to_send to the seek position to prioritize sending new frames
-                        next_seq_to_send = seq;
-                    }
-                }
-            }
-
-            // 2. Decode/Encode on-the-fly (as fast as possible to fill the vault)
-            if !self.is_complete.load(Ordering::Relaxed) {
-                for _ in 0..100 {
-                    match reader.next_buffer::<Sample, CHANNELS, SAMPLE_RATE>()? {
-                        Some(buffer) => {
-                            if let Some(packet) = encoder.process(buffer) {
-                                let seq = self.frames_encoded.fetch_add(1, Ordering::Relaxed) + 1;
-                                self.vault.insert(seq, packet);
-                                self.progress.encoding_current.store(seq, Ordering::Relaxed);
-                            }
-                        }
-                        None => {
-                            self.is_complete.store(true, Ordering::Relaxed);
-                            self.progress.is_encoding.store(false, Ordering::Relaxed);
-                            let final_total = self.frames_encoded.load(Ordering::Relaxed);
-                            self.total_frames.store(final_total, Ordering::Relaxed);
-                            // Update meta with final total
-                            let meta = SyncedStreamMeta {
-                                stream_id: self.stream_id,
-                                file_name: self.file_name.clone(),
-                                total_frames: final_total,
-                            };
-                            self.network_sender.push(NetworkPacket::SyncedMeta(meta));
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // 3. Handle Retransmissions (High Priority)
-            for _ in 0..10 {
-                if let Some(seq) = retransmit_queue.pop_front() {
-                    if let Some(packet) = self.vault.get(&seq) {
-                        let frame = SyncedFrame::new(self.stream_id, seq, packet.value().clone());
-                        self.network_sender.push(NetworkPacket::Synced(frame));
-                    }
-                } else {
-                    break;
-                }
-            }
-
-            // 4. Send New Frames (2x speed with redundancy)
-            let now = Instant::now();
-            let elapsed_us = now.duration_since(last_send_time).as_micros() as u64;
-            let frames_to_send = (elapsed_us * SEND_RATE_MULTIPLIER as u64) / FRAME_DURATION_US;
-
-            if frames_to_send > 0 {
-                for _ in 0..frames_to_send {
-                    if let Some(packet) = self.vault.get(&next_seq_to_send) {
-                        let frame = SyncedFrame::new(
-                            self.stream_id,
-                            next_seq_to_send,
-                            packet.value().clone(),
-                        );
-
-                        // Send with redundancy
-                        for _ in 0..REDUNDANCY_COUNT {
-                            self.network_sender
-                                .push(NetworkPacket::Synced(frame.clone()));
-                        }
-
-                        // Also feed local stream
-                        self.synced_stream.receive(LOCAL_ADDR, frame);
-
-                        self.progress
-                            .streaming_current
-                            .store(next_seq_to_send, Ordering::Relaxed);
-                        next_seq_to_send += 1;
-                    } else if self.is_complete.load(Ordering::Relaxed)
-                        && next_seq_to_send > self.total_frames.load(Ordering::Relaxed)
-                    {
-                        break;
-                    } else {
-                        // Waiting for encoder
-                        break;
-                    }
-                }
-                last_send_time = now;
-            }
+            self.handle_commands();
+            self.read_packets();
+            self.send_retransmissions();
+            self.send_packets();
 
             thread::sleep(Duration::from_millis(10));
         }
@@ -426,10 +312,217 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
         self.progress.reset();
         Ok(())
     }
-}
 
-impl Drop for MusicStream {
-    fn drop(&mut self) {
-        self.stop();
+    fn sample_rate(&self) -> u32 {
+        self.meta.codec_params.sample_rate
+    }
+
+    fn init_with_duration(&mut self) {
+        let Some(duration) = self.source.duration_secs else {
+            return;
+        };
+
+        let est_packets = (duration * self.sample_rate() as f64 / 1152.0) as u64;
+        self.meta.total_frames = est_packets;
+        self.progress
+            .encoding_total
+            .store(est_packets, Ordering::Relaxed);
+        self.progress
+            .streaming_total
+            .store(est_packets, Ordering::Relaxed);
+
+        self.network_sender
+            .push(NetworkPacket::SyncedMeta(self.meta.clone()));
+        self.synced_stream
+            .receive_meta(LOCAL_ADDR, self.meta.clone());
+    }
+
+    fn should_stop_for_other_stream(&self) -> bool {
+        let dominated = self
+            .synced_stream
+            .active_streams()
+            .iter()
+            .any(|s| s.stream_id != self.meta.stream_id);
+        if dominated {
+            info!(
+                "Another stream detected, stopping our stream {}",
+                self.meta.stream_id
+            );
+        }
+        dominated
+    }
+
+    fn handle_commands(&mut self) {
+        while let Ok(cmd) = self.command_rx.try_recv() {
+            match cmd {
+                MusicCommand::Retransmit(seqs) => {
+                    self.retransmit_queue.extend(seqs);
+                }
+                MusicCommand::Pause => self.handle_pause(),
+                MusicCommand::Resume => self.handle_resume(),
+                MusicCommand::Seek(pos_ms) => self.handle_seek(pos_ms),
+            }
+        }
+    }
+
+    fn handle_pause(&mut self) {
+        let control = SyncedControl::Pause {
+            stream_id: self.meta.stream_id,
+        };
+        self.network_sender
+            .push(NetworkPacket::SyncedControl(control.clone()));
+        self.synced_stream.receive_control(LOCAL_ADDR, control);
+
+        let party_now = self.ntp_service.party_now();
+        if party_now > self.last_start_party_time {
+            let elapsed_us = party_now - self.last_start_party_time;
+            let elapsed_samples = elapsed_us * self.sample_rate() as u64 / 1_000_000;
+            self.last_pause_seq = self.find_seq_at_samples(self.last_start_seq, elapsed_samples);
+        } else {
+            self.last_pause_seq = self.last_start_seq;
+        }
+    }
+
+    fn handle_resume(&mut self) {
+        let resume_at = self.ntp_service.party_now() + 200_000;
+        let control = SyncedControl::Start {
+            stream_id: self.meta.stream_id,
+            party_clock_time: resume_at,
+            seq: self.last_pause_seq,
+        };
+        self.network_sender
+            .push(NetworkPacket::SyncedControl(control.clone()));
+        self.synced_stream.receive_control(LOCAL_ADDR, control);
+
+        self.last_start_party_time = resume_at;
+        self.last_start_seq = self.last_pause_seq;
+    }
+
+    fn handle_seek(&mut self, pos_ms: u64) {
+        let seek_at = self.ntp_service.party_now() + 300_000;
+        let target_samples = pos_ms * self.sample_rate() as u64 / 1000;
+        let seq = self.find_seq_at_samples(1, target_samples);
+
+        // If seeking beyond what we've read, seek the format reader
+        if seq > self.frames_read {
+            if let Err(e) = self.source.seek(target_samples) {
+                warn!("Failed to seek: {}", e);
+            } else {
+                info!("Seeked to {} samples (seq {})", target_samples, seq);
+                self.frames_read = seq - 1;
+                self.is_complete = false;
+                self.progress.is_encoding.store(true, Ordering::Relaxed);
+            }
+        }
+
+        let control = SyncedControl::Start {
+            stream_id: self.meta.stream_id,
+            party_clock_time: seek_at,
+            seq,
+        };
+        self.network_sender
+            .push(NetworkPacket::SyncedControl(control.clone()));
+        self.synced_stream.receive_control(LOCAL_ADDR, control);
+
+        self.last_start_party_time = seek_at;
+        self.last_start_seq = seq;
+        self.last_pause_seq = seq;
+        self.next_seq_to_send = seq;
+    }
+
+    fn find_seq_at_samples(&self, start_seq: u64, target_samples: u64) -> u64 {
+        let mut cum = 0u64;
+        let mut seq = start_seq;
+        while let Some(pkt) = self.vault.get(&seq) {
+            if cum >= target_samples {
+                break;
+            }
+            cum += pkt.dur as u64;
+            seq += 1;
+        }
+        seq
+    }
+
+    fn read_packets(&mut self) {
+        if self.is_complete {
+            return;
+        }
+
+        for _ in 0..100 {
+            match self.source.next_packet() {
+                Ok(Some(raw)) => {
+                    self.frames_read += 1;
+                    self.vault.insert(self.frames_read, raw);
+                    self.progress
+                        .encoding_current
+                        .store(self.frames_read, Ordering::Relaxed);
+                }
+                Ok(None) => {
+                    // EOF
+                    self.is_complete = true;
+                    self.progress.is_encoding.store(false, Ordering::Relaxed);
+                    self.meta.total_frames = self.frames_read;
+                    self.network_sender
+                        .push(NetworkPacket::SyncedMeta(self.meta.clone()));
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    fn send_retransmissions(&mut self) {
+        for _ in 0..10 {
+            let Some(seq) = self.retransmit_queue.pop_front() else {
+                break;
+            };
+            if let Some(packet) = self.vault.get(&seq) {
+                let frame = SyncedFrame::new(
+                    self.meta.stream_id,
+                    seq,
+                    packet.dur,
+                    packet.data.clone(),
+                );
+                self.network_sender.push(NetworkPacket::Synced(frame));
+            }
+        }
+    }
+
+    fn send_packets(&mut self) {
+        let now = Instant::now();
+        let elapsed_us = now.duration_since(self.last_send_time).as_micros() as u64;
+        let avg_frame_dur_us = 20_000u64;
+        let frames_to_send = (elapsed_us * SEND_RATE_MULTIPLIER as u64) / avg_frame_dur_us;
+
+        if frames_to_send == 0 {
+            return;
+        }
+
+        for _ in 0..frames_to_send {
+            if let Some(packet) = self.vault.get(&self.next_seq_to_send) {
+                let frame = SyncedFrame::new(
+                    self.meta.stream_id,
+                    self.next_seq_to_send,
+                    packet.dur,
+                    packet.data.clone(),
+                );
+
+                for _ in 0..REDUNDANCY_COUNT {
+                    self.network_sender
+                        .push(NetworkPacket::Synced(frame.clone()));
+                }
+                self.synced_stream.receive(LOCAL_ADDR, frame);
+
+                self.progress
+                    .streaming_current
+                    .store(self.next_seq_to_send, Ordering::Relaxed);
+                self.next_seq_to_send += 1;
+            } else if self.is_complete && self.next_seq_to_send > self.meta.total_frames {
+                break;
+            } else {
+                break;
+            }
+        }
+        self.last_send_time = now;
     }
 }

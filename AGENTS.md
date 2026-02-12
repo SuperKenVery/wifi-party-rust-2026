@@ -26,8 +26,8 @@ Core audio types and processing nodes.
 Files:
 - `sample.rs` - `AudioSample` trait for sample types (f32, i16)
 - `frame.rs` - `AudioBuffer` (raw PCM) and `AudioFrame` (buffer + sequence number)
-- `opus.rs` - Opus encoder/decoder with FEC
-- `file.rs` - Audio file decoding via symphonia
+- `opus.rs` - Opus encoder/decoder with FEC (used for realtime mic/system audio)
+- `symphonia_compat.rs` - Symphonia compatibility layer: `WireCodecType`, `WireCodecParams` for network serialization
 
 Subdirectories:
 - `buffers/` - Buffer implementations
@@ -135,8 +135,8 @@ Multicast addresses:
 
 Packet types (serialized with rkyv):
 - `Realtime` - Opus audio for realtime streams (mic/system)
-- `Synced` - Opus audio for synchronized music
-- `SyncedMeta` - Music stream metadata
+- `Synced` - Original codec audio for synchronized music (pass-through, no re-encoding)
+- `SyncedMeta` - Music stream metadata (includes `WireCodecParams` for receiver decoding)
 - `SyncedControl` - Play/pause/seek commands
 - `RequestFrames` - Retransmission requests
 - `Ntp` - Time sync messages
@@ -158,6 +158,8 @@ Maintains per-host, per-stream JitterBuffers. Creates buffer on first packet fro
 ### SyncedAudioStream (`src/party/sync_stream.rs`)
 
 For synchronized music playback. Uses NTP time to schedule frame playback. Supports retransmission requests for missing frames.
+
+Key design: No re-encoding. Raw compressed packets from the original audio file are forwarded over the network. Receiver creates a symphonia decoder based on `WireCodecParams` from metadata.
 
 ### Party (`src/party/party.rs`)
 

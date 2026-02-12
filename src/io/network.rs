@@ -32,7 +32,7 @@ use tracing::{error, info, warn};
 
 use crate::party::ntp::NtpService;
 use crate::party::stream::NetworkPacket;
-use crate::party::sync_stream::SyncedAudioStream;
+use crate::party::sync_stream::SyncedAudioStreamManager;
 use crate::pipeline::Sink;
 use crate::state::{AppState, ConnectionStatus};
 
@@ -117,7 +117,7 @@ pub struct NetworkReceiver<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32
     state: Arc<AppState>,
     network_sender: NetworkSender,
     realtime_stream: Arc<crate::party::stream::RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
-    synced_stream: Arc<SyncedAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
+    synced_stream: Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>,
     ntp_service: Arc<NtpService>,
     local_ips: Vec<std::net::IpAddr>,
     shutdown_flag: Arc<AtomicBool>,
@@ -133,7 +133,7 @@ impl<Sample: crate::audio::AudioSample, const CHANNELS: usize, const SAMPLE_RATE
         realtime_stream: Arc<
             crate::party::stream::RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>,
         >,
-        synced_stream: Arc<SyncedAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
+        synced_stream: Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>,
         ntp_service: Arc<NtpService>,
         local_ips: Vec<std::net::IpAddr>,
         shutdown_flag: Arc<AtomicBool>,

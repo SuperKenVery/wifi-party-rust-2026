@@ -19,20 +19,20 @@ use crate::pipeline::Sink;
 use crate::state::{AppState, HostId, HostInfo, MusicStreamProgress, StreamInfo};
 
 use super::combinator::{BoxedSource, Mixer, Tee};
-use crate::pipeline::Source;
 use super::config::PartyConfig;
 use super::music::MusicStream;
 use super::network::NetworkNode;
 use super::ntp::NtpService;
 use super::stream::{RealtimeAudioStream, RealtimeFramePacker, RealtimeStreamId, StreamSnapshot};
-use super::sync_stream::{SyncedAudioStream, SyncedStreamState};
+use super::sync_stream::{SyncedAudioStreamManager, SyncedStreamState};
+use crate::pipeline::Source;
 
 pub struct Party<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     state: Arc<AppState>,
     config: PartyConfig,
     network_node: NetworkNode<Sample, CHANNELS, SAMPLE_RATE>,
     realtime_stream: Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
-    synced_stream: Option<Arc<SyncedAudioStream<Sample, CHANNELS, SAMPLE_RATE>>>,
+    synced_stream: Option<Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>>,
     ntp_service: Option<Arc<NtpService>>,
     network_sender: Option<NetworkSender>,
     music_streams: Mutex<Vec<MusicStream>>,
@@ -210,9 +210,8 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
         //                  + SyncedAudioStream (music) + loopback_buffer -> Speaker
         // listen_enabled controls whether network audio (realtime + synced) is played
         // ============================================================
-        let listen_switch = Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(
-            self.state.listen_enabled.clone(),
-        );
+        let listen_switch =
+            Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(self.state.listen_enabled.clone());
         let sources: Vec<BoxedSource<Sample, CHANNELS, SAMPLE_RATE>> = vec![
             Box::new(realtime_stream.give_data_to(listen_switch.clone())),
             Box::new(synced_stream.give_data_to(listen_switch)),
@@ -291,15 +290,9 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
         )?;
 
         let mut music_streams = self.music_streams.lock().unwrap();
-        music_streams.retain(|s| !s.is_complete());
         music_streams.push(music_stream);
 
         Ok(())
-    }
-
-    pub fn active_music_streams(&self) -> Vec<super::music::MusicStreamInfo> {
-        let music_streams = self.music_streams.lock().unwrap();
-        music_streams.iter().map(|s| s.info()).collect()
     }
 
     fn start_host_sync_task(&self) {

@@ -26,10 +26,10 @@
 
 pub mod buffers;
 pub mod effects;
-pub mod file;
 pub mod frame;
 pub mod opus;
 pub mod sample;
+pub mod symphonia_compat;
 
 pub use buffers::{AudioBatcher, JitterBuffer, PullSnapshot, SimpleBuffer};
 pub use effects::{Gain, LevelMeter};

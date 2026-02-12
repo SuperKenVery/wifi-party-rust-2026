@@ -172,38 +172,40 @@ pub fn ShareMusicPanel() -> Element {
                                                 if stream.is_local_sender { "(Sender)" } else { "(Receiver)" }
                                             }
                                         }
-                                        if let Some(meta) = &stream.meta {
-                                            p {
-                                                class: "text-sm text-emerald-400/80 mb-2 truncate",
-                                                "{meta.file_name}"
-                                            }
-
-                                            {
-                                                let frames_played = stream.progress.frames_played;
-
-                                                if stream.is_local_sender {
-                                                    let total = streaming_total.max(meta.total_frames).max(1);
-                                                    let sender_info = SenderProgressInfo {
-                                                        frames_sent: streaming_current,
-                                                        frames_encoded: encoding_current,
-                                                        total_frames: total,
-                                                        frames_played,
-                                                    };
-                                                    rsx! { SenderProgressBar { info: sender_info } }
-                                                } else {
-                                                    let total = meta.total_frames.max(1);
-                                                    let receiver_info = ReceiverProgressInfo {
-                                                        frames_received: stream.progress.buffered_frames,
-                                                        highest_seq: stream.progress.highest_seq_received,
-                                                        total_frames: total,
-                                                        frames_played,
-                                                    };
-                                                    rsx! { ReceiverProgressBar { info: receiver_info } }
+                                        {
+                                            let meta = &stream.meta;
+                                            rsx! {
+                                                p {
+                                                    class: "text-sm text-emerald-400/80 mb-2 truncate",
+                                                    "{meta.file_name}"
                                                 }
-                                            }
 
-                                            // Controls
-                                            div {
+                                                {
+                                                    let frames_played = stream.progress.frames_played;
+
+                                                    if stream.is_local_sender {
+                                                        let total = streaming_total.max(meta.total_frames).max(1);
+                                                        let sender_info = SenderProgressInfo {
+                                                            frames_sent: streaming_current,
+                                                            frames_encoded: encoding_current,
+                                                            total_frames: total,
+                                                            frames_played,
+                                                        };
+                                                        rsx! { SenderProgressBar { info: sender_info } }
+                                                    } else {
+                                                        let total = meta.total_frames.max(1);
+                                                        let receiver_info = ReceiverProgressInfo {
+                                                            frames_received: stream.progress.buffered_frames,
+                                                            highest_seq: stream.progress.highest_seq_received,
+                                                            total_frames: total,
+                                                            frames_played,
+                                                        };
+                                                        rsx! { ReceiverProgressBar { info: receiver_info } }
+                                                    }
+                                                }
+
+                                                // Controls
+                                                div {
                                                 class: "flex items-center justify-center gap-4 mt-4",
                                                 button {
                                                     class: "p-2 rounded-full hover:bg-emerald-500/20 text-emerald-400 transition-colors",
@@ -245,9 +247,8 @@ pub fn ShareMusicPanel() -> Element {
                                                     },
                                                     "⏩"
                                                 }
+                                                }
                                             }
-
-
                                         }
                                     }
                                 }

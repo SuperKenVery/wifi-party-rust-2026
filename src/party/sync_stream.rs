@@ -12,14 +12,14 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use rkyv::{Archive, Deserialize, Serialize};
-use tracing::info;
+use symphonia::core::codecs::DecoderOptions;
+use tracing::{error, info};
 
 use crate::audio::AudioSample;
 use crate::audio::frame::AudioBuffer;
-use crate::audio::opus::OpusPacket;
+use crate::audio::symphonia_compat::{WireCodecParams, extract_samples};
 use crate::pipeline::Source;
 
-const SYNCED_BUFFER_CAPACITY: usize = 512;
 const SYNCED_STREAM_TIMEOUT: Duration = Duration::from_secs(30);
 
 static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
@@ -33,65 +33,70 @@ pub fn new_stream_id() -> SyncedStreamId {
 /// Metadata about a synced stream, sent over the network.
 ///
 /// Contains information the receiver needs to display and track the stream:
-/// file name for UI display, total frames for progress/completion tracking.
+/// - file name for UI display
+/// - total frames for progress/completion tracking
+/// - codec params for creating the decoder on receiver side
 #[derive(Archive, Serialize, Deserialize, Debug, Clone)]
 #[rkyv(compare(PartialEq))]
 pub struct SyncedStreamMeta {
     pub stream_id: SyncedStreamId,
     pub file_name: String,
     pub total_frames: u64,
+    pub codec_params: WireCodecParams,
 }
 
-/// A single audio frame for synced playback, sent over the network.
+/// A single compressed audio packet for synced playback, sent over the network.
 ///
-/// Each frame carries Opus-encoded audio data along with timing information
-/// (`play_at`) that tells receivers exactly when to play it according to
-/// the party clock.
+/// Contains raw compressed bytes from the original audio file.
+/// Timing is calculated from sequence_number + control messages.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone)]
 #[rkyv(compare(PartialEq))]
 pub struct SyncedFrame {
     pub stream_id: SyncedStreamId,
     pub sequence_number: u64,
-    pub frame_size: u32,
-    pub opus_data: Vec<u8>,
+    pub dur: u32,
+    pub data: Vec<u8>,
+}
+
+/// Raw packet stored in buffer, ready for decoding.
+#[derive(Clone)]
+pub struct RawPacket {
+    pub dur: u32,
+    pub data: Vec<u8>,
 }
 
 impl SyncedFrame {
-    pub fn new(stream_id: SyncedStreamId, sequence_number: u64, opus_packet: OpusPacket) -> Self {
+    pub fn new(stream_id: SyncedStreamId, sequence_number: u64, dur: u32, data: Vec<u8>) -> Self {
         Self {
             stream_id,
             sequence_number,
-            frame_size: opus_packet.frame_size as u32,
-            opus_data: opus_packet.data,
+            dur,
+            data,
         }
     }
 
-    pub fn to_opus_packet(&self) -> OpusPacket {
-        OpusPacket {
-            data: self.opus_data.clone(),
-            frame_size: self.frame_size as usize,
+    pub fn to_raw_packet(&self) -> RawPacket {
+        RawPacket {
+            dur: self.dur,
+            data: self.data.clone(),
         }
     }
 }
 
-/// Playback progress for a synced stream.
+/// Playback progress for a synced stream (output type for GUI).
 #[derive(Debug, Clone)]
 pub struct SyncedStreamProgress {
     pub frames_played: u64,
     pub buffered_frames: u64,
-    pub buffer_ahead_ms: u64,
     pub is_playing: bool,
     pub highest_seq_received: u64,
 }
 
-/// Complete state of a synced stream, used only by `active_streams()`.
-///
-/// Combines wire metadata (if received) with local playback progress.
+/// Complete state of a synced stream (output type for GUI).
 #[derive(Debug, Clone)]
 pub struct SyncedStreamState {
     pub stream_id: SyncedStreamId,
-    pub source_addr: SocketAddr,
-    pub meta: Option<SyncedStreamMeta>,
+    pub meta: SyncedStreamMeta,
     pub progress: SyncedStreamProgress,
     pub is_local_sender: bool,
 }
@@ -102,53 +107,53 @@ struct BufferKey {
     stream_id: SyncedStreamId,
 }
 
-/// A buffer belonging to a (host, stream_id)
+/// A buffer for a single stream from a single source.
+///
+/// Created only when metadata arrives with valid decoder.
+/// Stores raw compressed packets and decodes on demand during playback.
 struct BufferEntry<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    decoder: crate::audio::opus::OpusDecoder<Sample, CHANNELS, SAMPLE_RATE>,
-    opus_frames: HashMap<u64, OpusPacket>,
+    decoder: Box<dyn symphonia::core::codecs::Decoder>,
+    meta: SyncedStreamMeta,
+    raw_frames: HashMap<u64, RawPacket>,
     last_seen: Instant,
-    meta: Option<SyncedStreamMeta>,
-    frames_played: u64,
 
-    // Playback state
     playing: bool,
     start_party_time: u64,
     start_seq: u64,
 
-    // JIT decoding cache for the current frame
-    current_decode: Option<(u64, AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>)>,
+    /// Cached decoded PCM for the current packet.
+    /// (packet sequence number, sample offset from stream start, decoded PCM)
+    current_decode: Option<(u64, u64, AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>)>,
+    _marker: std::marker::PhantomData<Sample>,
 }
 
-impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
-    BufferEntry<Sample, CHANNELS, SAMPLE_RATE>
-{
-    fn new(decoder: crate::audio::opus::OpusDecoder<Sample, CHANNELS, SAMPLE_RATE>) -> Self {
-        Self {
-            decoder,
-            opus_frames: HashMap::new(),
-            last_seen: Instant::now(),
-            meta: None,
-            frames_played: 0,
-            playing: false,
-            start_party_time: 0,
-            start_seq: 1,
-            current_decode: None,
+fn create_decoder(
+    codec_params: &WireCodecParams,
+) -> Option<Box<dyn symphonia::core::codecs::Decoder>> {
+    let params = codec_params.to_symphonia();
+    match symphonia::default::get_codecs().make(&params, &DecoderOptions::default()) {
+        Ok(decoder) => {
+            info!(
+                "Created decoder for codec {:?}, sample_rate={}",
+                codec_params.codec, codec_params.sample_rate
+            );
+            Some(decoder)
+        }
+        Err(e) => {
+            error!("Failed to create decoder: {}", e);
+            None
         }
     }
 }
 
 /// Manages synchronized audio streams from multiple sources.
-///
-/// Receives Opus-encoded frames with `play_at` timestamps, decodes them,
-/// and mixes audio from all sources when the party clock reaches the
-/// scheduled play time.
-pub struct SyncedAudioStream<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+pub struct SyncedAudioStreamManager<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     buffers: DashMap<BufferKey, BufferEntry<Sample, CHANNELS, SAMPLE_RATE>>,
     party_now_fn: Arc<dyn Fn() -> u64 + Send + Sync>,
 }
 
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
-    SyncedAudioStream<Sample, CHANNELS, SAMPLE_RATE>
+    SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>
 {
     pub fn new<F>(party_now_fn: F) -> Self
     where
@@ -160,33 +165,18 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         }
     }
 
-    fn get_or_create_entry(
-        &self,
-        key: BufferKey,
-    ) -> dashmap::mapref::one::RefMut<'_, BufferKey, BufferEntry<Sample, CHANNELS, SAMPLE_RATE>>
-    {
-        self.buffers.entry(key).or_insert_with(|| {
-            info!(
-                "Creating synced buffer for source {} stream {}",
-                key.source_addr, key.stream_id
-            );
-            let decoder =
-                crate::audio::opus::OpusDecoder::new().expect("Failed to create Opus decoder");
-            BufferEntry::new(decoder)
-        })
-    }
-
+    /// Receives stream metadata. This is the ONLY place entries are created/deleted.
+    ///
+    /// - If stream_id differs from existing entries, clears all old entries
+    /// - Creates decoder from codec_params; if fails, entry is not created
+    /// - Updates existing entry's meta if stream_id matches
     pub fn receive_meta(&self, source_addr: SocketAddr, meta: SyncedStreamMeta) {
-        // If any existing buffer has a different stream_id, clear all buffers
-        let mut should_clear = false;
-        for entry in self.buffers.iter() {
-            if entry.key().stream_id != meta.stream_id {
-                should_clear = true;
-                break;
-            }
-        }
+        let dominated_by_other_stream = self
+            .buffers
+            .iter()
+            .any(|e| e.key().stream_id != meta.stream_id);
 
-        if should_clear {
+        if dominated_by_other_stream {
             info!(
                 "New stream ID {} detected, clearing all old buffers",
                 meta.stream_id
@@ -199,11 +189,38 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             stream_id: meta.stream_id,
         };
 
-        let mut entry = self.get_or_create_entry(key);
-        entry.last_seen = Instant::now();
-        entry.meta = Some(meta);
+        if let Some(mut entry) = self.buffers.get_mut(&key) {
+            entry.meta = meta;
+            entry.last_seen = Instant::now();
+            return;
+        }
+
+        let Some(decoder) = create_decoder(&meta.codec_params) else {
+            return;
+        };
+
+        info!(
+            "Creating synced buffer for source {} stream {}",
+            source_addr, meta.stream_id
+        );
+
+        self.buffers.insert(
+            key,
+            BufferEntry {
+                decoder,
+                meta,
+                raw_frames: HashMap::new(),
+                last_seen: Instant::now(),
+                playing: false,
+                start_party_time: 0,
+                start_seq: 1,
+                current_decode: None,
+                _marker: std::marker::PhantomData,
+            },
+        );
     }
 
+    /// Receives playback control. Only updates existing entries.
     pub fn receive_control(
         &self,
         source_addr: SocketAddr,
@@ -214,34 +231,21 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             crate::party::stream::SyncedControl::Pause { stream_id } => *stream_id,
         };
 
-        // If any existing buffer has a different stream_id, clear all buffers
-        let mut should_clear = false;
-        for entry in self.buffers.iter() {
-            if entry.key().stream_id != stream_id {
-                should_clear = true;
-                break;
-            }
-        }
+        let key = BufferKey {
+            source_addr,
+            stream_id,
+        };
 
-        if should_clear {
-            info!(
-                "Control for new stream ID {} detected, clearing all old buffers",
-                stream_id
-            );
-            self.buffers.clear();
-        }
+        let Some(mut entry) = self.buffers.get_mut(&key) else {
+            return;
+        };
 
         match control {
             crate::party::stream::SyncedControl::Start {
-                stream_id,
                 party_clock_time,
                 seq,
+                ..
             } => {
-                let key = BufferKey {
-                    source_addr,
-                    stream_id,
-                };
-                let mut entry = self.get_or_create_entry(key);
                 entry.playing = true;
                 entry.start_party_time = party_clock_time;
                 entry.start_seq = seq;
@@ -251,66 +255,37 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                     stream_id, seq, party_clock_time
                 );
             }
-            crate::party::stream::SyncedControl::Pause { stream_id } => {
-                let key = BufferKey {
-                    source_addr,
-                    stream_id,
-                };
-                if let Some(mut entry) = self.buffers.get_mut(&key) {
-                    entry.playing = false;
-                    entry.last_seen = Instant::now();
-                    info!("Stream {} paused", stream_id);
-                }
+            crate::party::stream::SyncedControl::Pause { .. } => {
+                entry.playing = false;
+                entry.last_seen = Instant::now();
+                info!("Stream {} paused", stream_id);
             }
         }
     }
 
+    /// Receives audio frame. Only stores if entry exists.
     pub fn receive(&self, source_addr: SocketAddr, frame: SyncedFrame) {
-        // If any existing buffer has a different stream_id, clear all buffers
-        let mut should_clear = false;
-        for entry in self.buffers.iter() {
-            if entry.key().stream_id != frame.stream_id {
-                should_clear = true;
-                break;
-            }
-        }
-
-        if should_clear {
-            info!(
-                "Frame for new stream ID {} detected, clearing all old buffers",
-                frame.stream_id
-            );
-            self.buffers.clear();
-        }
-
         let key = BufferKey {
             source_addr,
             stream_id: frame.stream_id,
         };
 
-        let mut entry = self.get_or_create_entry(key);
-        entry.last_seen = Instant::now();
+        let Some(mut entry) = self.buffers.get_mut(&key) else {
+            return;
+        };
 
+        entry.last_seen = Instant::now();
         entry
-            .opus_frames
-            .insert(frame.sequence_number, frame.to_opus_packet());
+            .raw_frames
+            .insert(frame.sequence_number, frame.to_raw_packet());
     }
 
     /// Pulls samples from all streams and mixes them together.
-    ///
-    /// For each stream, advances through frames whose `play_at` time has been
-    /// reached according to the party clock. Frames that are entirely in the
-    /// past are skipped (dropped). Partially elapsed frames are sampled from
-    /// the correct offset.
-    ///
-    /// `num_frames` is the number of audio frames (time positions) to pull.
     pub fn pull_and_mix(
         &self,
         num_frames: usize,
     ) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
         let party_now = (self.party_now_fn)();
-        let us_per_opus_frame = 20_000u64; // 20ms Opus frames
-        let samples_per_opus_frame = (SAMPLE_RATE as u64 * us_per_opus_frame) / 1_000_000; // 960 at 48kHz
         let mut mixed: AudioBuffer<i64, CHANNELS, SAMPLE_RATE> =
             AudioBuffer::new_zeroed(num_frames);
         let mut source_count = 0usize;
@@ -321,46 +296,96 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 continue;
             }
 
+            let source_sample_rate = entry.meta.codec_params.sample_rate;
+            let start_seq = entry.start_seq;
+            let start_party_time = entry.start_party_time;
+
             let mut local_buf: AudioBuffer<i64, CHANNELS, SAMPLE_RATE> =
                 AudioBuffer::new_zeroed(num_frames);
             let mut local_frames = 0usize;
 
             while local_frames < num_frames {
-                // Calculate elapsed samples (not microseconds) to avoid precision loss
-                let elapsed_us = party_now - entry.start_party_time;
-                let elapsed_samples =
-                    (elapsed_us * SAMPLE_RATE as u64 / 1_000_000) + local_frames as u64;
-                let seq_offset = elapsed_samples / samples_per_opus_frame;
-                let seq = entry.start_seq + seq_offset;
-                // Frame offset within current Opus packet
-                let frame_offset_in_opus = (elapsed_samples % samples_per_opus_frame) as usize;
+                let elapsed_us = party_now - start_party_time;
+                let elapsed_samples_at_source =
+                    (elapsed_us * source_sample_rate as u64 / 1_000_000) + local_frames as u64;
 
-                let opus_pcm = if let Some((cached_seq, ref pcm)) = entry.current_decode {
-                    if cached_seq == seq { Some(pcm) } else { None }
+                // Check if elapsed sample falls within the already-decoded PCM buffer
+                let cached_match = if let Some((_, cached_offset, ref pcm)) = entry.current_decode {
+                    elapsed_samples_at_source >= cached_offset
+                        && elapsed_samples_at_source
+                            < cached_offset + pcm.samples_per_channel() as u64
                 } else {
-                    None
+                    false
                 };
 
-                let opus_pcm = if let Some(pcm) = opus_pcm {
-                    pcm
-                } else if let Some(opus_packet) = entry.opus_frames.get(&seq) {
-                    if let Some(pcm) = entry.decoder.decode_packet(opus_packet) {
-                        entry.current_decode = Some((seq, pcm));
-                        &entry.current_decode.as_ref().unwrap().1
+                // decode a packet
+                if !cached_match {
+                    // find the right packet to decode
+                    let mut cumulative = 0u64;
+                    let mut target_seq = start_seq;
+                    loop {
+                        if let Some(pkt) = entry.raw_frames.get(&target_seq) {
+                            if elapsed_samples_at_source < cumulative + pkt.dur as u64 {
+                                break;
+                            }
+                            cumulative += pkt.dur as u64;
+                            target_seq += 1;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    let raw_data = entry
+                        .raw_frames
+                        .get(&target_seq)
+                        .map(|pkt| (pkt.dur, pkt.data.clone()));
+
+                    if let Some((dur, data)) = raw_data {
+                        let packet = symphonia::core::formats::Packet::new_from_slice(
+                            0, cumulative, dur as u64, &data,
+                        );
+
+                        if let Ok(decoded) = entry.decoder.decode(&packet) {
+                            let channel_bufs: [Vec<Sample>; CHANNELS] =
+                                extract_samples::<Sample, CHANNELS>(&decoded);
+
+                            let samples_count = channel_bufs[0].len();
+                            let mut samples: Vec<Sample> =
+                                Vec::with_capacity(samples_count * CHANNELS);
+                            for i in 0..samples_count {
+                                for ch in 0..CHANNELS {
+                                    samples.push(channel_bufs[ch][i]);
+                                }
+                            }
+
+                            if let Ok(buf) = AudioBuffer::new(samples) {
+                                entry.current_decode = Some((target_seq, cumulative, buf));
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
                     } else {
+                        // missing packet
                         break;
                     }
-                } else {
-                    break;
+                }
+
+                let (pcm_offset, pcm) = match &entry.current_decode {
+                    Some((_, offset, pcm)) => (*offset, pcm),
+                    None => break,
                 };
 
-                let remaining_in_opus = opus_pcm.samples_per_channel() - frame_offset_in_opus;
-                let take_frames = (num_frames - local_frames).min(remaining_in_opus);
+                // Position within the decoded PCM buffer
+                let frame_offset = (elapsed_samples_at_source - pcm_offset) as usize;
+                let remaining = pcm.samples_per_channel().saturating_sub(frame_offset);
+                let take_frames = (num_frames - local_frames).min(remaining);
 
                 for f in 0..take_frames {
                     for ch in 0..CHANNELS {
                         *local_buf.get_mut(local_frames + f, ch) =
-                            opus_pcm.get(frame_offset_in_opus + f, ch).to_i64_for_mix();
+                            pcm.get(frame_offset + f, ch).to_i64_for_mix();
                     }
                 }
                 local_frames += take_frames;
@@ -408,11 +433,22 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         let mut result = Vec::new();
 
         for entry in self.buffers.iter() {
-            let buffered_frames = entry.opus_frames.len();
-            let highest_seq_received = entry.opus_frames.keys().max().copied().unwrap_or(0);
+            let buffered_frames = entry.raw_frames.len();
+            let highest_seq_received = entry.raw_frames.keys().max().copied().unwrap_or(0);
 
             let frames_played = if entry.playing && party_now > entry.start_party_time {
-                (party_now - entry.start_party_time) / 20_000
+                let mut cumulative_samples = 0u64;
+                for seq in entry.start_seq.. {
+                    if let Some(pkt) = entry.raw_frames.get(&seq) {
+                        cumulative_samples += pkt.dur as u64;
+                    } else {
+                        break;
+                    }
+                }
+                let sample_rate = entry.meta.codec_params.sample_rate;
+                let elapsed_us = party_now - entry.start_party_time;
+                let elapsed_samples = elapsed_us * sample_rate as u64 / 1_000_000;
+                elapsed_samples.min(cumulative_samples)
             } else {
                 0
             };
@@ -422,12 +458,10 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
             result.push(SyncedStreamState {
                 stream_id: entry.key().stream_id,
-                source_addr: entry.key().source_addr,
                 meta: entry.meta.clone(),
                 progress: SyncedStreamProgress {
                     frames_played,
                     buffered_frames: buffered_frames as u64,
-                    buffer_ahead_ms: 0,
                     is_playing: entry.playing,
                     highest_seq_received,
                 },
@@ -438,33 +472,37 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         result
     }
 
-    /// Identifies gaps in the buffered Opus packets and returns them for retransmission requests.
-    ///
-    /// Checks for missing sequence numbers between the start of the song and a lookahead
-    /// window from the current playback position.
+    /// Identifies gaps in the buffered packets and returns them for retransmission requests.
     pub fn get_missing_frames(&self) -> Vec<(SocketAddr, SyncedStreamId, Vec<u64>)> {
         let mut result = Vec::new();
         let party_now = (self.party_now_fn)();
 
         for entry in self.buffers.iter() {
-            let Some(meta) = &entry.meta else { continue };
-
             let mut missing = Vec::new();
+            let sample_rate = entry.meta.codec_params.sample_rate;
 
             let current_seq = if entry.playing && party_now > entry.start_party_time {
-                entry.start_seq + (party_now - entry.start_party_time) / 20_000
+                let elapsed_us = party_now - entry.start_party_time;
+                let elapsed_samples = elapsed_us * sample_rate as u64 / 1_000_000;
+                let mut cumulative = 0u64;
+                let mut seq = entry.start_seq;
+                while let Some(pkt) = entry.raw_frames.get(&seq) {
+                    if cumulative >= elapsed_samples {
+                        break;
+                    }
+                    cumulative += pkt.dur as u64;
+                    seq += 1;
+                }
+                seq
             } else {
                 entry.start_seq
             };
 
-            // Check up to 200 frames ahead of current position, and all frames before it
-            let end_check = (current_seq + 200).min(meta.total_frames);
+            let end_check = (current_seq + 200).min(entry.meta.total_frames);
 
-            // We check from seq 1 because we want the whole song for seeking back
             for seq in 1..=end_check {
-                if !entry.opus_frames.contains_key(&seq) {
+                if !entry.raw_frames.contains_key(&seq) {
                     missing.push(seq);
-                    // Cap per request to avoid huge packets
                     if missing.len() >= 100 {
                         break;
                     }
@@ -480,7 +518,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 }
 
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Source
-    for SyncedAudioStream<Sample, CHANNELS, SAMPLE_RATE>
+    for SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>
 {
     type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
 
@@ -491,7 +529,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Source
 }
 
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Source
-    for Arc<SyncedAudioStream<Sample, CHANNELS, SAMPLE_RATE>>
+    for Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>
 {
     type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
 

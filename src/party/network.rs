@@ -65,7 +65,7 @@ use crate::io::{
 };
 use crate::party::ntp::NtpService;
 use crate::party::stream::RealtimeAudioStream;
-use crate::party::sync_stream::SyncedAudioStream;
+use crate::party::sync_stream::SyncedAudioStreamManager;
 use crate::state::AppState;
 
 const DSCP_EF: u32 = 0xB8;
@@ -210,7 +210,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     ) -> Result<(
         NetworkSender,
         Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
-        Arc<SyncedAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
+        Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>,
         Arc<NtpService>,
     )> {
         let (socket, multicast_addr, local_ips) = if ipv6 {
@@ -227,7 +227,9 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         let ntp_service = NtpService::new(sender.clone(), self.shutdown_flag.clone());
 
         let ntp_for_synced = ntp_service.clone();
-        let synced_stream = Arc::new(SyncedAudioStream::new(move || ntp_for_synced.party_now()));
+        let synced_stream = Arc::new(SyncedAudioStreamManager::new(move || {
+            ntp_for_synced.party_now()
+        }));
 
         socket
             .set_read_timeout(Some(Duration::from_millis(100)))

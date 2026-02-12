@@ -42,7 +42,7 @@ pub mod stream;
 pub mod sync_stream;
 
 pub use config::PartyConfig;
-pub use music::MusicStreamInfo;
+
 pub use ntp::NtpDebugInfo;
 pub use party::Party;
 pub use stream::StreamSnapshot;
