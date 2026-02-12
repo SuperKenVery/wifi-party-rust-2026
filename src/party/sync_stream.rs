@@ -81,6 +81,7 @@ pub struct SyncedStreamProgress {
     pub buffered_frames: u64,
     pub buffer_ahead_ms: u64,
     pub is_playing: bool,
+    pub highest_seq_received: u64,
 }
 
 /// Complete state of a synced stream, used only by `active_streams()`.
@@ -92,6 +93,7 @@ pub struct SyncedStreamState {
     pub source_addr: SocketAddr,
     pub meta: Option<SyncedStreamMeta>,
     pub progress: SyncedStreamProgress,
+    pub is_local_sender: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -407,12 +409,16 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
         for entry in self.buffers.iter() {
             let buffered_frames = entry.opus_frames.len();
+            let highest_seq_received = entry.opus_frames.keys().max().copied().unwrap_or(0);
 
             let frames_played = if entry.playing && party_now > entry.start_party_time {
                 (party_now - entry.start_party_time) / 20_000
             } else {
                 0
             };
+
+            let is_local_sender =
+                entry.key().source_addr.ip().is_loopback() && entry.key().source_addr.port() == 0;
 
             result.push(SyncedStreamState {
                 stream_id: entry.key().stream_id,
@@ -421,9 +427,11 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 progress: SyncedStreamProgress {
                     frames_played,
                     buffered_frames: buffered_frames as u64,
-                    buffer_ahead_ms: 0, // Not easily calculated in this model
+                    buffer_ahead_ms: 0,
                     is_playing: entry.playing,
+                    highest_seq_received,
                 },
+                is_local_sender,
             });
         }
 

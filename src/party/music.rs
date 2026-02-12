@@ -87,6 +87,26 @@ impl MusicStream {
 
         let (command_tx, command_rx) = std::sync::mpsc::channel();
 
+        progress.is_streaming.store(true, Ordering::Relaxed);
+        *progress.file_name.lock().unwrap() = Some(file_name.clone());
+
+        let meta = SyncedStreamMeta {
+            stream_id,
+            file_name: file_name.clone(),
+            total_frames: 0,
+        };
+        network_sender.push(NetworkPacket::SyncedMeta(meta.clone()));
+        synced_stream.receive_meta(LOCAL_ADDR, meta);
+
+        let start_at = ntp_service.party_now() + 500_000;
+        let control = SyncedControl::Start {
+            stream_id,
+            party_clock_time: start_at,
+            seq: 1,
+        };
+        network_sender.push(NetworkPacket::SyncedControl(control.clone()));
+        synced_stream.receive_control(LOCAL_ADDR, control.clone());
+
         let ctx = StreamContext {
             path,
             stream_id,
@@ -101,6 +121,7 @@ impl MusicStream {
             is_complete: is_complete.clone(),
             vault,
             command_rx,
+            initial_start_at: start_at,
         };
 
         let handle = thread::spawn(move || {
@@ -180,6 +201,7 @@ struct StreamContext<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     is_complete: Arc<AtomicBool>,
     vault: Arc<DashMap<u64, OpusPacket>>,
     command_rx: std::sync::mpsc::Receiver<MusicCommand>,
+    initial_start_at: u64,
 }
 
 impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u32>
@@ -189,7 +211,7 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
         let mut reader = AudioFileReader::open(&self.path)?;
         let encoder = OpusEncoder::<Sample, CHANNELS, SAMPLE_RATE>::new()?;
 
-        // Calculate total frames if possible
+        // Calculate total frames if possible and update meta
         if let Some(duration) = reader.info.duration_secs {
             let total = (duration * 1_000_000.0 / FRAME_DURATION_US as f64) as u64;
             self.total_frames.store(total, Ordering::Relaxed);
@@ -197,38 +219,25 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
             self.progress
                 .streaming_total
                 .store(total, Ordering::Relaxed);
+
+            let meta = SyncedStreamMeta {
+                stream_id: self.stream_id,
+                file_name: self.file_name.clone(),
+                total_frames: total,
+            };
+            self.network_sender
+                .push(NetworkPacket::SyncedMeta(meta.clone()));
+            self.synced_stream.receive_meta(LOCAL_ADDR, meta);
         }
 
         self.progress.is_encoding.store(true, Ordering::Relaxed);
-        *self.progress.file_name.lock().unwrap() = Some(self.file_name.clone());
-
-        // Send metadata
-        let meta = SyncedStreamMeta {
-            stream_id: self.stream_id,
-            file_name: self.file_name.clone(),
-            total_frames: self.total_frames.load(Ordering::Relaxed),
-        };
-        self.network_sender
-            .push(NetworkPacket::SyncedMeta(meta.clone()));
-        self.synced_stream.receive_meta(LOCAL_ADDR, meta);
-
-        // Start with a "Start" command to begin playback in 500ms
-        let start_at = self.ntp_service.party_now() + 500_000;
-        let control = SyncedControl::Start {
-            stream_id: self.stream_id,
-            party_clock_time: start_at,
-            seq: 1,
-        };
-        self.network_sender
-            .push(NetworkPacket::SyncedControl(control.clone()));
-        self.synced_stream.receive_control(LOCAL_ADDR, control);
 
         let mut next_seq_to_send = 1u64;
         let mut last_send_time = Instant::now();
         let mut retransmit_queue = VecDeque::<u64>::new();
 
         let mut last_pause_seq = 1u64;
-        let mut last_start_party_time = start_at;
+        let mut last_start_party_time = self.initial_start_at;
         let mut last_start_seq = 1u64;
         let mut _is_playing = true;
 

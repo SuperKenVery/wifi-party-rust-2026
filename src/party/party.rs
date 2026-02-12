@@ -19,6 +19,7 @@ use crate::pipeline::Sink;
 use crate::state::{AppState, HostId, HostInfo, MusicStreamProgress, StreamInfo};
 
 use super::combinator::{BoxedSource, Mixer, Tee};
+use crate::pipeline::Source;
 use super::config::PartyConfig;
 use super::music::MusicStream;
 use super::network::NetworkNode;
@@ -207,10 +208,14 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
         // ============================================================
         // Output Pipeline: RealtimeAudioStream (mixed from all hosts/streams)
         //                  + SyncedAudioStream (music) + loopback_buffer -> Speaker
+        // listen_enabled controls whether network audio (realtime + synced) is played
         // ============================================================
+        let listen_switch = Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(
+            self.state.listen_enabled.clone(),
+        );
         let sources: Vec<BoxedSource<Sample, CHANNELS, SAMPLE_RATE>> = vec![
-            Box::new(realtime_stream),
-            Box::new(synced_stream),
+            Box::new(realtime_stream.give_data_to(listen_switch.clone())),
+            Box::new(synced_stream.give_data_to(listen_switch)),
             Box::new(loopback_buffer),
         ];
         let speaker_source = Mixer::new(sources);

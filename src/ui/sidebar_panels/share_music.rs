@@ -3,6 +3,22 @@ use dioxus::prelude::*;
 use std::sync::Arc;
 use tracing::error;
 
+#[derive(Clone, PartialEq)]
+struct SenderProgressInfo {
+    frames_sent: u64,
+    frames_encoded: u64,
+    total_frames: u64,
+    frames_played: u64,
+}
+
+#[derive(Clone, PartialEq)]
+struct ReceiverProgressInfo {
+    frames_received: u64,
+    highest_seq: u64,
+    total_frames: u64,
+    frames_played: u64,
+}
+
 #[allow(non_snake_case)]
 #[component]
 pub fn ShareMusicPanel() -> Element {
@@ -22,10 +38,10 @@ pub fn ShareMusicPanel() -> Element {
     let encoding_total = progress
         .encoding_total
         .load(std::sync::atomic::Ordering::Relaxed);
-    let _streaming_current = progress
+    let streaming_current = progress
         .streaming_current
         .load(std::sync::atomic::Ordering::Relaxed);
-    let _streaming_total = progress
+    let streaming_total = progress
         .streaming_total
         .load(std::sync::atomic::Ordering::Relaxed);
     let file_name = progress.file_name.lock().unwrap().clone();
@@ -151,11 +167,9 @@ pub fn ShareMusicPanel() -> Element {
                                                 span { class: "text-emerald-400 text-lg", if stream.progress.is_playing { "▶" } else { "⏸" } }
                                                 span { class: "text-sm text-emerald-300 font-medium", "Now playing:" }
                                             }
-                                            if let Some(meta) = &stream.meta {
-                                                span {
-                                                    class: "text-sm text-emerald-400",
-                                                    "{stream.progress.frames_played * 100 / meta.total_frames.max(1)}%"
-                                                }
+                                            span {
+                                                class: "text-xs text-slate-400",
+                                                if stream.is_local_sender { "(Sender)" } else { "(Receiver)" }
                                             }
                                         }
                                         if let Some(meta) = &stream.meta {
@@ -164,26 +178,27 @@ pub fn ShareMusicPanel() -> Element {
                                                 "{meta.file_name}"
                                             }
 
-                                            // Progress Bar / Seek
-                                            div {
-                                                class: "relative w-full h-2 bg-slate-700 rounded-full overflow-hidden cursor-pointer group",
-                                                onclick: {
-                                                    let state = state_arc.clone();
-                                                    let stream_id = stream.stream_id;
-                                                    let total_frames = meta.total_frames;
-                                                    move |e| {
-                                                        let percent = e.data().page_coordinates().x / 1000.0; // Placeholder
-                                                        let target_frame = (percent.clamp(0.0, 1.0) * total_frames as f64) as u64;
-                                                        let target_ms = target_frame * 20;
-                                                        let _ = state.seek_music(stream_id, target_ms);
-                                                    }
-                                                },
-                                                div {
-                                                    class: "h-full bg-emerald-500 transition-all duration-300",
-                                                    style: "width: {stream.progress.frames_played * 100 / meta.total_frames.max(1)}%",
-                                                }
-                                                div {
-                                                    class: "absolute top-0 left-0 w-full h-full opacity-0 group-hover:opacity-20 bg-white transition-opacity",
+                                            {
+                                                let frames_played = stream.progress.frames_played;
+
+                                                if stream.is_local_sender {
+                                                    let total = streaming_total.max(meta.total_frames).max(1);
+                                                    let sender_info = SenderProgressInfo {
+                                                        frames_sent: streaming_current,
+                                                        frames_encoded: encoding_current,
+                                                        total_frames: total,
+                                                        frames_played,
+                                                    };
+                                                    rsx! { SenderProgressBar { info: sender_info } }
+                                                } else {
+                                                    let total = meta.total_frames.max(1);
+                                                    let receiver_info = ReceiverProgressInfo {
+                                                        frames_received: stream.progress.buffered_frames,
+                                                        highest_seq: stream.progress.highest_seq_received,
+                                                        total_frames: total,
+                                                        frames_played,
+                                                    };
+                                                    rsx! { ReceiverProgressBar { info: receiver_info } }
                                                 }
                                             }
 
@@ -232,10 +247,7 @@ pub fn ShareMusicPanel() -> Element {
                                                 }
                                             }
 
-                                            p {
-                                                class: "text-xs text-slate-500 mt-2 text-center",
-                                                "{stream.progress.frames_played * 20 / 1000}s / {meta.total_frames * 20 / 1000}s"
-                                            }
+
                                         }
                                     }
                                 }
@@ -270,6 +282,116 @@ pub fn ShareMusicPanel() -> Element {
                             p { class: "font-medium text-slate-400", "Supported formats:" }
                             p { "MP3, FLAC, WAV, OGG, M4A, AAC" }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn format_time(total_ms: u64) -> String {
+    let secs = total_ms / 1000;
+    let mins = secs / 60;
+    let secs = secs % 60;
+    format!("{}:{:02}", mins, secs)
+}
+
+#[allow(non_snake_case)]
+#[component]
+fn SenderProgressBar(info: SenderProgressInfo) -> Element {
+    let total = info.total_frames.max(1);
+    let sent_pct = (info.frames_sent as f64 / total as f64 * 100.0) as u32;
+    let encoded_pct = (info.frames_encoded as f64 / total as f64 * 100.0) as u32;
+    let decoded_only_pct = encoded_pct.saturating_sub(sent_pct);
+    let played_pct = (info.frames_played as f64 / total as f64 * 100.0) as u32;
+
+    let current_time = format_time(info.frames_played * 20);
+    let total_time = format_time(total * 20);
+
+    rsx! {
+        div {
+            class: "space-y-1",
+            div {
+                class: "relative w-full h-3 bg-slate-600 rounded-full overflow-hidden",
+                div {
+                    class: "absolute left-0 top-0 h-full bg-emerald-500",
+                    style: "width: {sent_pct}%",
+                }
+                div {
+                    class: "absolute top-0 h-full bg-amber-500",
+                    style: "left: {sent_pct}%; width: {decoded_only_pct}%",
+                }
+                div {
+                    class: "absolute top-0 h-full w-1 bg-white shadow-md",
+                    style: "left: calc({played_pct}% - 2px)",
+                }
+            }
+            div {
+                class: "flex justify-between text-xs text-slate-400",
+                span { "{current_time} / {total_time}" }
+                span { class: "text-slate-500", "sent:{info.frames_sent} enc:{info.frames_encoded} tot:{total}" }
+            }
+            div {
+                class: "flex gap-3 text-xs text-slate-500",
+                span { class: "flex items-center gap-1",
+                    span { class: "w-2 h-2 rounded-full bg-emerald-500" }
+                    "Sent"
+                }
+                span { class: "flex items-center gap-1",
+                    span { class: "w-2 h-2 rounded-full bg-amber-500" }
+                    "Decoded"
+                }
+                span { class: "flex items-center gap-1",
+                    span { class: "w-2 h-2 rounded-full bg-slate-600" }
+                    "Pending"
+                }
+            }
+        }
+    }
+}
+
+#[allow(non_snake_case)]
+#[component]
+fn ReceiverProgressBar(info: ReceiverProgressInfo) -> Element {
+    let total = info.total_frames.max(1);
+    let received_pct = (info.frames_received as f64 / total as f64 * 100.0) as u32;
+    let missing_count = info.highest_seq.saturating_sub(info.frames_received);
+    let missing_pct = (missing_count as f64 / total as f64 * 100.0) as u32;
+    let played_pct = (info.frames_played as f64 / total as f64 * 100.0) as u32;
+
+    let current_time = format_time(info.frames_played * 20);
+    let total_time = format_time(total * 20);
+
+    rsx! {
+        div {
+            class: "space-y-1",
+            div {
+                class: "relative w-full h-3 bg-slate-600 rounded-full overflow-hidden",
+                div {
+                    class: "absolute left-0 top-0 h-full bg-emerald-500",
+                    style: "width: {received_pct}%",
+                }
+                div {
+                    class: "absolute top-0 h-full bg-rose-500",
+                    style: "left: {received_pct}%; width: {missing_pct}%",
+                }
+                div {
+                    class: "absolute top-0 h-full w-1 bg-white shadow-md",
+                    style: "left: calc({played_pct}% - 2px)",
+                }
+            }
+            div {
+                class: "flex justify-between text-xs text-slate-400",
+                span { "{current_time} / {total_time}" }
+                div {
+                    class: "flex gap-3",
+                    span { class: "flex items-center gap-1",
+                        span { class: "w-2 h-2 rounded-full bg-emerald-500" }
+                        "Received"
+                    }
+                    span { class: "flex items-center gap-1",
+                        span { class: "w-2 h-2 rounded-full bg-rose-500" }
+                        "Missing"
                     }
                 }
             }

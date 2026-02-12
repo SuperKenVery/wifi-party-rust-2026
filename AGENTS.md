@@ -63,7 +63,7 @@ Files:
 - `sync_stream.rs` - `SyncedAudioStream` for synchronized music playback
 - `ntp.rs` - NTP service for time synchronization
 - `music.rs` - Music file streaming
-- `combinator.rs` - Pipeline utilities (Tee, Mixer, Switch)
+- `combinator.rs` - Pipeline utilities (Tee, Mixer)
 
 ### `src/pipeline/` - Processing Framework
 
@@ -72,8 +72,8 @@ Generic pipeline architecture for data flow.
 Files:
 - `traits.rs` - Core traits
   - `Node` - Transforms input to output
-  - `Source` - Pull-based data producer
-  - `Sink` - Push-based data consumer
+  - `Source` - Pull-based data producer (output side), has `give_data_to(node)` for chaining
+  - `Sink` - Push-based data consumer (input side), has `get_data_from(node)` for chaining
 - `chain.rs` - Pipeline composition (`PullPipeline`, `PushPipeline`)
 
 ### `src/state/` - Application State
@@ -121,7 +121,10 @@ Files:
    - `Realtime` → `RealtimeAudioStream` → per-host `JitterBuffer` with `OpusDecoder`
    - `Synced` → `SyncedAudioStream` (NTP-synchronized playback)
    - `Ntp` → `NtpService`
-3. `Mixer` combines: `RealtimeAudioStream` + `SyncedAudioStream` + `LoopbackBuffer`
+3. `Mixer` combines:
+   - `RealtimeAudioStream.give_data_to(Switch)` - network voice/system audio (controlled by listen_enabled)
+   - `SyncedAudioStream.give_data_to(Switch)` - network music (controlled by listen_enabled)
+   - `LoopbackBuffer` - local mic loopback (unaffected by listen toggle)
 4. `AudioOutput` plays mixed audio via cpal callback
 
 ## Network Protocol

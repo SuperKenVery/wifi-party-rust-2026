@@ -19,6 +19,7 @@ pub fn App() -> Element {
     let mut loopback_enabled = use_signal(|| false);
     let mut system_audio_enabled = use_signal(|| false);
     let mut system_audio_level = use_signal(|| 0u32);
+    let mut listen_enabled = use_signal(|| true);
     let mut selected_section = use_signal(|| MenuSection::Senders);
     let mut ntp_info = use_signal(|| None::<NtpDebugInfo>);
 
@@ -58,6 +59,12 @@ pub fn App() -> Element {
                     .load(std::sync::atomic::Ordering::Relaxed);
                 system_audio_level.set(sys_level);
 
+                listen_enabled.set(
+                    state
+                        .listen_enabled
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                );
+
                 ntp_info.set(state.ntp_debug_info());
 
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -89,6 +96,7 @@ pub fn App() -> Element {
                         loopback_enabled: loopback_enabled(),
                         system_audio_enabled: system_audio_enabled(),
                         system_audio_level: system_audio_level(),
+                        listen_enabled: listen_enabled(),
                     }
                 },
                 MenuSection::ShareMusic => rsx! {

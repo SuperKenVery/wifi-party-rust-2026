@@ -106,6 +106,7 @@ pub fn AudioControlPanel(
     loopback_enabled: bool,
     system_audio_enabled: bool,
     system_audio_level: u32,
+    listen_enabled: bool,
 ) -> Element {
     let state_arc = use_context::<Arc<AppState>>();
 
@@ -148,6 +149,16 @@ pub fn AudioControlPanel(
             .store(!current, std::sync::atomic::Ordering::Relaxed);
     };
 
+    let state_listen = state_arc.clone();
+    let on_listen_toggle = move |_| {
+        let current = state_listen
+            .listen_enabled
+            .load(std::sync::atomic::Ordering::Relaxed);
+        state_listen
+            .listen_enabled
+            .store(!current, std::sync::atomic::Ordering::Relaxed);
+    };
+
     rsx! {
         div {
             class: "flex-1 flex flex-col relative overflow-hidden bg-slate-900",
@@ -175,7 +186,7 @@ pub fn AudioControlPanel(
                         }
 
                         div {
-                            class: "grid grid-cols-3 gap-4 mb-8",
+                            class: "grid grid-cols-4 gap-4 mb-8",
 
                             button {
                                 class: format!(
@@ -208,6 +219,18 @@ pub fn AudioControlPanel(
                                 onclick: on_system_audio_toggle,
                                 div { class: "text-2xl", "🔊" }
                                 span { class: "text-xs font-bold", if system_audio_enabled { "Sharing" } else { "Not Share" } }
+                            }
+
+                            // Listen button - controls whether to play network audio
+                            button {
+                                class: format!(
+                                    "p-4 rounded-xl flex flex-col items-center justify-center gap-2 transition-all duration-200 border {}",
+                                    if listen_enabled { "bg-cyan-500/10 border-cyan-500/50 text-cyan-400 hover:bg-cyan-500/20" }
+                                    else { "bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700 hover:text-slate-300" }
+                                ),
+                                onclick: on_listen_toggle,
+                                div { class: "text-2xl", if listen_enabled { "👂" } else { "🔕" } }
+                                span { class: "text-xs font-bold", if listen_enabled { "Listen" } else { "Muted" } }
                             }
                         }
 
