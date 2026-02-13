@@ -70,7 +70,8 @@ use crate::state::AppState;
 
 const DSCP_EF: u32 = 0xB8;
 
-/// Sets the DSCP (Differentiated Services Code Point) value on a socket for QoS.
+/// Sets the **DSCP (Differentiated Services Code Point)** value on a socket for QoS.
+///
 /// Uses EF (Expedited Forwarding) = 46, which translates to TOS/Traffic Class = 0xB8.
 /// This marks packets as voice traffic for network QoS prioritization.
 fn set_socket_dscp(socket: &Socket, ipv6: bool) {
@@ -134,6 +135,47 @@ fn set_socket_dscp(socket: &Socket, ipv6: bool) {
                 std::io::Error::last_os_error()
             );
         }
+    }
+}
+
+/// Allow sending and receiving via **Apple Wireless Direct Link**.
+///
+/// Reference: https://github.com/seemoo-lab/proxawdl?tab=readme-ov-file
+///
+/// For packets to actually be sent, we would need a way to trigger in OS e.g. open an AirDrop sharing panel or registering some type of NetworkService. However, it turns out that AWDL has a very high packet loss (~90%) and aggressive batching in our usecase, and `llw0` behaves the same, even when disconnecting Wi-Fi. Therefore, I won't implement opening a NetworkService until we find a way to make awdl/llw really send my packets with full effort.
+fn allow_awdl(socket: &Socket, allow: bool) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use libc::{SOL_SOCKET, c_int, setsockopt};
+        use std::os::unix::io::AsRawFd;
+
+        // XNU socket option for unrestricted inbound processing
+        // https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/sys/socket_private.h#L228
+        const SO_RECV_ANYIF: c_int = 0x1104;
+
+        let fd = socket.as_raw_fd();
+        let value: c_int = if allow { 1 } else { 0 };
+        let ret = unsafe {
+            setsockopt(
+                fd,
+                SOL_SOCKET,
+                SO_RECV_ANYIF,
+                &value as *const _ as *const libc::c_void,
+                std::mem::size_of::<c_int>() as libc::socklen_t,
+            )
+        };
+        if ret != 0 {
+            Err(std::io::Error::last_os_error().into())
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = socket;
+        let _ = allow;
+        Ok(())
     }
 }
 
@@ -282,6 +324,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             .set_multicast_loop_v4(false)
             .context("Failed to set multicast_loop_v4")?;
         set_socket_dscp(&socket, false);
+        allow_awdl(&socket, true);
 
         let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), MULTICAST_PORT);
         socket
@@ -355,6 +398,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             .set_multicast_loop_v6(false)
             .context("Failed to set multicast_loop_v6")?;
         set_socket_dscp(&socket, true);
+        allow_awdl(&socket, true);
 
         if let Some(index) = send_interface_index {
             socket
