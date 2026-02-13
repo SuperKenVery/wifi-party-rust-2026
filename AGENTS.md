@@ -1,4 +1,4 @@
-# Wi-Fi Party KTV
+# Wi-Fi Party
 
 Real-time audio sharing application using UDP multicast on local networks.
 
