@@ -9,7 +9,9 @@ struct SenderProgressInfo {
     frames_sent: u64,
     frames_encoded: u64,
     total_frames: u64,
-    frames_played: u64,
+    samples_played: u64,
+    total_samples: u64,
+    sample_rate: u32,
 }
 
 #[derive(Clone, PartialEq)]
@@ -17,7 +19,9 @@ struct ReceiverProgressInfo {
     frames_received: u64,
     highest_seq: u64,
     total_frames: u64,
-    frames_played: u64,
+    samples_played: u64,
+    total_samples: u64,
+    sample_rate: u32,
 }
 
 #[allow(non_snake_case)]
@@ -172,6 +176,9 @@ pub fn ShareMusicPanel(active_streams: Vec<SyncedStreamState>) -> Element {
                                         }
                                         {
                                             let meta = &stream.meta;
+                                            let samples_played = stream.progress.samples_played;
+                                            let total_samples = stream.meta.total_samples;
+                                            let sample_rate = stream.meta.codec_params.sample_rate;
                                             rsx! {
                                                 p {
                                                     class: "text-sm text-emerald-400/80 mb-2 truncate",
@@ -179,15 +186,15 @@ pub fn ShareMusicPanel(active_streams: Vec<SyncedStreamState>) -> Element {
                                                 }
 
                                                 {
-                                                    let frames_played = stream.progress.frames_played;
-
                                                     if stream.is_local_sender {
                                                         let total = streaming_total.max(meta.total_frames).max(1);
                                                         let sender_info = SenderProgressInfo {
                                                             frames_sent: streaming_current,
                                                             frames_encoded: encoding_current,
                                                             total_frames: total,
-                                                            frames_played,
+                                                            samples_played,
+                                                            total_samples,
+                                                            sample_rate,
                                                         };
                                                         rsx! { SenderProgressBar { info: sender_info } }
                                                     } else {
@@ -196,7 +203,9 @@ pub fn ShareMusicPanel(active_streams: Vec<SyncedStreamState>) -> Element {
                                                             frames_received: stream.progress.buffered_frames,
                                                             highest_seq: stream.progress.highest_seq_received,
                                                             total_frames: total,
-                                                            frames_played,
+                                                            samples_played,
+                                                            total_samples,
+                                                            sample_rate,
                                                         };
                                                         rsx! { ReceiverProgressBar { info: receiver_info } }
                                                     }
@@ -210,7 +219,7 @@ pub fn ShareMusicPanel(active_streams: Vec<SyncedStreamState>) -> Element {
                                                     onclick: {
                                                         let state = state_arc.clone();
                                                         let stream_id = stream.stream_id;
-                                                        let current_ms = stream.progress.frames_played * 20;
+                                                        let current_ms = samples_played * 1000 / sample_rate as u64;
                                                         move |_| {
                                                             let _ = state.seek_music(stream_id, current_ms.saturating_sub(10_000));
                                                         }
@@ -238,7 +247,7 @@ pub fn ShareMusicPanel(active_streams: Vec<SyncedStreamState>) -> Element {
                                                     onclick: {
                                                         let state = state_arc.clone();
                                                         let stream_id = stream.stream_id;
-                                                        let current_ms = stream.progress.frames_played * 20;
+                                                        let current_ms = samples_played * 1000 / sample_rate as u64;
                                                         move |_| {
                                                             let _ = state.seek_music(stream_id, current_ms + 10_000);
                                                         }
@@ -298,14 +307,15 @@ fn format_time(total_ms: u64) -> String {
 #[allow(non_snake_case)]
 #[component]
 fn SenderProgressBar(info: SenderProgressInfo) -> Element {
-    let total = info.total_frames.max(1);
-    let sent_pct = (info.frames_sent as f64 / total as f64 * 100.0) as u32;
-    let encoded_pct = (info.frames_encoded as f64 / total as f64 * 100.0) as u32;
+    let total_frames = info.total_frames.max(1);
+    let total_samples = info.total_samples.max(1);
+    let sent_pct = (info.frames_sent as f64 / total_frames as f64 * 100.0) as u32;
+    let encoded_pct = (info.frames_encoded as f64 / total_frames as f64 * 100.0) as u32;
     let decoded_only_pct = encoded_pct.saturating_sub(sent_pct);
-    let played_pct = (info.frames_played as f64 / total as f64 * 100.0) as u32;
+    let played_pct = (info.samples_played as f64 / total_samples as f64 * 100.0) as u32;
 
-    let current_time = format_time(info.frames_played * 20);
-    let total_time = format_time(total * 20);
+    let current_time = format_time(info.samples_played * 1000 / info.sample_rate as u64);
+    let total_time = format_time(total_samples * 1000 / info.sample_rate as u64);
 
     rsx! {
         div {
@@ -328,7 +338,7 @@ fn SenderProgressBar(info: SenderProgressInfo) -> Element {
             div {
                 class: "flex justify-between text-xs text-slate-400",
                 span { "{current_time} / {total_time}" }
-                span { class: "text-slate-500", "sent:{info.frames_sent} enc:{info.frames_encoded} tot:{total}" }
+                span { class: "text-slate-500", "sent:{info.frames_sent} enc:{info.frames_encoded} tot:{total_frames}" }
             }
             div {
                 class: "flex gap-3 text-xs text-slate-500",
@@ -352,14 +362,15 @@ fn SenderProgressBar(info: SenderProgressInfo) -> Element {
 #[allow(non_snake_case)]
 #[component]
 fn ReceiverProgressBar(info: ReceiverProgressInfo) -> Element {
-    let total = info.total_frames.max(1);
-    let received_pct = (info.frames_received as f64 / total as f64 * 100.0) as u32;
+    let total_frames = info.total_frames.max(1);
+    let total_samples = info.total_samples.max(1);
+    let received_pct = (info.frames_received as f64 / total_frames as f64 * 100.0) as u32;
     let missing_count = info.highest_seq.saturating_sub(info.frames_received);
-    let missing_pct = (missing_count as f64 / total as f64 * 100.0) as u32;
-    let played_pct = (info.frames_played as f64 / total as f64 * 100.0) as u32;
+    let missing_pct = (missing_count as f64 / total_frames as f64 * 100.0) as u32;
+    let played_pct = (info.samples_played as f64 / total_samples as f64 * 100.0) as u32;
 
-    let current_time = format_time(info.frames_played * 20);
-    let total_time = format_time(total * 20);
+    let current_time = format_time(info.samples_played * 1000 / info.sample_rate as u64);
+    let total_time = format_time(total_samples * 1000 / info.sample_rate as u64);
 
     rsx! {
         div {

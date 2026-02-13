@@ -42,6 +42,7 @@ pub struct SyncedStreamMeta {
     pub stream_id: SyncedStreamId,
     pub file_name: String,
     pub total_frames: u64,
+    pub total_samples: u64,
     pub codec_params: WireCodecParams,
 }
 
@@ -86,7 +87,8 @@ impl SyncedFrame {
 /// Playback progress for a synced stream (output type for GUI).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SyncedStreamProgress {
-    pub frames_played: u64,
+    pub samples_played: u64,
+    pub total_samples: u64,
     pub buffered_frames: u64,
     pub is_playing: bool,
     pub highest_seq_received: u64,
@@ -447,7 +449,12 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             let buffered_frames = entry.raw_frames.len();
             let highest_seq_received = entry.raw_frames.keys().max().copied().unwrap_or(0);
 
-            let frames_played = if entry.playing && party_now > entry.start_party_time {
+            let mut total_samples = 0u64;
+            for pkt in entry.raw_frames.values() {
+                total_samples += pkt.dur as u64;
+            }
+
+            let samples_played = if entry.playing && party_now > entry.start_party_time {
                 let mut cumulative_samples = 0u64;
                 for seq in entry.start_seq.. {
                     if let Some(pkt) = entry.raw_frames.get(&seq) {
@@ -471,7 +478,8 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 stream_id: entry.key().stream_id,
                 meta: entry.meta.clone(),
                 progress: SyncedStreamProgress {
-                    frames_played,
+                    samples_played,
+                    total_samples,
                     buffered_frames: buffered_frames as u64,
                     is_playing: entry.playing,
                     highest_seq_received,

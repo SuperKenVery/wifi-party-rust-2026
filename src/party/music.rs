@@ -89,6 +89,7 @@ impl MusicStream {
             stream_id,
             file_name,
             total_frames: 0,
+            total_samples: 0,
             codec_params,
         };
         network_sender.push(NetworkPacket::SyncedMeta(meta.clone()));
@@ -323,7 +324,9 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
         };
 
         let est_packets = (duration * self.sample_rate() as f64 / 1152.0) as u64;
+        let total_samples = (duration * self.sample_rate() as f64) as u64;
         self.meta.total_frames = est_packets;
+        self.meta.total_samples = total_samples;
         self.progress
             .encoding_total
             .store(est_packets, Ordering::Relaxed);
@@ -458,10 +461,11 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
                         .store(self.frames_read, Ordering::Relaxed);
                 }
                 Ok(None) => {
-                    // EOF
+                    // EOF - calculate exact total_samples from all packets
                     self.is_complete = true;
                     self.progress.is_encoding.store(false, Ordering::Relaxed);
                     self.meta.total_frames = self.frames_read;
+                    self.meta.total_samples = self.vault.iter().map(|r| r.dur as u64).sum();
                     self.network_sender
                         .push(NetworkPacket::SyncedMeta(self.meta.clone()));
                     break;
