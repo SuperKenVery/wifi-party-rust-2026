@@ -13,12 +13,13 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use rkyv::{Archive, Deserialize, Serialize};
 use symphonia::core::codecs::DecoderOptions;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::audio::AudioSample;
 use crate::audio::frame::AudioBuffer;
-use crate::audio::symphonia_compat::{WireCodecParams, extract_samples};
+use crate::audio::symphonia_compat::{WireCodecParams, extract_and_resample};
 use crate::pipeline::Source;
+use rubato::FftFixedIn;
 
 const SYNCED_STREAM_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -59,11 +60,17 @@ pub struct SyncedFrame {
     pub data: Vec<u8>,
 }
 
-/// Raw packet stored in buffer, ready for decoding.
+/// Raw packet stored for sender-side retransmission.
 #[derive(Clone)]
 pub struct RawPacket {
     pub dur: u32,
     pub data: Vec<u8>,
+}
+
+/// Decoded PCM frame stored in buffer, ready for playback.
+#[derive(Clone)]
+pub struct DecodedFrame<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    pub samples: AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>,
 }
 
 impl SyncedFrame {
@@ -73,13 +80,6 @@ impl SyncedFrame {
             sequence_number,
             dur,
             data,
-        }
-    }
-
-    pub fn to_raw_packet(&self) -> RawPacket {
-        RawPacket {
-            dur: self.dur,
-            data: self.data.clone(),
         }
     }
 }
@@ -123,21 +123,17 @@ struct BufferKey {
 /// A buffer for a single stream from a single source.
 ///
 /// Created only when metadata arrives with valid decoder.
-/// Stores raw compressed packets and decodes on demand during playback.
+/// Stores decoded PCM frames for immediate playback.
 struct BufferEntry<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     decoder: Box<dyn symphonia::core::codecs::Decoder>,
+    resampler: Option<FftFixedIn<f32>>,
     meta: SyncedStreamMeta,
-    raw_frames: HashMap<u64, RawPacket>,
+    decoded_frames: HashMap<u64, DecodedFrame<Sample, CHANNELS, SAMPLE_RATE>>,
     last_seen: Instant,
 
     playing: bool,
     start_party_time: u64,
     start_seq: u64,
-
-    /// Cached decoded PCM for the current packet.
-    /// (packet sequence number, sample offset from stream start, decoded PCM)
-    current_decode: Option<(u64, u64, AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>)>,
-    _marker: std::marker::PhantomData<Sample>,
 }
 
 fn create_decoder(
@@ -202,14 +198,40 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             stream_id: meta.stream_id,
         };
 
+        // Metadata update
         if let Some(mut entry) = self.buffers.get_mut(&key) {
             entry.meta = meta;
             entry.last_seen = Instant::now();
             return;
         }
 
+        // New metadata, create decoder
         let Some(decoder) = create_decoder(&meta.codec_params) else {
             return;
+        };
+
+        let resampler = if meta.codec_params.sample_rate != SAMPLE_RATE {
+            match FftFixedIn::<f32>::new(
+                meta.codec_params.sample_rate as usize,
+                SAMPLE_RATE as usize,
+                1024,
+                1,
+                CHANNELS,
+            ) {
+                Ok(r) => {
+                    info!(
+                        "Created resampler {}Hz -> {}Hz for stream {}",
+                        meta.codec_params.sample_rate, SAMPLE_RATE, meta.stream_id
+                    );
+                    Some(r)
+                }
+                Err(e) => {
+                    error!("Failed to create resampler: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
         };
 
         info!(
@@ -221,19 +243,18 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             key,
             BufferEntry {
                 decoder,
+                resampler,
                 meta,
-                raw_frames: HashMap::new(),
+                decoded_frames: HashMap::new(),
                 last_seen: Instant::now(),
                 playing: false,
                 start_party_time: 0,
                 start_seq: 1,
-                current_decode: None,
-                _marker: std::marker::PhantomData,
             },
         );
     }
 
-    /// Receives playback control. Only updates existing entries.
+    /// Receives playback control.
     pub fn receive_control(
         &self,
         source_addr: SocketAddr,
@@ -250,6 +271,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         };
 
         let Some(mut entry) = self.buffers.get_mut(&key) else {
+            warn!("receive_control: StreamID {:?} not found", key);
             return;
         };
 
@@ -264,14 +286,14 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 entry.start_seq = seq;
                 entry.last_seen = Instant::now();
                 info!(
-                    "Stream {} starting at seq {} at party time {}",
-                    stream_id, seq, party_clock_time
+                    "Stream {:?} starting at seq {} at party time {}",
+                    key, seq, party_clock_time
                 );
             }
             crate::party::stream::SyncedControl::Pause { .. } => {
                 entry.playing = false;
                 entry.last_seen = Instant::now();
-                info!("Stream {} paused", stream_id);
+                info!("Stream {:?} paused", key);
             }
         }
     }
@@ -286,14 +308,35 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         let Some(mut entry) = self.buffers.get_mut(&key) else {
             return;
         };
+        let entry = &mut *entry;
 
         entry.last_seen = Instant::now();
+
+        if entry.decoded_frames.contains_key(&frame.sequence_number) {
+            return;
+        }
+
+        let packet =
+            symphonia::core::formats::Packet::new_from_slice(0, 0, frame.dur as u64, &frame.data);
+
+        let Ok(decoded) = entry.decoder.decode(&packet) else {
+            return;
+        };
+
+        let buf = extract_and_resample::<Sample, CHANNELS, SAMPLE_RATE>(
+            &decoded,
+            entry.resampler.as_mut(),
+        );
+
         entry
-            .raw_frames
-            .insert(frame.sequence_number, frame.to_raw_packet());
+            .decoded_frames
+            .insert(frame.sequence_number, DecodedFrame { samples: buf });
     }
 
     /// Pulls samples from all streams and mixes them together.
+    ///
+    /// All decoded frames are already resampled to SAMPLE_RATE, so we can directly
+    /// calculate elapsed samples from elapsed time without rate conversion.
     pub fn pull_and_mix(
         &self,
         num_frames: usize,
@@ -304,12 +347,12 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         let mut source_count = 0usize;
         let mut frames_collected = 0usize;
 
-        for mut entry in self.buffers.iter_mut() {
+        // iter each synced stream, although there should only be one
+        for entry in self.buffers.iter() {
             if !entry.playing || entry.start_party_time > party_now {
                 continue;
             }
 
-            let source_sample_rate = entry.meta.codec_params.sample_rate;
             let start_seq = entry.start_seq;
             let start_party_time = entry.start_party_time;
 
@@ -317,93 +360,46 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 AudioBuffer::new_zeroed(num_frames);
             let mut local_frames = 0usize;
 
-            while local_frames < num_frames {
-                let elapsed_us = party_now - start_party_time;
-                let elapsed_samples_at_source =
-                    (elapsed_us * source_sample_rate as u64 / 1_000_000) + local_frames as u64;
+            'fill_local: while local_frames < num_frames {
+                let elapsed_samples = (party_now - start_party_time) * SAMPLE_RATE as u64
+                    / 1_000_000
+                    + local_frames as u64;
 
-                // Check if elapsed sample falls within the already-decoded PCM buffer
-                let cached_match = if let Some((_, cached_offset, ref pcm)) = entry.current_decode {
-                    elapsed_samples_at_source >= cached_offset
-                        && elapsed_samples_at_source
-                            < cached_offset + pcm.samples_per_channel() as u64
-                } else {
-                    false
-                };
-
-                // decode a packet
-                if !cached_match {
-                    // find the right packet to decode
+                // Find which frame contains the `elapsed_samples`th sample
+                let (frame, frame_start_sample) = {
                     let mut cumulative = 0u64;
-                    let mut target_seq = start_seq;
+                    let mut seq = start_seq;
                     loop {
-                        if let Some(pkt) = entry.raw_frames.get(&target_seq) {
-                            if elapsed_samples_at_source < cumulative + pkt.dur as u64 {
-                                break;
-                            }
-                            cumulative += pkt.dur as u64;
-                            target_seq += 1;
-                        } else {
-                            break;
+                        let Some(frame) = entry.decoded_frames.get(&seq) else {
+                            // Have loss packet, can't calculate where to read. Give up.
+                            break 'fill_local;
+                        };
+                        let frame_end = cumulative + frame.samples.samples_per_channel() as u64;
+                        if elapsed_samples < frame_end {
+                            break (frame, cumulative);
                         }
+                        cumulative = frame_end;
+                        seq += 1;
                     }
-
-                    let raw_data = entry
-                        .raw_frames
-                        .get(&target_seq)
-                        .map(|pkt| (pkt.dur, pkt.data.clone()));
-
-                    if let Some((dur, data)) = raw_data {
-                        let packet = symphonia::core::formats::Packet::new_from_slice(
-                            0, cumulative, dur as u64, &data,
-                        );
-
-                        if let Ok(decoded) = entry.decoder.decode(&packet) {
-                            let channel_bufs: [Vec<Sample>; CHANNELS] =
-                                extract_samples::<Sample, CHANNELS>(&decoded);
-
-                            let samples_count = channel_bufs[0].len();
-                            let mut samples: Vec<Sample> =
-                                Vec::with_capacity(samples_count * CHANNELS);
-                            for i in 0..samples_count {
-                                for ch in 0..CHANNELS {
-                                    samples.push(channel_bufs[ch][i]);
-                                }
-                            }
-
-                            if let Ok(buf) = AudioBuffer::new(samples) {
-                                entry.current_decode = Some((target_seq, cumulative, buf));
-                            } else {
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    } else {
-                        // missing packet
-                        break;
-                    }
-                }
-
-                let (pcm_offset, pcm) = match &entry.current_decode {
-                    Some((_, offset, pcm)) => (*offset, pcm),
-                    None => break,
                 };
 
-                // Position within the decoded PCM buffer
-                let frame_offset = (elapsed_samples_at_source - pcm_offset) as usize;
-                let remaining = pcm.samples_per_channel().saturating_sub(frame_offset);
+                let frame_offset = (elapsed_samples - frame_start_sample) as usize;
+                let remaining = frame
+                    .samples
+                    .samples_per_channel()
+                    .saturating_sub(frame_offset);
                 let take_frames = (num_frames - local_frames).min(remaining);
 
                 for f in 0..take_frames {
                     for ch in 0..CHANNELS {
                         *local_buf.get_mut(local_frames + f, ch) =
-                            pcm.get(frame_offset + f, ch).to_i64_for_mix();
+                            frame.samples.get(frame_offset + f, ch).to_i64_for_mix();
                     }
                 }
                 local_frames += take_frames;
             }
 
+            // Add local buffer to mix buffer
             if local_frames > 0 {
                 source_count += 1;
                 for f in 0..local_frames {
@@ -419,12 +415,12 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             return None;
         }
 
-        let samples: Vec<Sample> = mixed
+        let divided_samples: Vec<Sample> = mixed
             .into_inner()
             .into_iter()
             .map(|s| Sample::from_i64_mixed(s, source_count))
             .collect();
-        AudioBuffer::new(samples).ok()
+        AudioBuffer::new(divided_samples).ok()
     }
 
     pub fn cleanup_stale(&self) {
@@ -446,26 +442,25 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         let mut result = Vec::new();
 
         for entry in self.buffers.iter() {
-            let buffered_frames = entry.raw_frames.len();
-            let highest_seq_received = entry.raw_frames.keys().max().copied().unwrap_or(0);
+            let buffered_frames = entry.decoded_frames.len();
+            let highest_seq_received = entry.decoded_frames.keys().max().copied().unwrap_or(0);
 
             let mut total_samples = 0u64;
-            for pkt in entry.raw_frames.values() {
-                total_samples += pkt.dur as u64;
+            for frame in entry.decoded_frames.values() {
+                total_samples += frame.samples.samples_per_channel() as u64;
             }
 
             let samples_played = if entry.playing && party_now > entry.start_party_time {
                 let mut cumulative_samples = 0u64;
                 for seq in entry.start_seq.. {
-                    if let Some(pkt) = entry.raw_frames.get(&seq) {
-                        cumulative_samples += pkt.dur as u64;
+                    if let Some(frame) = entry.decoded_frames.get(&seq) {
+                        cumulative_samples += frame.samples.samples_per_channel() as u64;
                     } else {
                         break;
                     }
                 }
-                let sample_rate = entry.meta.codec_params.sample_rate;
                 let elapsed_us = party_now - entry.start_party_time;
-                let elapsed_samples = elapsed_us * sample_rate as u64 / 1_000_000;
+                let elapsed_samples = elapsed_us * SAMPLE_RATE as u64 / 1_000_000;
                 elapsed_samples.min(cumulative_samples)
             } else {
                 0
@@ -498,18 +493,17 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
         for entry in self.buffers.iter() {
             let mut missing = Vec::new();
-            let sample_rate = entry.meta.codec_params.sample_rate;
 
             let current_seq = if entry.playing && party_now > entry.start_party_time {
                 let elapsed_us = party_now - entry.start_party_time;
-                let elapsed_samples = elapsed_us * sample_rate as u64 / 1_000_000;
+                let elapsed_samples = elapsed_us * SAMPLE_RATE as u64 / 1_000_000;
                 let mut cumulative = 0u64;
                 let mut seq = entry.start_seq;
-                while let Some(pkt) = entry.raw_frames.get(&seq) {
+                while let Some(frame) = entry.decoded_frames.get(&seq) {
                     if cumulative >= elapsed_samples {
                         break;
                     }
-                    cumulative += pkt.dur as u64;
+                    cumulative += frame.samples.samples_per_channel() as u64;
                     seq += 1;
                 }
                 seq
@@ -520,7 +514,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             let end_check = (current_seq + 200).min(entry.meta.total_frames);
 
             for seq in 1..=end_check {
-                if !entry.raw_frames.contains_key(&seq) {
+                if !entry.decoded_frames.contains_key(&seq) {
                     missing.push(seq);
                     if missing.len() >= 100 {
                         break;

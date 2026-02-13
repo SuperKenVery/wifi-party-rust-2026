@@ -3,7 +3,10 @@
 //! All workarounds for symphonia's limited public API live here.
 //! If this file grows complex, consider forking symphonia.
 
+use crate::audio::frame::AudioBuffer;
+use crate::audio::sample::AudioSample;
 use rkyv::{Archive, Deserialize, Serialize};
+use rubato::{FftFixedIn, Resampler};
 use symphonia::core::audio::{AudioBufferRef, Signal};
 use symphonia::core::codecs::{CodecParameters, CodecType};
 
@@ -109,8 +112,6 @@ impl WireCodecParams {
     }
 }
 
-use crate::audio::sample::AudioSample;
-
 fn audio_buffer_frames(decoded: &AudioBufferRef) -> usize {
     match decoded {
         AudioBufferRef::F32(buf) => buf.frames(),
@@ -121,13 +122,27 @@ fn audio_buffer_frames(decoded: &AudioBufferRef) -> usize {
     }
 }
 
-/// Extract samples from symphonia's AudioBufferRef to any AudioSample type.
-/// Handles all symphonia sample formats, normalizes to [-1.0, 1.0], then converts to T.
-pub fn extract_samples<T: AudioSample, const CHANNELS: usize>(
-    decoded: &AudioBufferRef,
-) -> [Vec<T>; CHANNELS] {
+fn audio_buffer_sample_rate(decoded: &AudioBufferRef) -> u32 {
+    match decoded {
+        AudioBufferRef::F32(buf) => buf.spec().rate,
+        AudioBufferRef::S16(buf) => buf.spec().rate,
+        AudioBufferRef::S32(buf) => buf.spec().rate,
+        AudioBufferRef::U8(buf) => buf.spec().rate,
+        _ => 0,
+    }
+}
+
+struct ExtractedAudio<const CHANNELS: usize> {
+    channels: Vec<Vec<f32>>,
+    source_rate: u32,
+}
+
+fn extract_audio<const CHANNELS: usize>(decoded: &AudioBufferRef) -> ExtractedAudio<CHANNELS> {
     let num_frames = audio_buffer_frames(decoded);
-    let mut output: [Vec<T>; CHANNELS] = std::array::from_fn(|_| Vec::with_capacity(num_frames));
+    let source_rate = audio_buffer_sample_rate(decoded);
+    let mut channels: Vec<Vec<f32>> = (0..CHANNELS)
+        .map(|_| Vec::with_capacity(num_frames))
+        .collect();
 
     match decoded {
         AudioBufferRef::F32(buf) => {
@@ -135,7 +150,7 @@ pub fn extract_samples<T: AudioSample, const CHANNELS: usize>(
             for frame_idx in 0..num_frames {
                 for ch in 0..CHANNELS {
                     let src_ch = ch % num_channels;
-                    output[ch].push(T::from_f64_normalized(buf.chan(src_ch)[frame_idx] as f64));
+                    channels[ch].push(buf.chan(src_ch)[frame_idx]);
                 }
             }
         }
@@ -144,8 +159,7 @@ pub fn extract_samples<T: AudioSample, const CHANNELS: usize>(
             for frame_idx in 0..num_frames {
                 for ch in 0..CHANNELS {
                     let src_ch = ch % num_channels;
-                    output[ch]
-                        .push(T::from_f64_normalized(buf.chan(src_ch)[frame_idx] as f64 / 32768.0));
+                    channels[ch].push(buf.chan(src_ch)[frame_idx] as f32 / 32768.0);
                 }
             }
         }
@@ -154,9 +168,7 @@ pub fn extract_samples<T: AudioSample, const CHANNELS: usize>(
             for frame_idx in 0..num_frames {
                 for ch in 0..CHANNELS {
                     let src_ch = ch % num_channels;
-                    output[ch].push(T::from_f64_normalized(
-                        buf.chan(src_ch)[frame_idx] as f64 / 2147483648.0,
-                    ));
+                    channels[ch].push(buf.chan(src_ch)[frame_idx] as f32 / 2147483648.0);
                 }
             }
         }
@@ -165,14 +177,80 @@ pub fn extract_samples<T: AudioSample, const CHANNELS: usize>(
             for frame_idx in 0..num_frames {
                 for ch in 0..CHANNELS {
                     let src_ch = ch % num_channels;
-                    output[ch].push(T::from_f64_normalized(
-                        (buf.chan(src_ch)[frame_idx] as f64 - 128.0) / 128.0,
-                    ));
+                    channels[ch].push((buf.chan(src_ch)[frame_idx] as f32 - 128.0) / 128.0);
                 }
             }
         }
-        _ => {}
+        _ => {
+            for ch in 0..CHANNELS {
+                channels[ch].resize(num_frames, 0.0);
+            }
+        }
     }
 
-    output
+    ExtractedAudio {
+        channels,
+        source_rate,
+    }
+}
+
+/// Convert per-channel f32 vectors to interleaved AudioBuffer<T>.
+fn channels_to_interleaved<T: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>(
+    channels: &[Vec<f32>],
+) -> AudioBuffer<T, CHANNELS, SAMPLE_RATE> {
+    let num_frames = channels.first().map(|c| c.len()).unwrap_or(0);
+    let mut samples = Vec::with_capacity(num_frames * CHANNELS);
+
+    for frame_idx in 0..num_frames {
+        for ch in 0..CHANNELS {
+            samples.push(T::from_f64_normalized(channels[ch][frame_idx] as f64));
+        }
+    }
+
+    AudioBuffer::new(samples).expect("Extracted samples must be a multiple of CHANNELS")
+}
+
+/// Extract, resample, and convert in one call.
+///
+/// Uses high-quality FFT-based sinc resampling via rubato when sample rates differ.
+/// Pass a persistent resampler to maintain inter-frame state for smooth transitions.
+pub fn extract_and_resample<T: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>(
+    decoded: &AudioBufferRef,
+    resampler: Option<&mut FftFixedIn<f32>>,
+) -> AudioBuffer<T, CHANNELS, SAMPLE_RATE> {
+    let extracted = extract_audio::<CHANNELS>(decoded);
+
+    if extracted.channels.first().map(|c| c.len()).unwrap_or(0) == 0 {
+        return AudioBuffer::new(vec![]).unwrap();
+    }
+
+    if extracted.source_rate == SAMPLE_RATE {
+        return channels_to_interleaved(&extracted.channels);
+    }
+
+    match resampler {
+        Some(r) => {
+            let resampled = r
+                .process(&extracted.channels, None)
+                .expect("Resampling failed");
+            channels_to_interleaved(&resampled)
+        }
+        None => {
+            let num_frames = extracted.channels[0].len();
+            let mut temp_resampler = FftFixedIn::<f32>::new(
+                extracted.source_rate as usize,
+                SAMPLE_RATE as usize,
+                num_frames,
+                1,
+                CHANNELS,
+            )
+            .expect("Failed to create resampler");
+
+            let resampled = temp_resampler
+                .process(&extracted.channels, None)
+                .expect("Resampling failed");
+
+            channels_to_interleaved(&resampled)
+        }
+    }
 }
