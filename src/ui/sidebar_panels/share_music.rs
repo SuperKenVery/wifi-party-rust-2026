@@ -4,6 +4,8 @@ use dioxus::prelude::*;
 use std::sync::Arc;
 use tracing::error;
 
+use super::PanelHeader;
+
 #[derive(Clone, PartialEq)]
 struct SenderProgressInfo {
     frames_sent: u64,
@@ -26,7 +28,10 @@ struct ReceiverProgressInfo {
 
 #[allow(non_snake_case)]
 #[component]
-pub fn ShareMusicPanel(active_streams: Vec<SyncedStreamState>) -> Element {
+pub fn ShareMusicPanel(
+    active_streams: Vec<SyncedStreamState>,
+    #[props(default)] on_back: Option<EventHandler<()>>,
+) -> Element {
     let state_arc = use_context::<Arc<AppState>>();
 
     let progress = state_arc.music_progress.clone();
@@ -81,13 +86,7 @@ pub fn ShareMusicPanel(active_streams: Vec<SyncedStreamState>) -> Element {
         div {
             class: "flex-1 flex flex-col relative overflow-hidden bg-slate-900",
 
-            div {
-                class: "h-20 px-8 flex items-center justify-between z-10",
-                div {
-                    class: "flex items-center gap-4",
-                    h2 { class: "text-xl font-bold text-white", "Share Music" }
-                }
-            }
+            PanelHeader { title: "Share Music", on_back }
 
             div {
                 class: "flex-1 overflow-y-auto p-8 pt-0",

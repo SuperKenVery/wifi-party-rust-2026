@@ -1,20 +1,19 @@
 use crate::party::NtpDebugInfo;
 use dioxus::prelude::*;
 
+use super::PanelHeader;
+
 #[allow(non_snake_case)]
 #[component]
-pub fn DebugPanel(ntp_info: Option<NtpDebugInfo>) -> Element {
+pub fn DebugPanel(
+    ntp_info: Option<NtpDebugInfo>,
+    #[props(default)] on_back: Option<EventHandler<()>>,
+) -> Element {
     rsx! {
         div {
             class: "flex-1 flex flex-col relative overflow-hidden bg-slate-900",
 
-            div {
-                class: "h-20 px-8 flex items-center justify-between z-10",
-                div {
-                    class: "flex items-center gap-4",
-                    h2 { class: "text-xl font-bold text-white", "Debug" }
-                }
-            }
+            PanelHeader { title: "Debug", on_back }
 
             div {
                 class: "flex-1 overflow-y-auto p-8 pt-0",

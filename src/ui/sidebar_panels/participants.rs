@@ -5,31 +5,24 @@ use crate::state::{AppState, HostId, HostInfo};
 use dioxus::prelude::*;
 use std::sync::Arc;
 
+use super::PanelHeader;
+
 #[allow(non_snake_case)]
 #[component]
-pub fn MainContent(hosts: Vec<HostInfo>) -> Element {
+pub fn MainContent(
+    hosts: Vec<HostInfo>,
+    #[props(default)] on_back: Option<EventHandler<()>>,
+) -> Element {
+    let badge = format!("{} Active", hosts.len());
+
     rsx! {
         div {
             class: "flex-1 flex flex-col relative overflow-hidden bg-slate-900",
 
-            div {
-                class: "h-20 px-8 flex items-center justify-between z-10",
-                div {
-                    class: "flex items-center gap-4",
-                    h2 { class: "text-xl font-bold text-white", "Participants" }
-                    span {
-                        class: "px-2.5 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 text-xs font-bold border border-indigo-500/30",
-                        "{hosts.len()} Active"
-                    }
-                }
-
-                div {
-                    class: "flex gap-2",
-                    button {
-                        class: "w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center text-slate-400 hover:text-white transition-colors",
-                        "⚙️"
-                    }
-                }
+            PanelHeader {
+                title: "Participants",
+                badge: Some(badge),
+                on_back,
             }
 
             div {

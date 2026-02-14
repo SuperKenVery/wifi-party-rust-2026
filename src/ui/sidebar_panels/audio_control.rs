@@ -7,6 +7,8 @@ use network_interface::NetworkInterfaceConfig;
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use super::PanelHeader;
+
 #[derive(Clone, Debug)]
 struct NetworkInterfaceInfo {
     name: String,
@@ -106,6 +108,7 @@ pub fn AudioControlPanel(
     system_audio_enabled: bool,
     system_audio_level: u32,
     listen_enabled: bool,
+    #[props(default)] on_back: Option<EventHandler<()>>,
 ) -> Element {
     let state_arc = use_context::<Arc<AppState>>();
     let mut mic_enabled = use_signal(|| false);
@@ -167,13 +170,7 @@ pub fn AudioControlPanel(
         div {
             class: "flex-1 flex flex-col relative overflow-hidden bg-slate-900",
 
-            div {
-                class: "h-20 px-8 flex items-center justify-between z-10",
-                div {
-                    class: "flex items-center gap-4",
-                    h2 { class: "text-xl font-bold text-white", "Audio Control" }
-                }
-            }
+            PanelHeader { title: "Audio Control", on_back }
 
             div {
                 class: "flex-1 overflow-y-auto p-8 pt-0",
@@ -190,51 +187,50 @@ pub fn AudioControlPanel(
                         }
 
                         div {
-                            class: "grid grid-cols-4 gap-4 mb-8",
+                            class: "flex flex-wrap gap-4 mb-8",
 
                             button {
                                 class: format!(
-                                    "p-4 rounded-xl flex flex-col items-center justify-center gap-2 transition-all duration-200 border {}",
+                                    "flex-1 min-w-[5rem] p-4 rounded-xl flex flex-col items-center justify-center gap-2 transition-all duration-200 border {}",
                                     if mic_enabled() { "bg-emerald-500/10 border-emerald-500/50 text-emerald-400 hover:bg-emerald-500/20" }
                                     else { "bg-rose-500/10 border-rose-500/50 text-rose-400 hover:bg-rose-500/20" }
                                 ),
                                 onclick: on_mic_toggle,
                                 div { class: "text-2xl", if mic_enabled() { "🎙️" } else { "🔇" } }
-                                span { class: "text-xs font-bold", if mic_enabled() { "Mic On" } else { "Mic Off" } }
+                                span { class: "text-xs font-bold text-center", if mic_enabled() { "Mic On" } else { "Mic Off" } }
                             }
 
                             button {
                                 class: format!(
-                                    "p-4 rounded-xl flex flex-col items-center justify-center gap-2 transition-all duration-200 border {}",
+                                    "flex-1 min-w-[5rem] p-4 rounded-xl flex flex-col items-center justify-center gap-2 transition-all duration-200 border {}",
                                     if loopback_enabled { "bg-indigo-500/10 border-indigo-500/50 text-indigo-400 hover:bg-indigo-500/20" }
                                     else { "bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700 hover:text-slate-300" }
                                 ),
                                 onclick: on_loopback_toggle,
                                 div { class: "text-2xl", "🎧" }
-                                span { class: "text-xs font-bold", if loopback_enabled { "Loopback" } else { "No Loop" } }
+                                span { class: "text-xs font-bold text-center", if loopback_enabled { "Loopback" } else { "No Loop" } }
                             }
 
                             button {
                                 class: format!(
-                                    "p-4 rounded-xl flex flex-col items-center justify-center gap-2 transition-all duration-200 border {}",
+                                    "flex-1 min-w-[5rem] p-4 rounded-xl flex flex-col items-center justify-center gap-2 transition-all duration-200 border {}",
                                     if system_audio_enabled { "bg-purple-500/10 border-purple-500/50 text-purple-400 hover:bg-purple-500/20" }
                                     else { "bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700 hover:text-slate-300" }
                                 ),
                                 onclick: on_system_audio_toggle,
                                 div { class: "text-2xl", "🔊" }
-                                span { class: "text-xs font-bold", if system_audio_enabled { "Sharing" } else { "Not Share" } }
+                                span { class: "text-xs font-bold text-center", if system_audio_enabled { "Sharing" } else { "Not Share" } }
                             }
 
-                            // Listen button - controls whether to play network audio
                             button {
                                 class: format!(
-                                    "p-4 rounded-xl flex flex-col items-center justify-center gap-2 transition-all duration-200 border {}",
+                                    "flex-1 min-w-[5rem] p-4 rounded-xl flex flex-col items-center justify-center gap-2 transition-all duration-200 border {}",
                                     if listen_enabled { "bg-cyan-500/10 border-cyan-500/50 text-cyan-400 hover:bg-cyan-500/20" }
                                     else { "bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700 hover:text-slate-300" }
                                 ),
                                 onclick: on_listen_toggle,
                                 div { class: "text-2xl", if listen_enabled { "👂" } else { "🔕" } }
-                                span { class: "text-xs font-bold", if listen_enabled { "Listen" } else { "Muted" } }
+                                span { class: "text-xs font-bold text-center", if listen_enabled { "Listen" } else { "Muted" } }
                             }
                         }
 

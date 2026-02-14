@@ -32,10 +32,20 @@ impl MenuSection {
 
 #[allow(non_snake_case)]
 #[component]
-pub fn SidebarMenu(selected: MenuSection, on_select: EventHandler<MenuSection>) -> Element {
+pub fn SidebarMenu(
+    selected: MenuSection,
+    on_select: EventHandler<MenuSection>,
+    #[props(default = false)] full_width: bool,
+) -> Element {
+    let width_class = if full_width {
+        "w-full"
+    } else {
+        "w-56 flex-shrink-0"
+    };
+
     rsx! {
         div {
-            class: "w-56 flex-shrink-0 flex flex-col glass-strong border-r border-slate-800 z-20",
+            class: "{width_class} flex flex-col glass-strong border-r border-slate-800 z-20",
 
             div {
                 class: "p-6 pb-4",
