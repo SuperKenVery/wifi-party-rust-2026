@@ -28,7 +28,6 @@ struct ReceiverProgressInfo {
 #[component]
 pub fn ShareMusicPanel(active_streams: Vec<SyncedStreamState>) -> Element {
     let state_arc = use_context::<Arc<AppState>>();
-    let mut is_picking = use_signal(|| false);
 
     let progress = state_arc.music_progress.clone();
     let is_encoding = progress
@@ -51,13 +50,9 @@ pub fn ShareMusicPanel(active_streams: Vec<SyncedStreamState>) -> Element {
         .load(std::sync::atomic::Ordering::Relaxed);
     let file_name = progress.file_name.lock().unwrap().clone();
 
-    let is_busy = is_encoding || is_streaming;
-
     let on_share_music = {
         let state = state_arc.clone();
         move |_| {
-            is_picking.set(true);
-
             let state_clone = state.clone();
             spawn(async move {
                 let file_handle = rfd::AsyncFileDialog::new()
@@ -72,8 +67,6 @@ pub fn ShareMusicPanel(active_streams: Vec<SyncedStreamState>) -> Element {
                         error!("Failed to start music stream: {}", e);
                     }
                 }
-
-                is_picking.set(false);
             });
         }
     };
@@ -111,19 +104,12 @@ pub fn ShareMusicPanel(active_streams: Vec<SyncedStreamState>) -> Element {
                         }
 
                         button {
-                            class: "w-full p-6 rounded-2xl flex items-center justify-center gap-4 transition-all duration-200 border bg-pink-500/10 border-pink-500/50 text-pink-400 hover:bg-pink-500/20 disabled:opacity-50 disabled:cursor-not-allowed",
+                            class: "w-full p-6 rounded-2xl flex items-center justify-center gap-4 transition-all duration-200 border bg-pink-500/10 border-pink-500/50 text-pink-400 hover:bg-pink-500/20",
                             onclick: on_share_music,
-                            disabled: *is_picking.read() || is_busy,
                             div { class: "text-3xl", "🎵" }
                             span {
                                 class: "text-lg font-bold",
-                                if *is_picking.read() {
-                                    "Selecting..."
-                                } else if is_busy {
-                                    "Busy..."
-                                } else {
-                                    "Select Music File"
-                                }
+                                "Select Music File"
                             }
                         }
 
