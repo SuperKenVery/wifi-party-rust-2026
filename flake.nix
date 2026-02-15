@@ -69,8 +69,8 @@
 
 
     androidSdk = eachSystem (pkgs: (pkgs.androidenv.composeAndroidPackages {
-      platformVersions = [ "34" ];
-      buildToolsVersions = [ "34.0.0" ];
+      platformVersions = [ "33" "34" ];
+      buildToolsVersions = [ "33.0.0" "34.0.0" ];
       ndkVersions = [ "25.2.9519653" ];
       includeEmulator = false;
       includeSources = false;
