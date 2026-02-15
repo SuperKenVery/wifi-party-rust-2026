@@ -1,4 +1,5 @@
 [application]
+android_manifest = "assets/AndroidManifest.xml"
 
 [bundle]
 identifier = "com.ken.WifiPartyRust"
@@ -8,6 +9,9 @@ resources = []
 
 [bundle.macos]
 info_plist_path = "assets/Info.plist"
+
+[permissions]
+microphone.description = "Wi-Fi Party needs microphone permission to send your voice to the network"
 
 [web.app]
 

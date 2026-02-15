@@ -35,7 +35,7 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    info!("Starting Wi-Fi Party KTV...");
+    info!("Starting Wi-Fi Party...");
     // Deloxide::new()
     //     .callback(|info| {
     //         println!("Deadlock detected! Cycle: {:?}", info.thread_cycle);
