@@ -17,6 +17,7 @@ mod audio;
 mod io;
 mod party;
 mod pipeline;
+mod platform_support;
 mod state;
 mod ui;
 

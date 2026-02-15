@@ -55,28 +55,7 @@ pub fn ShareMusicPanel(
         .load(std::sync::atomic::Ordering::Relaxed);
     let file_name = progress.file_name.lock().unwrap().clone();
 
-    let on_file_selected = {
-        let state = state_arc.clone();
-        move |evt: Event<FormData>| {
-            let state_clone = state.clone();
-            spawn(async move {
-                let files = evt.files();
-                let Some(file) = files.first() else {
-                    return;
-                };
 
-                let file_name = file.name();
-                let Ok(bytes) = file.read_bytes().await else {
-                    error!("Failed to read file: {}", file_name);
-                    return;
-                };
-
-                if let Err(e) = state_clone.start_music_stream(bytes.to_vec(), file_name) {
-                    error!("Failed to start music stream: {}", e);
-                }
-            });
-        }
-    };
 
     let encoding_percent = if encoding_total > 0 {
         (encoding_current as f64 / encoding_total as f64 * 100.0) as u32
@@ -104,20 +83,7 @@ pub fn ShareMusicPanel(
                             "Share a music file with all participants. The audio will be synchronized across all connected devices using NTP-like time synchronization."
                         }
 
-                        label {
-                            class: "w-full p-6 rounded-2xl flex items-center justify-center gap-4 transition-all duration-200 border bg-pink-500/10 border-pink-500/50 text-pink-400 hover:bg-pink-500/20 cursor-pointer",
-                            div { class: "text-3xl", "🎵" }
-                            span {
-                                class: "text-lg font-bold",
-                                "Select Music File"
-                            }
-                            input {
-                                r#type: "file",
-                                accept: ".mp3,.flac,.wav,.ogg,.m4a,.aac,audio/*",
-                                class: "hidden",
-                                onchange: on_file_selected,
-                            }
-                        }
+                        { file_select_button(state_arc.clone()) }
 
                         if is_encoding {
                             div {
@@ -396,6 +362,80 @@ fn ReceiverProgressBar(info: ReceiverProgressInfo) -> Element {
                         "Missing"
                     }
                 }
+            }
+        }
+    }
+}
+
+const FILE_SELECT_BUTTON_CLASS: &str = "w-full p-6 rounded-2xl flex items-center justify-center gap-4 transition-all duration-200 border bg-pink-500/10 border-pink-500/50 text-pink-400 hover:bg-pink-500/20 cursor-pointer";
+
+fn file_select_button(state: Arc<AppState>) -> Element {
+    #[cfg(target_os = "android")]
+    let on_click = {
+        use crate::io::pick_audio_file;
+        use tracing::info;
+
+        move |_| {
+            let state_clone = state.clone();
+            spawn(async move {
+                info!("Opening native file picker...");
+                let Some(result) = pick_audio_file().await else {
+                    info!("File picker returned None (cancelled or error)");
+                    return;
+                };
+
+                info!("Got file: {}", result.name);
+                if let Err(e) = state_clone.start_music_stream(result.data, result.name) {
+                    error!("Failed to start music stream: {}", e);
+                }
+            });
+        }
+    };
+
+    #[cfg(not(target_os = "android"))]
+    let on_change = {
+        move |evt: Event<FormData>| {
+            let state_clone = state.clone();
+            spawn(async move {
+                let files = evt.files();
+                let Some(file) = files.first() else {
+                    return;
+                };
+
+                let file_name = file.name();
+                let Ok(bytes) = file.read_bytes().await else {
+                    error!("Failed to read file: {}", file_name);
+                    return;
+                };
+
+                if let Err(e) = state_clone.start_music_stream(bytes.to_vec(), file_name) {
+                    error!("Failed to start music stream: {}", e);
+                }
+            });
+        }
+    };
+
+    #[cfg(target_os = "android")]
+    return rsx! {
+        button {
+            class: FILE_SELECT_BUTTON_CLASS,
+            onclick: on_click,
+            div { class: "text-3xl", "🎵" }
+            span { class: "text-lg font-bold", "Select Music File" }
+        }
+    };
+
+    #[cfg(not(target_os = "android"))]
+    rsx! {
+        label {
+            class: FILE_SELECT_BUTTON_CLASS,
+            div { class: "text-3xl", "🎵" }
+            span { class: "text-lg font-bold", "Select Music File" }
+            input {
+                r#type: "file",
+                accept: ".mp3,.flac,.wav,.ogg,.m4a,.aac,audio/*",
+                class: "hidden",
+                onchange: on_change,
             }
         }
     }

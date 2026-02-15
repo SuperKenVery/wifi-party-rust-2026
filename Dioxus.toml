@@ -1,5 +1,6 @@
 [application]
 android_manifest = "assets/AndroidManifest.xml"
+android_main_activity = "assets/MainActivity.kt"
 
 [bundle]
 identifier = "com.ken.WifiPartyRust"

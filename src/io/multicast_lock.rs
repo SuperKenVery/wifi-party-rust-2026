@@ -5,26 +5,10 @@
 
 #[cfg(target_os = "android")]
 mod android {
-    use jni::JNIEnv;
+    use crate::platform_support::android_utils::with_jni_context;
     use jni::objects::JObject;
-    use jni::sys::jobject;
-    use ndk_context::AndroidContext;
-    use std::sync::Arc;
+    use jni::JNIEnv;
     use tracing::{error, info};
-
-    fn get_context() -> AndroidContext {
-        ndk_context::android_context()
-    }
-
-    fn with_attached<F, R>(context: AndroidContext, closure: F) -> jni::errors::Result<R>
-    where
-        for<'j> F: FnOnce(&mut JNIEnv<'j>, JObject<'j>) -> jni::errors::Result<R>,
-    {
-        let vm = Arc::new(unsafe { jni::JavaVM::from_raw(context.vm().cast())? });
-        let ctx = context.context();
-        let ctx = unsafe { JObject::from_raw(ctx as jobject) };
-        jni::Executor::new(vm).with_attached(|env| closure(env, ctx))
-    }
 
     pub struct MulticastLock {
         lock: jni::objects::GlobalRef,
@@ -32,9 +16,7 @@ mod android {
 
     impl MulticastLock {
         pub fn acquire() -> Option<Self> {
-            let context = get_context();
-
-            match with_attached(context, |env, ctx| acquire_lock(env, &ctx)) {
+            match with_jni_context(|env, ctx| acquire_lock(env, &ctx)) {
                 Ok(lock) => {
                     info!("MulticastLock acquired");
                     Some(Self { lock })
@@ -49,8 +31,7 @@ mod android {
 
     impl Drop for MulticastLock {
         fn drop(&mut self) {
-            let context = get_context();
-            if let Err(e) = with_attached(context, |env, _ctx| release_lock(env, &self.lock)) {
+            if let Err(e) = with_jni_context(|env, _ctx| release_lock(env, &self.lock)) {
                 error!("Failed to release MulticastLock: {:?}", e);
             } else {
                 info!("MulticastLock released");
