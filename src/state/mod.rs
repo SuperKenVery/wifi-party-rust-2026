@@ -7,7 +7,6 @@
 
 use anyhow::{Context, Result};
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex};
 
@@ -173,13 +172,13 @@ impl AppState {
             .unwrap_or_default()
     }
 
-    pub fn start_music_stream(&self, path: PathBuf) -> Result<()> {
+    pub fn start_music_stream(&self, data: Vec<u8>, file_name: String) -> Result<()> {
         self.party
             .lock()
             .expect("Party lock poisoned")
             .as_ref()
             .context("Party not initialized")?
-            .start_music_stream(path, self.music_progress.clone())
+            .start_music_stream(data, file_name, self.music_progress.clone())
     }
 
     pub fn pause_music(&self, stream_id: crate::party::SyncedStreamId) -> Result<()> {

@@ -55,22 +55,24 @@ pub fn ShareMusicPanel(
         .load(std::sync::atomic::Ordering::Relaxed);
     let file_name = progress.file_name.lock().unwrap().clone();
 
-    let on_share_music = {
+    let on_file_selected = {
         let state = state_arc.clone();
-        move |_| {
+        move |evt: Event<FormData>| {
             let state_clone = state.clone();
             spawn(async move {
-                let file_handle = rfd::AsyncFileDialog::new()
-                    .add_filter("Audio Files", &["mp3", "flac", "wav", "ogg", "m4a", "aac"])
-                    .pick_file()
-                    .await;
+                let files = evt.files();
+                let Some(file) = files.first() else {
+                    return;
+                };
 
-                if let Some(handle) = file_handle {
-                    let path = handle.path().to_path_buf();
+                let file_name = file.name();
+                let Ok(bytes) = file.read_bytes().await else {
+                    error!("Failed to read file: {}", file_name);
+                    return;
+                };
 
-                    if let Err(e) = state_clone.start_music_stream(path) {
-                        error!("Failed to start music stream: {}", e);
-                    }
+                if let Err(e) = state_clone.start_music_stream(bytes.to_vec(), file_name) {
+                    error!("Failed to start music stream: {}", e);
                 }
             });
         }
@@ -102,13 +104,18 @@ pub fn ShareMusicPanel(
                             "Share a music file with all participants. The audio will be synchronized across all connected devices using NTP-like time synchronization."
                         }
 
-                        button {
-                            class: "w-full p-6 rounded-2xl flex items-center justify-center gap-4 transition-all duration-200 border bg-pink-500/10 border-pink-500/50 text-pink-400 hover:bg-pink-500/20",
-                            onclick: on_share_music,
+                        label {
+                            class: "w-full p-6 rounded-2xl flex items-center justify-center gap-4 transition-all duration-200 border bg-pink-500/10 border-pink-500/50 text-pink-400 hover:bg-pink-500/20 cursor-pointer",
                             div { class: "text-3xl", "🎵" }
                             span {
                                 class: "text-lg font-bold",
                                 "Select Music File"
+                            }
+                            input {
+                                r#type: "file",
+                                accept: ".mp3,.flac,.wav,.ogg,.m4a,.aac,audio/*",
+                                class: "hidden",
+                                onchange: on_file_selected,
                             }
                         }
 

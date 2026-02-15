@@ -8,9 +8,8 @@
 //! - Playback control (Play, Pause, Seek)
 
 use std::collections::VecDeque;
-use std::fs::File;
+use std::io::Cursor;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -59,21 +58,20 @@ pub struct MusicStream {
 
 impl MusicStream {
     pub fn start<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u32>(
-        path: PathBuf,
+        data: Vec<u8>,
+        file_name: String,
         ntp_service: Arc<NtpService>,
         network_sender: NetworkSender,
         synced_stream: Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>,
         progress: Arc<MusicStreamProgress>,
     ) -> Result<Self> {
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string();
-
         info!("Starting music stream for: {}", file_name);
 
-        let source = AudioSource::open(&path)?;
+        let extension = file_name
+            .rsplit('.')
+            .next()
+            .map(|s| s.to_lowercase());
+        let source = AudioSource::open(data, extension.as_deref())?;
         let codec_params = WireCodecParams::from_symphonia(&source.codec_params())
             .ok_or_else(|| anyhow!("Unsupported codec"))?;
 
@@ -183,12 +181,12 @@ struct AudioSource {
 }
 
 impl AudioSource {
-    fn open(path: &PathBuf) -> Result<Self> {
-        let file = File::open(path).context("Failed to open audio file")?;
-        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    fn open(data: Vec<u8>, extension: Option<&str>) -> Result<Self> {
+        let cursor = Cursor::new(data);
+        let mss = MediaSourceStream::new(Box::new(cursor), Default::default());
 
         let mut hint = Hint::new();
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        if let Some(ext) = extension {
             hint.with_extension(ext);
         }
 

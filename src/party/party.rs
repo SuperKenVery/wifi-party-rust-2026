@@ -3,7 +3,6 @@
 //! Coordinates audio capture, network transport, and playback into a complete
 //! audio sharing pipeline.
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -267,7 +266,8 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
 
     pub fn start_music_stream(
         &self,
-        path: PathBuf,
+        data: Vec<u8>,
+        file_name: String,
         progress: Arc<MusicStreamProgress>,
     ) -> Result<()> {
         let network_sender = self
@@ -289,7 +289,8 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
             .clone();
 
         let music_stream = MusicStream::start::<Sample, CHANNELS, SAMPLE_RATE>(
-            path,
+            data,
+            file_name,
             ntp_service,
             network_sender,
             synced_stream,
