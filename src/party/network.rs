@@ -61,7 +61,8 @@ use tracing::{info, warn};
 
 use crate::audio::AudioSample;
 use crate::io::{
-    MULTICAST_ADDR_V4, MULTICAST_ADDR_V6, MULTICAST_PORT, NetworkReceiver, NetworkSender, TTL,
+    MULTICAST_ADDR_V4, MULTICAST_ADDR_V6, MULTICAST_PORT, MulticastLock, NetworkReceiver,
+    NetworkSender, TTL,
 };
 use crate::party::ntp::NtpService;
 use crate::party::stream::RealtimeAudioStream;
@@ -192,6 +193,8 @@ fn allow_awdl(socket: &Socket, allow: bool) -> Result<()> {
 pub struct NetworkNode<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     receiver_handle: Option<thread::JoinHandle<()>>,
     shutdown_flag: Arc<AtomicBool>,
+    #[allow(dead_code)]
+    multicast_lock: Option<MulticastLock>,
     _marker: PhantomData<Sample>,
 }
 
@@ -202,6 +205,7 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         Self {
             receiver_handle: None,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
+            multicast_lock: None,
             _marker: PhantomData,
         }
     }
@@ -255,6 +259,8 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>,
         Arc<NtpService>,
     )> {
+        self.multicast_lock = MulticastLock::acquire();
+
         let (socket, multicast_addr, local_ips) = if ipv6 {
             Self::setup_socket_v6(send_interface_index)?
         } else {

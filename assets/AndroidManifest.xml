@@ -4,6 +4,8 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <application android:hasCode="true" android:supportsRtl="true" android:icon="@mipmap/ic_launcher"
         android:extractNativeLibs="true"
         android:allowNativeHeapPointerTagging="false"

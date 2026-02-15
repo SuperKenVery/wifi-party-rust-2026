@@ -31,6 +31,14 @@ npx @tailwindcss/cli -i tailwind.css -o tailwind_output.css --watch
 dx build --release
 ```
 
+## Building for Android
+
+```bash
+dx build --platform android
+```
+
+The app automatically acquires `WifiManager.MulticastLock` via JNI to enable multicast UDP reception.
+
 ## Project Structure
 
 ```

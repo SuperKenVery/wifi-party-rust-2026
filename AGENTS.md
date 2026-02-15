@@ -141,6 +141,18 @@ Packet types (serialized with rkyv):
 - `RequestFrames` - Retransmission requests
 - `Ntp` - Time sync messages
 
+## Platform-Specific Notes
+
+### Android
+
+Android requires `WifiManager.MulticastLock` to receive multicast UDP packets. Without it, the OS filters out multicast traffic to save battery.
+
+Files:
+- `assets/AndroidManifest.xml` - Declares `CHANGE_WIFI_MULTICAST_STATE` and `ACCESS_WIFI_STATE` permissions
+- `src/io/multicast_lock.rs` - JNI wrapper that acquires/releases MulticastLock via WifiManager
+
+The lock is acquired in `NetworkNode::start()` and held for the lifetime of the network connection.
+
 ## Key Components Detail
 
 ### JitterBuffer (`src/audio/buffers/jitter_buffer.rs`)
