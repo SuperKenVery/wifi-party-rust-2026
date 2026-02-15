@@ -23,12 +23,16 @@
           f (import nixpkgs {
             inherit system;
             overlays = [inputs.rust-overlay.overlays.default];
+            config = {
+              allowUnfree = true;
+              android_sdk.accept_license = true;
+            };
           })
       );
 
     rustToolchain = eachSystem (pkgs: pkgs.rust-bin.stable.latest.default.override {
       extensions = ["rust-src" "rust-analyzer"];
-      targets = ["wasm32-unknown-unknown"];
+      targets = ["wasm32-unknown-unknown" "aarch64-linux-android"];
     });
 
     dioxus-cli = eachSystem (pkgs: pkgs.dioxus-cli.overrideAttrs (oldAttrs: {
@@ -64,6 +68,16 @@
 
 
 
+    androidSdk = eachSystem (pkgs: (pkgs.androidenv.composeAndroidPackages {
+      platformVersions = [ "34" ];
+      buildToolsVersions = [ "34.0.0" ];
+      ndkVersions = [ "25.2.9519653" ];
+      includeEmulator = false;
+      includeSources = false;
+      includeSystemImages = false;
+      includeNDK = true;
+    }).androidsdk);
+
   in rec {
     devShells = eachSystem (pkgs: {
       # Based on a discussion at https://github.com/oxalica/rust-overlay/issues/129
@@ -85,6 +99,8 @@
           lld
           cmake
           pkg-config
+          jdk17
+          androidSdk.${pkgs.stdenv.hostPlatform.system}
         ] ++
         (pkgs.lib.optionals pkgs.stdenv.isLinux (with pkgs; [
           openssl
@@ -93,15 +109,15 @@
           apple-sdk_15
         ]));
 
-        # RUST_SRC_PATH = "${
-        #   rustToolchain.${pkgs.stdenv.hostPlatform.system}.rust-src
-        # }/lib/rustlib/src/rust/library";
         RUST_BACKTRACE = "1";
         RUST_LOG = "debug";
 
-        # Statically link libopus
         OPUS_NO_PKG = "1";
         CMAKE_POLICY_VERSION_MINIMUM = "3.5";
+
+        JAVA_HOME = "${jdk17}";
+        ANDROID_HOME = "${androidSdk.${pkgs.stdenv.hostPlatform.system}}/libexec/android-sdk";
+        NDK_HOME = "${androidSdk.${pkgs.stdenv.hostPlatform.system}}/libexec/android-sdk/ndk/25.2.9519653";
       });
     });
 
