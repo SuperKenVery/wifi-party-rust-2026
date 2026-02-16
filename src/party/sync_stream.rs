@@ -124,10 +124,16 @@ struct BufferKey {
 ///
 /// Created only when metadata arrives with valid decoder.
 /// Stores decoded PCM frames for immediate playback.
+///
+/// Frames must be decoded in sequence order because codecs like MP3/AAC/FLAC
+/// are stateful. Out-of-order frames are buffered in `pending_raw` until
+/// their predecessors arrive.
 struct BufferEntry<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     decoder: Box<dyn symphonia::core::codecs::Decoder>,
     resampler: Option<FftFixedIn<f32>>,
     meta: SyncedStreamMeta,
+    pending_raw: HashMap<u64, SyncedFrame>,
+    next_decode_seq: u64,
     decoded_frames: HashMap<u64, DecodedFrame<Sample, CHANNELS, SAMPLE_RATE>>,
     last_seen: Instant,
 
@@ -245,6 +251,8 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 decoder,
                 resampler,
                 meta,
+                pending_raw: HashMap::new(),
+                next_decode_seq: 1,
                 decoded_frames: HashMap::new(),
                 last_seen: Instant::now(),
                 playing: false,
@@ -285,6 +293,11 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 entry.start_party_time = party_clock_time;
                 entry.start_seq = seq;
                 entry.last_seen = Instant::now();
+                if seq > entry.next_decode_seq {
+                    // Seeking forward: update decode position, clear pending
+                    entry.next_decode_seq = seq;
+                    entry.pending_raw.clear();
+                }
                 info!(
                     "Stream {:?} starting at seq {} at party time {}",
                     key, seq, party_clock_time
@@ -299,6 +312,9 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     }
 
     /// Receives audio frame. Only stores if entry exists.
+    ///
+    /// Frames are decoded in sequence order to maintain correct decoder state.
+    /// Out-of-order frames are buffered until their predecessors arrive.
     pub fn receive(&self, source_addr: SocketAddr, frame: SyncedFrame) {
         let key = BufferKey {
             source_addr,
@@ -312,21 +328,44 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
         entry.last_seen = Instant::now();
 
-        if entry.decoded_frames.contains_key(&frame.sequence_number) {
+        let seq = frame.sequence_number;
+
+        // Duplicate or old frame
+        if seq < entry.next_decode_seq
+            || entry.decoded_frames.contains_key(&seq)
+            || entry.pending_raw.contains_key(&seq)
+        {
             return;
         }
 
+        if seq == entry.next_decode_seq {
+            Self::decode_frame(entry, &frame);
+            entry.next_decode_seq += 1;
+
+            while let Some(pending) = entry.pending_raw.remove(&entry.next_decode_seq) {
+                Self::decode_frame(entry, &pending);
+                entry.next_decode_seq += 1;
+            }
+        } else {
+            entry.pending_raw.insert(seq, frame);
+        }
+    }
+
+    fn decode_frame<const C: usize, const R: u32>(
+        entry: &mut BufferEntry<Sample, C, R>,
+        frame: &SyncedFrame,
+    ) where
+        Sample: AudioSample,
+    {
         let packet =
             symphonia::core::formats::Packet::new_from_slice(0, 0, frame.dur as u64, &frame.data);
 
         let Ok(decoded) = entry.decoder.decode(&packet) else {
+            error!("Failed to decode frame seq={}", frame.sequence_number);
             return;
         };
 
-        let buf = extract_and_resample::<Sample, CHANNELS, SAMPLE_RATE>(
-            &decoded,
-            entry.resampler.as_mut(),
-        );
+        let buf = extract_and_resample::<Sample, C, R>(&decoded, entry.resampler.as_mut());
 
         entry
             .decoded_frames
