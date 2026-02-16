@@ -2,39 +2,12 @@
 
 use dioxus::prelude::*;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum MenuSection {
-    Senders,
-    AudioControl,
-    ShareMusic,
-    Debug,
-}
-
-impl MenuSection {
-    pub fn label(&self) -> &'static str {
-        match self {
-            MenuSection::Senders => "Senders",
-            MenuSection::AudioControl => "Audio Control",
-            MenuSection::ShareMusic => "Share Music",
-            MenuSection::Debug => "Debug",
-        }
-    }
-
-    pub fn icon(&self) -> &'static str {
-        match self {
-            MenuSection::Senders => "👥",
-            MenuSection::AudioControl => "🎛️",
-            MenuSection::ShareMusic => "🎵",
-            MenuSection::Debug => "🔧",
-        }
-    }
-}
+use super::app::Route;
 
 #[allow(non_snake_case)]
 #[component]
 pub fn SidebarMenu(
-    selected: MenuSection,
-    on_select: EventHandler<MenuSection>,
+    #[props(default)] selected: Option<Route>,
     #[props(default = false)] full_width: bool,
 ) -> Element {
     let width_class = if full_width {
@@ -66,11 +39,10 @@ pub fn SidebarMenu(
             div {
                 class: "flex-1 px-3 py-4 space-y-1",
 
-                for section in [MenuSection::Senders, MenuSection::AudioControl, MenuSection::ShareMusic, MenuSection::Debug] {
+                for route in Route::menu_items() {
                     MenuItem {
-                        section,
-                        is_selected: selected == section,
-                        on_click: move |_| on_select.call(section),
+                        route,
+                        is_selected: selected == Some(route),
                     }
                 }
             }
@@ -85,7 +57,7 @@ pub fn SidebarMenu(
 
 #[allow(non_snake_case)]
 #[component]
-fn MenuItem(section: MenuSection, is_selected: bool, on_click: EventHandler<()>) -> Element {
+fn MenuItem(route: Route, is_selected: bool) -> Element {
     let base_class =
         "flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer transition-all duration-200";
     let selected_class = if is_selected {
@@ -95,11 +67,11 @@ fn MenuItem(section: MenuSection, is_selected: bool, on_click: EventHandler<()>)
     };
 
     rsx! {
-        div {
+        Link {
+            to: route,
             class: "{base_class} {selected_class}",
-            onclick: move |_| on_click.call(()),
-            span { class: "text-lg", "{section.icon()}" }
-            span { class: "text-sm font-medium", "{section.label()}" }
+            span { class: "text-lg", "{route.icon()}" }
+            span { class: "text-sm font-medium", "{route.label()}" }
         }
     }
 }
