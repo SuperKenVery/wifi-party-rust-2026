@@ -10,6 +10,20 @@ use crate::party::{NtpDebugInfo, SyncedStreamState};
 
 const NARROW_BREAKPOINT: u32 = 600;
 
+#[derive(Clone, Copy)]
+pub struct UIState {
+    pub active_hosts: Signal<Vec<HostInfo>>,
+    pub mic_volume: Signal<f32>,
+    pub mic_audio_level: Signal<u32>,
+    pub loopback_enabled: Signal<bool>,
+    pub system_audio_enabled: Signal<bool>,
+    pub system_audio_level: Signal<u32>,
+    pub listen_enabled: Signal<bool>,
+    pub ntp_info: Signal<Option<NtpDebugInfo>>,
+    pub synced_streams: Signal<Vec<SyncedStreamState>>,
+    pub is_narrow: Signal<bool>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Routable)]
 #[rustfmt::skip]
 pub enum Route {
@@ -66,17 +80,18 @@ pub fn App() -> Element {
 fn AppLayout() -> Element {
     let state_arc = use_context::<Arc<AppState>>();
 
-    let mut active_hosts = use_signal(Vec::<HostInfo>::new);
-    let mut mic_volume = use_signal(|| 1.0f32);
-    let mut mic_audio_level = use_signal(|| 0u32);
-    let mut loopback_enabled = use_signal(|| false);
-    let mut system_audio_enabled = use_signal(|| false);
-    let mut system_audio_level = use_signal(|| 0u32);
-    let mut listen_enabled = use_signal(|| true);
-    let mut ntp_info = use_signal(|| None::<NtpDebugInfo>);
-    let mut synced_streams = use_signal(Vec::<SyncedStreamState>::new);
-
-    let mut is_narrow = use_signal(|| false);
+    let mut ui = UIState {
+        active_hosts: use_signal(Vec::<HostInfo>::new),
+        mic_volume: use_signal(|| 1.0f32),
+        mic_audio_level: use_signal(|| 0u32),
+        loopback_enabled: use_signal(|| false),
+        system_audio_enabled: use_signal(|| false),
+        system_audio_level: use_signal(|| 0u32),
+        listen_enabled: use_signal(|| true),
+        ntp_info: use_signal(|| None::<NtpDebugInfo>),
+        synced_streams: use_signal(Vec::<SyncedStreamState>::new),
+        is_narrow: use_signal(|| false),
+    };
 
     use_effect(move || {
         spawn(async move {
@@ -92,8 +107,8 @@ fn AppLayout() -> Element {
             loop {
                 if let Ok(width) = eval.recv::<u32>().await {
                     let narrow = width < NARROW_BREAKPOINT;
-                    if is_narrow() != narrow {
-                        is_narrow.set(narrow);
+                    if (ui.is_narrow)() != narrow {
+                        ui.is_narrow.set(narrow);
                     }
                 }
             }
@@ -105,25 +120,25 @@ fn AppLayout() -> Element {
         spawn(async move {
             loop {
                 if let Ok(infos) = state.host_infos.lock() {
-                    active_hosts.set(infos.clone());
+                    ui.active_hosts.set(infos.clone());
                 }
 
                 if let Ok(vol) = state.mic_volume.lock() {
-                    mic_volume.set(*vol);
+                    ui.mic_volume.set(*vol);
                 }
 
                 let level = state
                     .mic_audio_level
                     .load(std::sync::atomic::Ordering::Relaxed);
-                mic_audio_level.set(level);
+                ui.mic_audio_level.set(level);
 
-                loopback_enabled.set(
+                ui.loopback_enabled.set(
                     state
                         .loopback_enabled
                         .load(std::sync::atomic::Ordering::Relaxed),
                 );
 
-                system_audio_enabled.set(
+                ui.system_audio_enabled.set(
                     state
                         .system_audio_enabled
                         .load(std::sync::atomic::Ordering::Relaxed),
@@ -132,33 +147,24 @@ fn AppLayout() -> Element {
                 let sys_level = state
                     .system_audio_level
                     .load(std::sync::atomic::Ordering::Relaxed);
-                system_audio_level.set(sys_level);
+                ui.system_audio_level.set(sys_level);
 
-                listen_enabled.set(
+                ui.listen_enabled.set(
                     state
                         .listen_enabled
                         .load(std::sync::atomic::Ordering::Relaxed),
                 );
 
-                ntp_info.set(state.ntp_debug_info());
+                ui.ntp_info.set(state.ntp_debug_info());
 
-                synced_streams.set(state.synced_stream_states());
+                ui.synced_streams.set(state.synced_stream_states());
 
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
         });
     });
 
-    use_context_provider(|| active_hosts);
-    use_context_provider(|| mic_volume);
-    use_context_provider(|| mic_audio_level);
-    use_context_provider(|| loopback_enabled);
-    use_context_provider(|| system_audio_enabled);
-    use_context_provider(|| system_audio_level);
-    use_context_provider(|| listen_enabled);
-    use_context_provider(|| ntp_info);
-    use_context_provider(|| synced_streams);
-    use_context_provider(|| is_narrow);
+    use_context_provider(|| ui);
 
     let route = use_route::<Route>();
 
@@ -166,7 +172,7 @@ fn AppLayout() -> Element {
         div {
             class: "flex h-screen w-full bg-slate-900 text-slate-100 font-sans overflow-hidden selection:bg-indigo-500 selection:text-white",
 
-            if is_narrow() {
+            if (ui.is_narrow)() {
                 Outlet::<Route> {}
             } else {
                 SidebarMenu {
@@ -182,10 +188,9 @@ fn AppLayout() -> Element {
 #[allow(non_snake_case)]
 #[component]
 fn Menu() -> Element {
-    let is_narrow = use_context::<Signal<bool>>();
-    let active_hosts = use_context::<Signal<Vec<HostInfo>>>();
+    let ui = use_context::<UIState>();
 
-    if is_narrow() {
+    if (ui.is_narrow)() {
         rsx! {
             SidebarMenu {
                 selected: None,
@@ -194,7 +199,7 @@ fn Menu() -> Element {
         }
     } else {
         rsx! {
-            ParticipantsPanel { hosts: active_hosts() }
+            ParticipantsPanel { hosts: (ui.active_hosts)() }
         }
     }
 }
@@ -202,21 +207,20 @@ fn Menu() -> Element {
 #[allow(non_snake_case)]
 #[component]
 fn Senders() -> Element {
-    let is_narrow = use_context::<Signal<bool>>();
-    let active_hosts = use_context::<Signal<Vec<HostInfo>>>();
+    let ui = use_context::<UIState>();
     let nav = use_navigator();
 
     let on_back = move |_| {
         nav.push(Route::Menu);
     };
 
-    if is_narrow() {
+    if (ui.is_narrow)() {
         rsx! {
-            ParticipantsPanel { hosts: active_hosts(), on_back }
+            ParticipantsPanel { hosts: (ui.active_hosts)(), on_back }
         }
     } else {
         rsx! {
-            ParticipantsPanel { hosts: active_hosts() }
+            ParticipantsPanel { hosts: (ui.active_hosts)() }
         }
     }
 }
@@ -224,40 +228,34 @@ fn Senders() -> Element {
 #[allow(non_snake_case)]
 #[component]
 fn AudioControl() -> Element {
-    let is_narrow = use_context::<Signal<bool>>();
-    let mic_volume = use_context::<Signal<f32>>();
-    let mic_audio_level = use_context::<Signal<u32>>();
-    let loopback_enabled = use_context::<Signal<bool>>();
-    let system_audio_enabled = use_context::<Signal<bool>>();
-    let system_audio_level = use_context::<Signal<u32>>();
-    let listen_enabled = use_context::<Signal<bool>>();
+    let ui = use_context::<UIState>();
     let nav = use_navigator();
 
     let on_back = move |_| {
         nav.push(Route::Menu);
     };
 
-    if is_narrow() {
+    if (ui.is_narrow)() {
         rsx! {
             AudioControlPanel {
-                mic_volume: mic_volume(),
-                mic_audio_level: mic_audio_level(),
-                loopback_enabled: loopback_enabled(),
-                system_audio_enabled: system_audio_enabled(),
-                system_audio_level: system_audio_level(),
-                listen_enabled: listen_enabled(),
+                mic_volume: (ui.mic_volume)(),
+                mic_audio_level: (ui.mic_audio_level)(),
+                loopback_enabled: (ui.loopback_enabled)(),
+                system_audio_enabled: (ui.system_audio_enabled)(),
+                system_audio_level: (ui.system_audio_level)(),
+                listen_enabled: (ui.listen_enabled)(),
                 on_back,
             }
         }
     } else {
         rsx! {
             AudioControlPanel {
-                mic_volume: mic_volume(),
-                mic_audio_level: mic_audio_level(),
-                loopback_enabled: loopback_enabled(),
-                system_audio_enabled: system_audio_enabled(),
-                system_audio_level: system_audio_level(),
-                listen_enabled: listen_enabled(),
+                mic_volume: (ui.mic_volume)(),
+                mic_audio_level: (ui.mic_audio_level)(),
+                loopback_enabled: (ui.loopback_enabled)(),
+                system_audio_enabled: (ui.system_audio_enabled)(),
+                system_audio_level: (ui.system_audio_level)(),
+                listen_enabled: (ui.listen_enabled)(),
             }
         }
     }
@@ -266,21 +264,20 @@ fn AudioControl() -> Element {
 #[allow(non_snake_case)]
 #[component]
 fn ShareMusic() -> Element {
-    let is_narrow = use_context::<Signal<bool>>();
-    let synced_streams = use_context::<Signal<Vec<SyncedStreamState>>>();
+    let ui = use_context::<UIState>();
     let nav = use_navigator();
 
     let on_back = move |_| {
         nav.push(Route::Menu);
     };
 
-    if is_narrow() {
+    if (ui.is_narrow)() {
         rsx! {
-            ShareMusicPanel { active_streams: synced_streams(), on_back }
+            ShareMusicPanel { active_streams: (ui.synced_streams)(), on_back }
         }
     } else {
         rsx! {
-            ShareMusicPanel { active_streams: synced_streams() }
+            ShareMusicPanel { active_streams: (ui.synced_streams)() }
         }
     }
 }
@@ -288,21 +285,20 @@ fn ShareMusic() -> Element {
 #[allow(non_snake_case)]
 #[component]
 fn Debug() -> Element {
-    let is_narrow = use_context::<Signal<bool>>();
-    let ntp_info = use_context::<Signal<Option<NtpDebugInfo>>>();
+    let ui = use_context::<UIState>();
     let nav = use_navigator();
 
     let on_back = move |_| {
         nav.push(Route::Menu);
     };
 
-    if is_narrow() {
+    if (ui.is_narrow)() {
         rsx! {
-            DebugPanel { ntp_info: ntp_info(), on_back }
+            DebugPanel { ntp_info: (ui.ntp_info)(), on_back }
         }
     } else {
         rsx! {
-            DebugPanel { ntp_info: ntp_info() }
+            DebugPanel { ntp_info: (ui.ntp_info)() }
         }
     }
 }
