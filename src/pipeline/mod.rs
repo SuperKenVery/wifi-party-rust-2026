@@ -1,29 +1,32 @@
 //! Data processing pipeline framework.
 //!
-//! This module provides a generic, statically-dispatched pipeline architecture
-//! for processing data streams. Pipelines are built by composing nodes using
-//! method chaining.
+//! This module provides both static and dynamic pipeline architectures:
 //!
-//! # Core Traits
+//! # Static Pipeline (compile-time composition)
 //!
 //! - [`Node`] - A processing unit that transforms input to output
 //! - [`Source`] - A data producer (pull-based)
 //! - [`Sink`] - A data consumer (push-based)
+//! - [`PullPipeline`]/[`PushPipeline`] - Composed chains via method chaining
 //!
-//! # Pipeline Composition
+//! # Dynamic Pipeline (runtime composition)
 //!
-//! ```text
-//! Pull Pipeline (e.g., Network -> Speaker):
-//!     source.give_data_to(node_a).give_data_to(node_b)
-//!     Data flow: source -> node_a -> node_b -> consumer
+//! - [`Pushable`]/[`Pullable`] - Object-safe traits for push/pull operations
+//! - [`DynNode`] - Processing unit implementing both Pushable and Pullable
+//! - [`DynSource`]/[`DynSink`] - Active data producers/consumers
+//! - [`GraphNode`] - Wrapper to make any Node implement dynamic traits
 //!
-//! Push Pipeline (e.g., Microphone -> Network):
-//!     sink.get_data_from(node_b).get_data_from(node_a)
-//!     Data flow: producer -> node_a -> node_b -> sink
-//! ```
+//! # When to Use Each
+//!
+//! - **Static**: Fixed pipelines known at compile time (e.g., mic -> encoder -> network)
+//! - **Dynamic**: Pipelines that change at runtime (e.g., per-host decode chains)
 
 pub mod chain;
+pub mod dyn_traits;
+pub mod graph_node;
 pub mod traits;
 
 pub use chain::{PullPipeline, PushPipeline};
+pub use dyn_traits::{DynNode, DynSink, DynSource, Pullable, Pushable};
+pub use graph_node::{GraphNode, OutputId};
 pub use traits::{Node, Sink, Source};

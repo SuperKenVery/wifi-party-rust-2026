@@ -67,14 +67,20 @@ Files:
 
 ### `src/pipeline/` - Processing Framework
 
-Generic pipeline architecture for data flow.
+Generic pipeline architecture for data flow. Supports both static (compile-time) and dynamic (runtime) composition.
 
 Files:
-- `traits.rs` - Core traits
+- `traits.rs` - Core static traits (with associated types, not dyn-safe)
   - `Node` - Transforms input to output
-  - `Source` - Pull-based data producer (output side), has `give_data_to(node)` for chaining
-  - `Sink` - Push-based data consumer (input side), has `get_data_from(node)` for chaining
-- `chain.rs` - Pipeline composition (`PullPipeline`, `PushPipeline`)
+  - `Source` - Pull-based data producer, has `give_data_to(node)` for chaining
+  - `Sink` - Push-based data consumer, has `get_data_from(node)` for chaining
+- `chain.rs` - Static pipeline composition (`PullPipeline`, `PushPipeline`)
+- `dyn_traits.rs` - Object-safe dynamic traits (with type parameters)
+  - `Pullable<T>` = dyn-safe equivalent of `Source` (blanket impl bridges them)
+  - `Pushable<T>` = dyn-safe equivalent of `Sink` (blanket impl bridges them)
+  - `DynNode<I, O>` - Processing node (Pushable + Pullable)
+  - `DynSource<T>` / `DynSink<T>` - Active data producers/consumers
+- `graph_node.rs` - `GraphNode<N>` wrapper to make any Node implement dynamic traits
 
 ### `src/state/` - Application State
 
@@ -118,14 +124,16 @@ Files:
 
 1. `NetworkReceiver` runs in background thread, receives UDP packets
 2. Packets dispatched by type:
-   - `Realtime` → `RealtimeAudioStream` → per-host `JitterBuffer` with `OpusDecoder`
+   - `Realtime` → `RealtimeAudioStream` → per-host `DecodeChain` → `DynamicMixer`
    - `Synced` → `SyncedAudioStream` (NTP-synchronized playback)
    - `Ntp` → `NtpService`
-3. `Mixer` combines:
+3. Per-host DecodeChain (created dynamically on first packet):
+   - `GraphNode<RealtimeFrameDecoder>` → `JitterBuffer` → registered with `DynamicMixer`
+4. Top-level `Mixer` combines:
    - `RealtimeAudioStream.give_data_to(Switch)` - network voice/system audio (controlled by listen_enabled)
    - `SyncedAudioStream.give_data_to(Switch)` - network music (controlled by listen_enabled)
    - `LoopbackBuffer` - local mic loopback (unaffected by listen toggle)
-4. `AudioOutput` plays mixed audio via cpal callback
+5. `AudioOutput` plays mixed audio via cpal callback
 
 ## Network Protocol
 
@@ -165,7 +173,12 @@ Slot-based buffer indexed by sequence number. Key behaviors:
 
 ### RealtimeAudioStream (`src/party/stream.rs`)
 
-Maintains per-host, per-stream JitterBuffers. Creates buffer on first packet from new source. Implements `Source` trait - pull returns mixed audio from all active streams.
+Manages per-host decode chains using the dynamic pipeline architecture:
+- `DecodeChain`: `GraphNode<RealtimeFrameDecoder>` → `JitterBuffer` → `DynamicMixer`
+- Creates chain on first packet from new source (dynamic host management)
+- Internal `DynamicMixer` combines audio from all per-host JitterBuffers
+- Implements `Source` trait - `pull` delegates to internal mixer
+- On cleanup timeout: removes chain from DashMap and deregisters from mixer
 
 ### SyncedAudioStream (`src/party/sync_stream.rs`)
 

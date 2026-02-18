@@ -3,9 +3,20 @@
 //! This module handles realtime audio streams (mic, system audio) that are
 //! played immediately upon receipt with minimal latency.
 //!
+//! # Architecture
+//!
+//! Each network source gets a `DecodeChain`:
+//! ```text
+//! Network packet -> GraphNode<RealtimeFrameDecoder> -> JitterBuffer -> Mixer
+//! ```
+//!
+//! The mixer is shared across all sources, enabling dynamic addition/removal
+//! of network hosts without rebuilding the pipeline.
+//!
 //! For synchronized music playback, see [`sync_stream`](super::sync_stream).
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -13,12 +24,13 @@ use dashmap::DashMap;
 use rkyv::{Archive, Deserialize, Serialize};
 use tracing::info;
 
-use crate::audio::frame::AudioBuffer;
+use crate::audio::frame::{AudioBuffer, AudioFrame};
 use crate::audio::opus::OpusPacket;
-use crate::audio::{AudioSample, JitterBuffer, PullSnapshot};
+use crate::audio::{AudioSample, JitterBuffer, PullSnapshot, RealtimeFrameDecoder, RealtimeOpusFrame};
+use crate::party::combinator::{DynamicMixer, InputId};
 use crate::party::ntp::NtpPacket;
 use crate::party::sync_stream::{SyncedFrame, SyncedStreamMeta};
-use crate::pipeline::{Sink, Source};
+use crate::pipeline::{GraphNode, Pullable, Pushable, Source};
 use crate::state::HostId;
 
 pub use crate::audio::PullSnapshot as StreamSnapshot;
@@ -76,6 +88,15 @@ impl RealtimeFrame {
             frame_size: self.frame_size as usize,
         }
     }
+
+    fn to_realtime_opus_frame(&self) -> RealtimeOpusFrame {
+        RealtimeOpusFrame {
+            sequence_number: self.sequence_number,
+            timestamp: self.timestamp,
+            opus_data: self.opus_data.clone(),
+            frame_size: self.frame_size as usize,
+        }
+    }
 }
 
 /// Control commands for synced streams.
@@ -106,7 +127,7 @@ pub enum NetworkPacket {
     Ntp(NtpPacket),
 }
 
-/// Key for identifying a specific jitter buffer.
+/// Key for identifying a specific decode chain.
 /// We use SocketAddr (IP + Port) here to distinguish between multiple
 /// instances running on the same machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -115,16 +136,67 @@ struct BufferKey {
     stream_id: RealtimeStreamId,
 }
 
-/// Metadata for a buffer entry with Opus decoder.
-struct BufferEntry<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    buffer: JitterBuffer<Sample, CHANNELS, SAMPLE_RATE>,
-    decoder: crate::audio::opus::OpusDecoder<Sample, CHANNELS, SAMPLE_RATE>,
+/// A decode chain for a single network source.
+///
+/// Contains:
+/// - `decoder`: Entry point for pushing decoded frames
+/// - `jitter_buffer`: Stores decoded frames, registered with mixer for pulling
+/// - `mixer_input_id`: ID for removing from mixer on cleanup
+struct DecodeChain<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    decoder: Arc<dyn Pushable<RealtimeOpusFrame>>,
+    jitter_buffer: Arc<JitterBuffer<Sample, CHANNELS, SAMPLE_RATE>>,
+    mixer_input_id: InputId,
     last_seen: Instant,
 }
 
+/// Adapter to make JitterBuffer implement Pullable<AudioBuffer> instead of Pullable<AudioFrame>.
+///
+/// The DynamicMixer expects `Pullable<AudioBuffer>`, but JitterBuffer returns `AudioFrame`.
+/// This adapter strips the sequence number and returns just the AudioBuffer.
+struct JitterBufferAdapter<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    buffer: Arc<JitterBuffer<Sample, CHANNELS, SAMPLE_RATE>>,
+}
+
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    Pullable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>
+    for JitterBufferAdapter<Sample, CHANNELS, SAMPLE_RATE>
+{
+    fn pull(&self, len: usize) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
+        let frame: AudioFrame<Sample, CHANNELS, SAMPLE_RATE> = Source::pull(&*self.buffer, len)?;
+        Some(frame.samples)
+    }
+}
+
+fn create_decode_chain<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>(
+    mixer: &Arc<DynamicMixer<Sample, CHANNELS, SAMPLE_RATE>>,
+) -> DecodeChain<Sample, CHANNELS, SAMPLE_RATE> {
+    let jitter_buffer = Arc::new(JitterBuffer::new(JITTER_BUFFER_CAPACITY));
+    let decoder = Arc::new(GraphNode::new(
+        RealtimeFrameDecoder::new().expect("Failed to create Opus decoder"),
+    ));
+
+    decoder.add_output(jitter_buffer.clone());
+
+    let adapter = Arc::new(JitterBufferAdapter {
+        buffer: jitter_buffer.clone(),
+    });
+    let mixer_input_id = mixer.add_input(adapter);
+
+    DecodeChain {
+        decoder,
+        jitter_buffer,
+        mixer_input_id,
+        last_seen: Instant::now(),
+    }
+}
+
 /// Manages all realtime audio streams across all hosts.
+///
+/// Each network source gets a `DecodeChain` that feeds into a shared `DynamicMixer`.
+/// The mixer handles combining audio from all sources.
 pub struct RealtimeAudioStream<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    buffers: DashMap<BufferKey, BufferEntry<Sample, CHANNELS, SAMPLE_RATE>>,
+    chains: DashMap<BufferKey, DecodeChain<Sample, CHANNELS, SAMPLE_RATE>>,
+    mixer: Arc<DynamicMixer<Sample, CHANNELS, SAMPLE_RATE>>,
 }
 
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
@@ -132,96 +204,66 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 {
     pub fn new() -> Self {
         Self {
-            buffers: DashMap::new(),
+            chains: DashMap::new(),
+            mixer: Arc::new(DynamicMixer::new()),
         }
     }
 
-    /// Receives a realtime frame and routes it to the appropriate jitter buffer.
+    pub fn mixer(&self) -> &Arc<DynamicMixer<Sample, CHANNELS, SAMPLE_RATE>> {
+        &self.mixer
+    }
+
+    /// Receives a realtime frame and routes it to the appropriate decode chain.
     pub fn receive(&self, source_addr: SocketAddr, frame: RealtimeFrame) {
         let key = BufferKey {
             source_addr,
             stream_id: frame.stream_id,
         };
 
-        let mut entry = self.buffers.entry(key).or_insert_with(|| {
+        let mut entry = self.chains.entry(key).or_insert_with(|| {
             info!(
-                "Creating jitter buffer for source {} stream {:?}",
+                "Creating decode chain for source {} stream {:?}",
                 source_addr, frame.stream_id
             );
-            let decoder =
-                crate::audio::opus::OpusDecoder::new().expect("Failed to create Opus decoder");
-            BufferEntry {
-                buffer: JitterBuffer::new(JITTER_BUFFER_CAPACITY),
-                decoder,
-                last_seen: Instant::now(),
-            }
+            create_decode_chain(&self.mixer)
         });
 
         entry.last_seen = Instant::now();
 
-        let opus_packet = frame.to_opus_packet();
-        if let Some(pcm_buffer) = entry.decoder.decode_packet(&opus_packet) {
-            use crate::audio::frame::AudioFrame;
-            let jitter_frame = AudioFrame {
-                sequence_number: frame.sequence_number,
-                timestamp: frame.timestamp,
-                samples: pcm_buffer,
-            };
-            entry.buffer.push(jitter_frame);
-        }
+        let opus_frame = frame.to_realtime_opus_frame();
+        entry.decoder.push(opus_frame);
     }
 
-    /// Pulls `len` samples from all buffers and mixes them together.
+    /// Pulls mixed audio from the shared mixer.
     pub fn pull_and_mix(&self, len: usize) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
-        let mut mixed: Vec<i64> = vec![0; len];
-        let mut source_count = 0usize;
-
-        for entry in self.buffers.iter() {
-            if let Some(frame) = entry.value().buffer.pull(len) {
-                source_count += 1;
-                for (i, sample) in frame.samples.data().iter().enumerate() {
-                    if i < len {
-                        mixed[i] += sample.to_i64_for_mix();
-                    }
-                }
-            }
-        }
-
-        if source_count == 0 {
-            return None;
-        }
-
-        let samples: Vec<Sample> = mixed
-            .into_iter()
-            .map(|s| Sample::from_i64_mixed(s, source_count))
-            .collect();
-        AudioBuffer::new(samples).ok()
+        Source::pull(&*self.mixer, len)
     }
 
-    /// Removes buffers that haven't received data within the timeout period.
+    /// Removes decode chains that haven't received data within the timeout period.
     pub fn cleanup_stale(&self) {
         let now = Instant::now();
-        self.buffers.retain(|key, entry| {
+        self.chains.retain(|key, entry| {
             let alive = now.duration_since(entry.last_seen) < HOST_TIMEOUT;
             if !alive {
                 info!(
-                    "Removing stale buffer for source {} stream {:?}",
+                    "Removing stale decode chain for source {} stream {:?}",
                     key.source_addr, key.stream_id
                 );
+                self.mixer.remove_input(entry.mixer_input_id);
             }
             alive
         });
     }
 
-    /// Returns the number of active buffers.
+    /// Returns the number of active decode chains.
     pub fn buffer_count(&self) -> usize {
-        self.buffers.len()
+        self.chains.len()
     }
 
     /// Returns a list of unique active host IDs (IP addresses).
     pub fn active_hosts(&self) -> Vec<HostId> {
         let mut hosts = Vec::new();
-        for entry in self.buffers.iter() {
+        for entry in self.chains.iter() {
             let host_id = HostId::from(entry.key().source_addr.ip());
             if !hosts.contains(&host_id) {
                 hosts.push(host_id);
@@ -234,13 +276,13 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     pub fn host_stream_stats(&self, host_id: HostId) -> Vec<StreamStats> {
         let mut result = Vec::new();
 
-        for entry in self.buffers.iter() {
+        for entry in self.chains.iter() {
             if entry.key().source_addr.ip() != host_id.ip() {
                 continue;
             }
 
             let stream_id = entry.key().stream_id;
-            let stats = entry.value().buffer.stats();
+            let stats = entry.value().jitter_buffer.stats();
 
             let stream_name =
                 if self.has_multiple_instances(entry.key().source_addr.ip(), stream_id) {
@@ -262,7 +304,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
     fn has_multiple_instances(&self, ip: std::net::IpAddr, stream_id: RealtimeStreamId) -> bool {
         let mut count = 0;
-        for entry in self.buffers.iter() {
+        for entry in self.chains.iter() {
             if entry.key().source_addr.ip() == ip && entry.key().stream_id == stream_id {
                 count += 1;
                 if count > 1 {
@@ -276,7 +318,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     /// Returns snapshots for a specific stream, identified by stream_id string.
     /// The stream_id should match the format returned by host_stream_stats().
     pub fn stream_snapshots(&self, host_id: HostId, stream_id: &str) -> Vec<PullSnapshot> {
-        for entry in self.buffers.iter() {
+        for entry in self.chains.iter() {
             if entry.key().source_addr.ip() != host_id.ip() {
                 continue;
             }
@@ -289,7 +331,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             };
 
             if stream_name == stream_id {
-                return entry.value().buffer.stats().recent_snapshots();
+                return entry.value().jitter_buffer.stats().recent_snapshots();
             }
         }
         Vec::new()
@@ -727,7 +769,7 @@ mod tests {
                 Duration::from_secs_f64(pull_size as f64 / 2.0 / sample_rate as f64);
             let start = Instant::now();
 
-            while stream_clone.buffers.is_empty() {
+            while stream_clone.chains.is_empty() {
                 thread::sleep(Duration::from_millis(1));
             }
 

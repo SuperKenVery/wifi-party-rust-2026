@@ -34,6 +34,7 @@ const LOW_LOSS_THRESHOLD: f64 = 0.02; // 2% loss rate allows target decrease
 
 const SNAPSHOT_WINDOW_SIZE: usize = 200; // ~1 second at ~5ms/pull (256 samples @ 48kHz)
 
+/// Separate Ts to different CPU cache lines, preventing cache invalidation.
 #[repr(align(64))]
 struct CachePadded<T>(T);
 
@@ -603,14 +604,22 @@ mod tests {
         TestFrame::new(seq, samples).unwrap()
     }
 
+    fn push(buffer: &TestBuffer, frame: TestFrame) {
+        Sink::push(buffer, frame);
+    }
+
+    fn pull(buffer: &TestBuffer, len: usize) -> Option<TestFrame> {
+        Source::pull(buffer, len)
+    }
+
     #[test]
     fn test_push_and_pull_single_frame() {
         let buffer = TestBuffer::new(16);
         let frame = make_frame(1, 1920);
 
-        buffer.push(frame);
+        push(&buffer, frame);
 
-        let pulled = buffer.pull(1920);
+        let pulled = pull(&buffer, 1920);
         assert!(pulled.is_some());
         let pulled = pulled.unwrap();
         assert_eq!(pulled.samples.data().len(), 1920);
@@ -621,14 +630,14 @@ mod tests {
     fn test_pull_exact_length() {
         let buffer = TestBuffer::new(16);
 
-        buffer.push(make_frame(1, 1920));
-        buffer.push(make_frame(2, 1920));
+        push(&buffer, make_frame(1, 1920));
+        push(&buffer, make_frame(2, 1920));
 
-        let pulled = buffer.pull(1000);
+        let pulled = pull(&buffer, 1000);
         assert!(pulled.is_some());
         assert_eq!(pulled.unwrap().samples.data().len(), 1000);
 
-        let pulled = buffer.pull(500);
+        let pulled = pull(&buffer, 500);
         assert!(pulled.is_some());
         assert_eq!(pulled.unwrap().samples.data().len(), 500);
     }
@@ -637,10 +646,10 @@ mod tests {
     fn test_pull_across_frames() {
         let buffer = TestBuffer::new(16);
 
-        buffer.push(make_frame(1, 1920));
-        buffer.push(make_frame(2, 1920));
+        push(&buffer, make_frame(1, 1920));
+        push(&buffer, make_frame(2, 1920));
 
-        let pulled = buffer.pull(2500);
+        let pulled = pull(&buffer, 2500);
         assert!(pulled.is_some());
         assert_eq!(pulled.unwrap().samples.data().len(), 2500);
     }
@@ -649,13 +658,13 @@ mod tests {
     fn test_pull_with_underrun_fills_silence() {
         let buffer = TestBuffer::new(16);
 
-        buffer.push(make_frame(1, 1920));
+        push(&buffer, make_frame(1, 1920));
 
-        let pulled = buffer.pull(1920);
+        let pulled = pull(&buffer, 1920);
         assert!(pulled.is_some());
         assert_eq!(pulled.unwrap().samples.data().len(), 1920);
 
-        let pulled = buffer.pull(1920);
+        let pulled = pull(&buffer, 1920);
         assert!(pulled.is_some());
         let data = pulled.unwrap();
         assert_eq!(data.samples.data().len(), 1920);
@@ -666,19 +675,19 @@ mod tests {
     fn test_out_of_order_frames() {
         let buffer = TestBuffer::new(16);
 
-        buffer.push(make_frame(1, 1920));
-        buffer.push(make_frame(3, 1920));
-        buffer.push(make_frame(2, 1920));
+        push(&buffer, make_frame(1, 1920));
+        push(&buffer, make_frame(3, 1920));
+        push(&buffer, make_frame(2, 1920));
 
-        let pulled = buffer.pull(1920);
+        let pulled = pull(&buffer, 1920);
         assert!(pulled.is_some());
         assert_eq!(pulled.unwrap().sequence_number, 1);
 
-        let pulled = buffer.pull(1920);
+        let pulled = pull(&buffer, 1920);
         assert!(pulled.is_some());
         assert_eq!(pulled.unwrap().sequence_number, 2);
 
-        let pulled = buffer.pull(1920);
+        let pulled = pull(&buffer, 1920);
         assert!(pulled.is_some());
         assert_eq!(pulled.unwrap().sequence_number, 3);
     }
@@ -687,13 +696,13 @@ mod tests {
     fn test_partial_frame_handling() {
         let buffer = TestBuffer::new(16);
 
-        buffer.push(make_frame(1, 1920));
+        push(&buffer, make_frame(1, 1920));
 
-        let pulled1 = buffer.pull(1000);
+        let pulled1 = pull(&buffer, 1000);
         assert!(pulled1.is_some());
         assert_eq!(pulled1.unwrap().samples.data().len(), 1000);
 
-        let pulled2 = buffer.pull(920);
+        let pulled2 = pull(&buffer, 920);
         assert!(pulled2.is_some());
         assert_eq!(pulled2.unwrap().samples.data().len(), 920);
     }
@@ -703,8 +712,8 @@ mod tests {
         let buffer = TestBuffer::new(16);
 
         for seq in 1..=10 {
-            buffer.push(make_frame(seq, 1920));
-            let pulled = buffer.pull(1920);
+            push(&buffer, make_frame(seq, 1920));
+            let pulled = pull(&buffer, 1920);
             assert!(pulled.is_some());
             assert_eq!(pulled.unwrap().samples.data().len(), 1920);
         }
@@ -715,12 +724,12 @@ mod tests {
         let buffer = TestBuffer::new(16);
 
         for seq in 1..=5 {
-            buffer.push(make_frame(seq, 1920));
+            push(&buffer, make_frame(seq, 1920));
         }
 
         let test_lengths = [100, 500, 1920, 2000, 3000, 5000];
         for &len in &test_lengths {
-            let pulled = buffer.pull(len);
+            let pulled = pull(&buffer, len);
             assert!(pulled.is_some(), "pull({}) returned None", len);
             assert_eq!(
                 pulled.unwrap().samples.data().len(),
@@ -735,13 +744,13 @@ mod tests {
     fn test_pull_with_gaps_maintains_length() {
         let buffer = TestBuffer::new(16);
 
-        buffer.push(make_frame(1, 1920));
-        buffer.push(make_frame(3, 1920));
-        buffer.push(make_frame(5, 1920));
+        push(&buffer, make_frame(1, 1920));
+        push(&buffer, make_frame(3, 1920));
+        push(&buffer, make_frame(5, 1920));
 
         let test_lengths = [100, 500, 1920, 2500, 4000];
         for &len in &test_lengths {
-            let pulled = buffer.pull(len);
+            let pulled = pull(&buffer, len);
             assert!(pulled.is_some(), "pull({}) returned None", len);
             let actual_len = pulled.unwrap().samples.data().len();
             assert_eq!(
@@ -756,7 +765,7 @@ mod tests {
     fn test_pull_empty_buffer_returns_silence() {
         let buffer = TestBuffer::new(16);
 
-        let pulled = buffer.pull(1920);
+        let pulled = pull(&buffer, 1920);
         assert!(pulled.is_some(), "Empty buffer should return silence");
         let data = pulled.unwrap().samples.into_inner();
         assert_eq!(data.len(), 1920);
@@ -775,7 +784,7 @@ mod tests {
                 .map(|i| (seq as f32) + (i as f32) * 0.0001)
                 .collect();
             let frame = TestFrame::new(seq, samples).unwrap();
-            buffer.push(frame);
+            push(&buffer, frame);
         }
 
         let target_latency = buffer.stats.target_latency();
@@ -784,7 +793,7 @@ mod tests {
 
         let mut all_pulled: Vec<f32> = Vec::new();
         for _ in 0..available_frames {
-            let pulled = buffer.pull(1920);
+            let pulled = pull(&buffer, 1920);
             assert!(pulled.is_some());
             all_pulled.extend(pulled.unwrap().samples.into_inner());
         }
@@ -804,12 +813,12 @@ mod tests {
     fn test_read_seq_clamping_on_large_jump() {
         let buffer = TestBuffer::new(32);
 
-        buffer.push(make_frame(1, 1920));
+        push(&buffer, make_frame(1, 1920));
 
         let read_seq_before = buffer.read_seq.load(Ordering::Acquire);
         assert_eq!(read_seq_before, 1);
 
-        buffer.push(make_frame(100, 1920));
+        push(&buffer, make_frame(100, 1920));
 
         let read_seq_after = buffer.read_seq.load(Ordering::Acquire);
         let target_latency = buffer.stats.target_latency();
@@ -827,23 +836,23 @@ mod tests {
     fn test_no_holdback_on_gaps() {
         let buffer = TestBuffer::new(16);
 
-        buffer.push(make_frame(1, 1920));
-        buffer.push(make_frame(5, 1920));
+        push(&buffer, make_frame(1, 1920));
+        push(&buffer, make_frame(5, 1920));
 
         let target_latency = buffer.stats.target_latency();
         let expected_read_seq = 5u64.saturating_sub(target_latency);
 
-        let pulled1 = buffer.pull(1920);
+        let pulled1 = pull(&buffer, 1920);
         assert!(pulled1.is_some());
 
         if expected_read_seq <= 1 {
             assert_eq!(pulled1.unwrap().sequence_number, 1);
         }
 
-        let pulled2 = buffer.pull(1920);
+        let pulled2 = pull(&buffer, 1920);
         assert!(pulled2.is_some());
 
-        let pulled3 = buffer.pull(1920);
+        let pulled3 = pull(&buffer, 1920);
         assert!(pulled3.is_some());
     }
 
@@ -851,15 +860,15 @@ mod tests {
     fn test_underrun_holds_back() {
         let buffer = TestBuffer::new(16);
 
-        buffer.push(make_frame(1, 1920));
+        push(&buffer, make_frame(1, 1920));
 
-        let pulled1 = buffer.pull(1920);
+        let pulled1 = pull(&buffer, 1920);
         assert!(pulled1.is_some());
         assert_eq!(pulled1.unwrap().sequence_number, 1);
 
         let read_before = buffer.read_seq.load(Ordering::Acquire);
 
-        let pulled2 = buffer.pull(1920);
+        let pulled2 = pull(&buffer, 1920);
         assert!(pulled2.is_some());
         let data = pulled2.unwrap();
         assert!(data.samples.data().iter().all(|&s| s == 0.0));

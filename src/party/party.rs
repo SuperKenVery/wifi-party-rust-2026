@@ -9,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::audio::effects::Switch;
 use crate::audio::{AudioBatcher, AudioSample, Gain, LevelMeter, OpusEncoder, SimpleBuffer};
@@ -154,56 +154,49 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
         //   -> AudioBatcher -> OpusEncoder -> RealtimeFramePacker(Mic) -> NetworkSink
         //   -> LoopbackSwitch -> loopback_buffer
         // ============================================================
-        let mic_encoder = OpusEncoder::<Sample, CHANNELS, SAMPLE_RATE>::new()?;
-        let mic_packer = RealtimeFramePacker::new(RealtimeStreamId::Mic);
-        let mic_sink = Tee::new(
-            network_sink
-                .clone()
-                .get_data_from(mic_packer)
-                .get_data_from(mic_encoder)
-                .get_data_from(AudioBatcher::<Sample, CHANNELS, SAMPLE_RATE>::new(20)),
-            loopback_buffer
-                .clone()
-                .get_data_from(Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(
-                    self.state.loopback_enabled.clone(),
-                )),
-        )
-        .get_data_from(Gain::<Sample, CHANNELS, SAMPLE_RATE>::new(
-            self.state.mic_volume.clone(),
-        ))
-        .get_data_from(LevelMeter::<Sample, CHANNELS, SAMPLE_RATE>::new(
-            self.state.mic_audio_level.clone(),
-        ));
-        let mic_input = Arc::new(AudioInput::new(
-            mic_sink,
+        self.mic_input = Some(Arc::new(AudioInput::new(
+            Tee::new(
+                network_sink
+                    .clone()
+                    .get_data_from(RealtimeFramePacker::new(RealtimeStreamId::Mic))
+                    .get_data_from(OpusEncoder::<Sample, CHANNELS, SAMPLE_RATE>::new()?)
+                    .get_data_from(AudioBatcher::<Sample, CHANNELS, SAMPLE_RATE>::new(20)),
+                loopback_buffer.clone().get_data_from(
+                    Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(
+                        self.state.loopback_enabled.clone(),
+                    ),
+                ),
+            )
+            .get_data_from(Gain::<Sample, CHANNELS, SAMPLE_RATE>::new(
+                self.state.mic_volume.clone(),
+            ))
+            .get_data_from(LevelMeter::<Sample, CHANNELS, SAMPLE_RATE>::new(
+                self.state.mic_audio_level.clone(),
+            )),
             self.config.input_device_id.clone(),
-        ));
-        self.mic_input = Some(mic_input);
+        )));
 
         // ============================================================
         // System Audio Pipeline: SystemAudio -> LevelMeter -> SystemSwitch -> AudioBatcher -> OpusEncoder -> RealtimeFramePacker(System) -> NetworkSink
         // ============================================================
-        let system_encoder = OpusEncoder::<Sample, CHANNELS, SAMPLE_RATE>::new()?;
-        let system_packer = RealtimeFramePacker::new(RealtimeStreamId::System);
-        let system_sink = network_sink
-            .get_data_from(system_packer)
-            .get_data_from(system_encoder)
-            .get_data_from(AudioBatcher::<Sample, CHANNELS, SAMPLE_RATE>::new(10))
-            .get_data_from(Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(
-                self.state.system_audio_enabled.clone(),
-            ))
-            .get_data_from(LevelMeter::<Sample, CHANNELS, SAMPLE_RATE>::new(
-                self.state.system_audio_level.clone(),
-            ));
-
-        let system_stream_result =
-            LoopbackInput::new(system_sink).start(self.config.output_device_id.as_ref());
+        let system_stream_result = LoopbackInput::new(
+            network_sink
+                .get_data_from(RealtimeFramePacker::new(RealtimeStreamId::System))
+                .get_data_from(OpusEncoder::<Sample, CHANNELS, SAMPLE_RATE>::new()?)
+                .get_data_from(AudioBatcher::<Sample, CHANNELS, SAMPLE_RATE>::new(10))
+                .get_data_from(Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(
+                    self.state.system_audio_enabled.clone(),
+                ))
+                .get_data_from(LevelMeter::<Sample, CHANNELS, SAMPLE_RATE>::new(
+                    self.state.system_audio_level.clone(),
+                )),
+        )
+        .start(self.config.output_device_id.as_ref());
         let system_stream = match system_stream_result {
             Ok(stream) => Some(stream),
             Err(e) => {
-                warn!(
-                    "Failed to start system audio capture: {}. \
-                     System audio sharing will be disabled.",
+                error!(
+                    "Failed to start system audio capture: {}. System audio sharing will be disabled.",
                     e
                 );
                 None

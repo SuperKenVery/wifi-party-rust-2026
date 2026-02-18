@@ -303,6 +303,63 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Node
     }
 }
 
+/// A network frame containing Opus-encoded audio with sequence number.
+///
+/// This is the input type for [`RealtimeFrameDecoder`], containing the
+/// compressed audio data and metadata needed for jitter buffer ordering.
+#[derive(Debug, Clone)]
+pub struct RealtimeOpusFrame {
+    pub sequence_number: u64,
+    pub timestamp: u64,
+    pub opus_data: Vec<u8>,
+    pub frame_size: usize,
+}
+
+impl RealtimeOpusFrame {
+    pub fn to_opus_packet(&self) -> OpusPacket {
+        OpusPacket {
+            data: self.opus_data.clone(),
+            frame_size: self.frame_size,
+        }
+    }
+}
+
+/// Decodes Opus frames from network into AudioFrames for jitter buffer.
+///
+/// This node preserves the sequence number through decoding:
+/// - Input: [`RealtimeOpusFrame`] (Opus data + sequence_number from network)
+/// - Output: [`AudioFrame`] (decoded PCM + sequence_number for jitter buffer)
+pub struct RealtimeFrameDecoder<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    decoder: OpusDecoder<Sample, CHANNELS, SAMPLE_RATE>,
+}
+
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    RealtimeFrameDecoder<Sample, CHANNELS, SAMPLE_RATE>
+{
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            decoder: OpusDecoder::new()?,
+        })
+    }
+}
+
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Node
+    for RealtimeFrameDecoder<Sample, CHANNELS, SAMPLE_RATE>
+{
+    type Input = RealtimeOpusFrame;
+    type Output = super::frame::AudioFrame<Sample, CHANNELS, SAMPLE_RATE>;
+
+    fn process(&self, input: Self::Input) -> Option<Self::Output> {
+        let opus_packet = input.to_opus_packet();
+        let pcm_buffer = self.decoder.decode_packet(&opus_packet)?;
+        Some(super::frame::AudioFrame {
+            sequence_number: input.sequence_number,
+            timestamp: input.timestamp,
+            samples: pcm_buffer,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

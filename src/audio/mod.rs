@@ -33,5 +33,5 @@ pub mod symphonia_compat;
 
 pub use buffers::{AudioBatcher, JitterBuffer, PullSnapshot, SimpleBuffer};
 pub use effects::{Gain, LevelMeter};
-pub use opus::OpusEncoder;
+pub use opus::{OpusEncoder, RealtimeFrameDecoder, RealtimeOpusFrame};
 pub use sample::AudioSample;
