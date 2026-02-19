@@ -6,8 +6,6 @@
 //!
 //! - [`Node`] - A processing unit that transforms input to output
 //! - [`Pushable`]/[`Pullable`] - Object-safe traits for push/pull operations
-//! - [`DynNode`] - Processing unit implementing both Pushable and Pullable
-//! - [`DynSource`]/[`DynSink`] - Active data producers/consumers
 //! - [`GraphNode`] - Wrapper to make any Node implement dynamic traits
 //!
 //! # Pipeline Construction
@@ -38,6 +36,6 @@ pub mod dyn_traits;
 pub mod graph_node;
 pub mod traits;
 
-pub use dyn_traits::{wrap_node, DynNode, DynSink, DynSource, Pullable, Pushable};
+pub use dyn_traits::{Pullable, Pushable};
 pub use graph_node::{GraphNode, OutputId};
 pub use traits::Node;

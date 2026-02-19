@@ -1,7 +1,7 @@
 //! GraphNode wrapper for dynamic graph construction.
 //!
 //! [`GraphNode`] wraps any [`Node`] to implement the dynamic traits
-//! ([`Pushable`], [`Pullable`], [`DynNode`]), enabling runtime graph modification.
+//! ([`Pushable`], [`Pullable`]), enabling runtime graph modification.
 //!
 //! # Usage
 //!
@@ -21,7 +21,7 @@ use std::sync::{Arc, RwLock};
 
 use dashmap::DashMap;
 
-use super::dyn_traits::{DynNode, Pullable, Pushable};
+use super::dyn_traits::{Pullable, Pushable};
 use super::traits::Node;
 
 pub type OutputId = u64;
@@ -103,15 +103,6 @@ impl<N: Node> Pullable<N::Output> for GraphNode<N> {
     fn pull(&self, len: usize) -> Option<N::Output> {
         let input_source = self.input.read().unwrap();
         let input = input_source.as_ref()?.pull(len)?;
-        self.node.process(input)
-    }
-}
-
-impl<N: Node> DynNode<N::Input, N::Output> for GraphNode<N>
-where
-    N::Output: Clone,
-{
-    fn process(&self, input: N::Input) -> Option<N::Output> {
         self.node.process(input)
     }
 }

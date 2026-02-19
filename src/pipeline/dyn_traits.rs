@@ -3,13 +3,10 @@
 //! These traits enable heterogeneous collections of pipeline components and
 //! runtime graph modification. All pipeline construction uses these dynamic traits.
 //!
-//! # Trait Hierarchy
+//! # Traits
 //!
 //! - [`Pushable<T>`] - Can receive pushed data
 //! - [`Pullable<T>`] - Can return data when pulled
-//! - [`DynNode<I, O>`] - Processing unit that is both Pushable and Pullable
-//! - [`DynSource<T>`] - Active data producer that pushes into Pushables
-//! - [`DynSink<T>`] - Active data consumer that pulls from Pullables
 //!
 //! # Pipeline Construction
 //!
@@ -32,9 +29,6 @@
 
 use std::sync::Arc;
 
-use super::graph_node::GraphNode;
-use super::traits::Node;
-
 /// Passive receiver - can receive pushed data.
 ///
 /// This is the input interface for nodes in a push-based data flow.
@@ -53,39 +47,6 @@ pub trait Pushable<T>: Send + Sync {
 /// - Read from internal buffer (e.g., [`JitterBuffer`])
 pub trait Pullable<T>: Send + Sync {
     fn pull(&self, len: usize) -> Option<T>;
-}
-
-/// Processing node - transforms input to output.
-///
-/// A `DynNode` is both `Pushable` (can receive input) and `Pullable` (can produce output).
-/// The [`process`](DynNode::process) method defines the transformation logic.
-///
-/// Default behaviors (provided by [`GraphNode`] wrapper):
-/// - Push: process input and forward output to connected destinations
-/// - Pull: pull from connected input source, process, return output
-///
-/// Custom implementations (e.g., [`JitterBuffer`]) can override push/pull behavior
-/// by implementing `Pushable` and `Pullable` directly without using `GraphNode`.
-pub trait DynNode<I, O>: Pushable<I> + Pullable<O> {
-    fn process(&self, input: I) -> Option<O>;
-}
-
-/// Active data source - drives push-based data flow.
-///
-/// Sources actively push data into the graph. Examples:
-/// - Microphone callback pushing captured audio
-/// - Network receiver thread pushing received packets
-pub trait DynSource<T>: Send + Sync {
-    fn push_to(&self, sink: &dyn Pushable<T>);
-}
-
-/// Active data sink - drives pull-based data flow.
-///
-/// Sinks actively pull data from the graph. Examples:
-/// - Speaker callback pulling audio for playback
-/// - Network sender pulling packets to transmit
-pub trait DynSink<T>: Send + Sync {
-    fn pull_from(&self, source: &dyn Pullable<T>, len: usize);
 }
 
 impl<T: Send + Sync> Pushable<T> for Arc<dyn Pushable<T>> {
@@ -182,8 +143,4 @@ macro_rules! pull_chain {
         )?
         $wrapped
     }};
-}
-
-pub fn wrap_node<N: Node + 'static>(node: N) -> Arc<GraphNode<N>> {
-    Arc::new(GraphNode::new(node))
 }
