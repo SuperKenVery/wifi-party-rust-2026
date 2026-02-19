@@ -18,7 +18,7 @@ use tracing::{error, info, warn};
 use crate::audio::AudioSample;
 use crate::audio::frame::AudioBuffer;
 use crate::audio::symphonia_compat::{WireCodecParams, extract_and_resample};
-use crate::pipeline::Source;
+use crate::pipeline::Pullable;
 use rubato::FftFixedIn;
 
 const SYNCED_STREAM_TIMEOUT: Duration = Duration::from_secs(30);
@@ -569,23 +569,21 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     }
 }
 
-impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Source
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    Pullable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>
     for SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>
 {
-    type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
-
-    fn pull(&self, len: usize) -> Option<Self::Output> {
+    fn pull(&self, len: usize) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
         let num_frames = len / CHANNELS;
         self.pull_and_mix(num_frames)
     }
 }
 
-impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Source
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    Pullable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>
     for Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>
 {
-    type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
-
-    fn pull(&self, len: usize) -> Option<Self::Output> {
+    fn pull(&self, len: usize) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
         let num_frames = len / CHANNELS;
         self.pull_and_mix(num_frames)
     }

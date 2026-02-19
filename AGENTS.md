@@ -63,24 +63,21 @@ Files:
 - `sync_stream.rs` - `SyncedAudioStream` for synchronized music playback
 - `ntp.rs` - NTP service for time synchronization
 - `music.rs` - Music file streaming
-- `combinator.rs` - Pipeline utilities (Tee, Mixer)
+- `combinator.rs` - Pipeline utilities (Tee, DynamicMixer)
 
 ### `src/pipeline/` - Processing Framework
 
-Generic pipeline architecture for data flow. Supports both static (compile-time) and dynamic (runtime) composition.
+Dynamic pipeline architecture for data flow with runtime graph modification.
 
 Files:
-- `traits.rs` - Core static traits (with associated types, not dyn-safe)
-  - `Node` - Transforms input to output
-  - `Source` - Pull-based data producer, has `give_data_to(node)` for chaining
-  - `Sink` - Push-based data consumer, has `get_data_from(node)` for chaining
-- `chain.rs` - Static pipeline composition (`PullPipeline`, `PushPipeline`)
-- `dyn_traits.rs` - Object-safe dynamic traits (with type parameters)
-  - `Pullable<T>` = dyn-safe equivalent of `Source` (blanket impl bridges them)
-  - `Pushable<T>` = dyn-safe equivalent of `Sink` (blanket impl bridges them)
-  - `DynNode<I, O>` - Processing node (Pushable + Pullable)
-  - `DynSource<T>` / `DynSink<T>` - Active data producers/consumers
-- `graph_node.rs` - `GraphNode<N>` wrapper to make any Node implement dynamic traits
+- `traits.rs` - Core `Node` trait for data transformation
+  - `Node` - Transforms input to output (has associated types `Input`/`Output`)
+- `dyn_traits.rs` - Object-safe dynamic traits and pipeline macros
+  - `Pullable<T>` - Can return data when pulled (object-safe)
+  - `Pushable<T>` - Can receive pushed data (object-safe)
+  - `push_chain!` macro - Build push-based pipelines declaratively
+  - `pull_chain!` macro - Build pull-based pipelines declaratively
+- `graph_node.rs` - `GraphNode<N>` wrapper to make any Node implement `Pushable`/`Pullable`
 
 ### `src/state/` - Application State
 
@@ -107,18 +104,31 @@ Files:
 
 ### Sending (Mic Pipeline)
 
-1. `AudioInput` captures from mic via cpal callback
-2. `LevelMeter` measures audio level
-3. `Gain` applies volume
-4. `Switch` enables/disables based on `mic_enabled`
-5. `Tee` splits to:
-   - Network path: `AudioBatcher` → `OpusEncoder` → `RealtimeFramePacker` → `NetworkSender`
-   - Loopback path: `Switch` (loopback_enabled) → `SimpleBuffer`
+Built with `push_chain!` macro:
+```
+AudioInput -> push_chain![
+    LevelMeter,
+    Gain,
+    => Tee(
+        push_chain![AudioBatcher, OpusEncoder, RealtimeFramePacker, => NetworkSender],
+        push_chain![Switch (loopback), => SimpleBuffer]
+    )
+]
+```
 
 ### Sending (System Audio Pipeline)
 
-1. `LoopbackInput` captures system audio via cpal
-2. `LevelMeter` → `Switch` → `AudioBatcher` → `OpusEncoder` → `RealtimeFramePacker` → `NetworkSender`
+Built with `push_chain!` macro:
+```
+LoopbackInput -> push_chain![
+    LevelMeter,
+    Switch (system_enabled),
+    AudioBatcher,
+    OpusEncoder,
+    RealtimeFramePacker,
+    => NetworkSender
+]
+```
 
 ### Receiving
 
@@ -129,10 +139,10 @@ Files:
    - `Ntp` → `NtpService`
 3. Per-host DecodeChain (created dynamically on first packet):
    - `GraphNode<RealtimeFrameDecoder>` → `JitterBuffer` → registered with `DynamicMixer`
-4. Top-level `Mixer` combines:
-   - `RealtimeAudioStream.give_data_to(Switch)` - network voice/system audio (controlled by listen_enabled)
-   - `SyncedAudioStream.give_data_to(Switch)` - network music (controlled by listen_enabled)
-   - `LoopbackBuffer` - local mic loopback (unaffected by listen toggle)
+4. Output mixer built with `DynamicMixer::with_inputs()`:
+   - `pull_chain![realtime_stream.mixer() =>, Switch]` - network voice/system audio
+   - `pull_chain![synced_stream =>, Switch]` - network music
+   - `loopback_buffer` - local mic loopback (no switch)
 5. `AudioOutput` plays mixed audio via cpal callback
 
 ## Network Protocol

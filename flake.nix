@@ -190,12 +190,6 @@
               cp -r ./target/dx/nju-schedule-ics/release/web/* $out/
             '';
         });
-      docker = pkgs.dockerTools.buildImage {
-        name = "nju-schedule-ics";
-        config = {
-          Cmd = [ "${server}/nju-schedule-ics" ];
-        };
-      };
     });
 
     githubActions-server = let

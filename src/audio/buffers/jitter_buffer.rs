@@ -12,7 +12,7 @@
 use crate::audio::AudioSample;
 use crate::audio::effects::calculate_rms_level;
 use crate::audio::frame::AudioFrame;
-use crate::pipeline::{Sink, Source};
+use crate::pipeline::{Pullable, Pushable};
 use crossbeam::atomic::AtomicCell;
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -491,11 +491,10 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     }
 }
 
-impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Sink
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    Pushable<AudioFrame<Sample, CHANNELS, SAMPLE_RATE>>
     for JitterBuffer<Sample, CHANNELS, SAMPLE_RATE>
 {
-    type Input = AudioFrame<Sample, CHANNELS, SAMPLE_RATE>;
-
     fn push(&self, input: AudioFrame<Sample, CHANNELS, SAMPLE_RATE>) {
         let frame_size = input.samples.data().len() as u64;
         self.stats.record_expected_frame_size(frame_size);
@@ -569,11 +568,10 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Sink
     }
 }
 
-impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Source
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    Pullable<AudioFrame<Sample, CHANNELS, SAMPLE_RATE>>
     for JitterBuffer<Sample, CHANNELS, SAMPLE_RATE>
 {
-    type Output = AudioFrame<Sample, CHANNELS, SAMPLE_RATE>;
-
     fn pull(&self, len: usize) -> Option<AudioFrame<Sample, CHANNELS, SAMPLE_RATE>> {
         let (samples, seq) = self.collect_samples(len).unwrap();
 
@@ -605,11 +603,11 @@ mod tests {
     }
 
     fn push(buffer: &TestBuffer, frame: TestFrame) {
-        Sink::push(buffer, frame);
+        Pushable::push(buffer, frame);
     }
 
     fn pull(buffer: &TestBuffer, len: usize) -> Option<TestFrame> {
-        Source::pull(buffer, len)
+        Pullable::pull(buffer, len)
     }
 
     #[test]

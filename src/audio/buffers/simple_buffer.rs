@@ -4,17 +4,26 @@
 
 use crate::audio::AudioSample;
 use crate::audio::frame::AudioBuffer;
-use crate::pipeline::{Sink, Source};
+use crate::pipeline::{Pullable, Pushable};
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// A sample-based FIFO buffer that accepts AudioBuffers and returns variable-length AudioBuffers.
 ///
 /// When pushed, incoming AudioBuffer samples are appended to the internal queue.
 /// When pulled, exactly `len` samples are returned (or fewer if the buffer doesn't have enough).
-#[derive(Clone)]
 pub struct SimpleBuffer<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    queue: std::sync::Arc<Mutex<VecDeque<Sample>>>,
+    queue: Arc<Mutex<VecDeque<Sample>>>,
+}
+
+impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Clone
+    for SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE>
+{
+    fn clone(&self) -> Self {
+        Self {
+            queue: self.queue.clone(),
+        }
+    }
 }
 
 impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
@@ -22,7 +31,7 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 {
     pub fn new() -> Self {
         Self {
-            queue: std::sync::Arc::new(Mutex::new(VecDeque::new())),
+            queue: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 }
@@ -35,11 +44,10 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Default
     }
 }
 
-impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Sink
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    Pushable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>
     for SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE>
 {
-    type Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
-
     fn push(&self, input: AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>) {
         let mut queue = self.queue.lock().unwrap();
         for sample in input.into_inner() {
@@ -48,11 +56,10 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Sink
     }
 }
 
-impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Source
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    Pullable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>
     for SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE>
 {
-    type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
-
     fn pull(&self, len: usize) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
         let mut queue = self.queue.lock().unwrap();
         if queue.is_empty() {

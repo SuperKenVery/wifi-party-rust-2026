@@ -1,7 +1,6 @@
 //! Hardware and network I/O.
 //!
-//! This module provides concrete [`Sink`](crate::pipeline::Sink)/[`Source`](crate::pipeline::Source)
-//! implementations that interface with the outside world:
+//! This module provides concrete implementations that interface with the outside world:
 //!
 //! - [`AudioInput`] / [`AudioOutput`] - Microphone capture and speaker playback via cpal
 //! - [`LoopbackInput`] - System audio capture (loopback recording) via cpal

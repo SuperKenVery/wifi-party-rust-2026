@@ -44,7 +44,6 @@ use tracing::{debug, info, warn};
 
 use crate::io::NetworkSender;
 use crate::party::stream::NetworkPacket;
-use crate::pipeline::Sink;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NtpDebugInfo {

@@ -7,11 +7,10 @@
 
 use crate::audio::AudioSample;
 use crate::audio::frame::AudioBuffer;
-use crate::pipeline::{Sink, Source};
+use crate::pipeline::{Pullable, Pushable};
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, Device, DeviceId, StreamConfig};
-use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
 
@@ -55,31 +54,26 @@ fn get_output_device(device_id: Option<&DeviceId>) -> Result<Device> {
     }
 }
 
-pub type BoxedSink<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> =
-    Box<dyn Sink<Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>>;
-
 /// Captures audio from an input device (microphone).
 ///
 /// Supports enable/disable to start/stop the device on demand.
 pub struct AudioInput<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    sink: Arc<BoxedSink<Sample, CHANNELS, SAMPLE_RATE>>,
+    sink: Arc<dyn Pushable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>>,
     device_id: Option<DeviceId>,
     stream: Mutex<Option<cpal::Stream>>,
-    _marker: PhantomData<Sample>,
 }
 
 impl<Sample: AudioSample + cpal::SizedSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     AudioInput<Sample, CHANNELS, SAMPLE_RATE>
 {
-    pub fn new<S>(sink: S, device_id: Option<DeviceId>) -> Self
-    where
-        S: Sink<Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> + 'static,
-    {
+    pub fn new(
+        sink: Arc<dyn Pushable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>>,
+        device_id: Option<DeviceId>,
+    ) -> Self {
         Self {
-            sink: Arc::new(Box::new(sink)),
+            sink,
             device_id,
             stream: Mutex::new(None),
-            _marker: PhantomData,
         }
     }
 
@@ -144,25 +138,18 @@ impl<Sample: AudioSample + cpal::SizedSample, const CHANNELS: usize, const SAMPL
 ///
 /// This works by building an input stream on the default output device,
 /// which cpal supports as loopback recording on supported platforms.
-pub struct LoopbackInput<S> {
-    sink: Arc<S>,
+pub struct LoopbackInput<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    sink: Arc<dyn Pushable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>>,
 }
 
-impl<S> LoopbackInput<S> {
-    pub fn new(sink: S) -> Self {
-        Self {
-            sink: Arc::new(sink),
-        }
+impl<Sample: AudioSample + cpal::SizedSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    LoopbackInput<Sample, CHANNELS, SAMPLE_RATE>
+{
+    pub fn new(sink: Arc<dyn Pushable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>>) -> Self {
+        Self { sink }
     }
 
-    pub fn start<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>(
-        self,
-        device_id: Option<&DeviceId>,
-    ) -> Result<cpal::Stream>
-    where
-        Sample: AudioSample + cpal::SizedSample,
-        S: Sink<Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> + 'static,
-    {
+    pub fn start(self, device_id: Option<&DeviceId>) -> Result<cpal::Stream> {
         let output_device = get_output_device(device_id)?;
 
         info!("Setting up loopback recording on output device");
@@ -206,25 +193,18 @@ impl<S> LoopbackInput<S> {
 }
 
 /// Plays audio to the default output device (speakers).
-pub struct AudioOutput<S> {
-    source: Arc<S>,
+pub struct AudioOutput<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    source: Arc<dyn Pullable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>>,
 }
 
-impl<S> AudioOutput<S> {
-    pub fn new(source: S) -> Self {
-        Self {
-            source: Arc::new(source),
-        }
+impl<Sample: AudioSample + cpal::SizedSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    AudioOutput<Sample, CHANNELS, SAMPLE_RATE>
+{
+    pub fn new(source: Arc<dyn Pullable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>>) -> Self {
+        Self { source }
     }
 
-    pub fn start<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>(
-        self,
-        device_id: Option<&DeviceId>,
-    ) -> Result<cpal::Stream>
-    where
-        Sample: AudioSample + cpal::SizedSample,
-        S: Source<Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> + 'static,
-    {
+    pub fn start(self, device_id: Option<&DeviceId>) -> Result<cpal::Stream> {
         let output_device = get_output_device(device_id)?;
         let output_config = output_device.default_output_config()?;
         debug!("Output config: {output_config:#?}");

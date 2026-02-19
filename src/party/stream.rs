@@ -26,11 +26,13 @@ use tracing::info;
 
 use crate::audio::frame::{AudioBuffer, AudioFrame};
 use crate::audio::opus::OpusPacket;
-use crate::audio::{AudioSample, JitterBuffer, PullSnapshot, RealtimeFrameDecoder, RealtimeOpusFrame};
-use crate::party::combinator::{DynamicMixer, InputId};
+use crate::audio::{
+    AudioSample, JitterBuffer, PullSnapshot, RealtimeFrameDecoder, RealtimeOpusFrame,
+};
+use crate::party::combinator::{InputId, Mixer};
 use crate::party::ntp::NtpPacket;
 use crate::party::sync_stream::{SyncedFrame, SyncedStreamMeta};
-use crate::pipeline::{GraphNode, Pullable, Pushable, Source};
+use crate::pipeline::{GraphNode, Pullable, Pushable};
 use crate::state::HostId;
 
 pub use crate::audio::PullSnapshot as StreamSnapshot;
@@ -116,14 +118,20 @@ pub enum SyncedControl {
 /// Top-level network packet enum.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone)]
 pub enum NetworkPacket {
+    /// Audio data for realtime stream
     Realtime(RealtimeFrame),
+    /// Audio data for synced stream
     Synced(SyncedFrame),
+    /// Metadata for synced stream (song name etc.)
     SyncedMeta(SyncedStreamMeta),
+    /// Control data for synced stream (play pause etc.)
     SyncedControl(SyncedControl),
+    /// Request for missed frames, for synced stream
     RequestFrames {
         stream_id: crate::party::sync_stream::SyncedStreamId,
         seqs: Vec<u64>,
     },
+    /// Network time synchronization
     Ntp(NtpPacket),
 }
 
@@ -162,13 +170,13 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     for JitterBufferAdapter<Sample, CHANNELS, SAMPLE_RATE>
 {
     fn pull(&self, len: usize) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
-        let frame: AudioFrame<Sample, CHANNELS, SAMPLE_RATE> = Source::pull(&*self.buffer, len)?;
+        let frame: AudioFrame<Sample, CHANNELS, SAMPLE_RATE> = Pullable::pull(&*self.buffer, len)?;
         Some(frame.samples)
     }
 }
 
 fn create_decode_chain<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>(
-    mixer: &Arc<DynamicMixer<Sample, CHANNELS, SAMPLE_RATE>>,
+    mixer: &Arc<Mixer<Sample, CHANNELS, SAMPLE_RATE>>,
 ) -> DecodeChain<Sample, CHANNELS, SAMPLE_RATE> {
     let jitter_buffer = Arc::new(JitterBuffer::new(JITTER_BUFFER_CAPACITY));
     let decoder = Arc::new(GraphNode::new(
@@ -196,7 +204,7 @@ fn create_decode_chain<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_
 /// The mixer handles combining audio from all sources.
 pub struct RealtimeAudioStream<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     chains: DashMap<BufferKey, DecodeChain<Sample, CHANNELS, SAMPLE_RATE>>,
-    mixer: Arc<DynamicMixer<Sample, CHANNELS, SAMPLE_RATE>>,
+    mixer: Arc<Mixer<Sample, CHANNELS, SAMPLE_RATE>>,
 }
 
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
@@ -205,11 +213,11 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     pub fn new() -> Self {
         Self {
             chains: DashMap::new(),
-            mixer: Arc::new(DynamicMixer::new()),
+            mixer: Arc::new(Mixer::new()),
         }
     }
 
-    pub fn mixer(&self) -> &Arc<DynamicMixer<Sample, CHANNELS, SAMPLE_RATE>> {
+    pub fn mixer(&self) -> &Arc<Mixer<Sample, CHANNELS, SAMPLE_RATE>> {
         &self.mixer
     }
 
@@ -236,7 +244,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
     /// Pulls mixed audio from the shared mixer.
     pub fn pull_and_mix(&self, len: usize) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
-        Source::pull(&*self.mixer, len)
+        Pullable::pull(&*self.mixer, len)
     }
 
     /// Removes decode chains that haven't received data within the timeout period.
@@ -352,26 +360,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Default
 {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Source
-    for RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>
-{
-    type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
-
-    fn pull(&self, len: usize) -> Option<Self::Output> {
-        self.pull_and_mix(len)
-    }
-}
-
-impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Source
-    for std::sync::Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>
-{
-    type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
-
-    fn pull(&self, len: usize) -> Option<Self::Output> {
-        self.pull_and_mix(len)
     }
 }
 

@@ -33,7 +33,7 @@ use crate::party::sync_stream::{
     RawPacket, SyncedAudioStreamManager, SyncedFrame, SyncedStreamId, SyncedStreamMeta,
     new_stream_id,
 };
-use crate::pipeline::Sink;
+use crate::pipeline::Pushable;
 use crate::state::MusicStreamProgress;
 
 const LOCAL_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);

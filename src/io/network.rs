@@ -33,7 +33,7 @@ use tracing::{error, info, warn};
 use crate::party::ntp::NtpService;
 use crate::party::stream::NetworkPacket;
 use crate::party::sync_stream::SyncedAudioStreamManager;
-use crate::pipeline::Sink;
+use crate::pipeline::Pushable;
 use crate::state::{AppState, ConnectionStatus};
 
 pub const MULTICAST_ADDR_V4: &str = "239.255.43.2";
@@ -94,10 +94,8 @@ impl NetworkSender {
     }
 }
 
-impl Sink for NetworkSender {
-    type Input = NetworkPacket;
-
-    fn push(&self, input: Self::Input) {
+impl Pushable<NetworkPacket> for NetworkSender {
+    fn push(&self, input: NetworkPacket) {
         self.send_packet(&input);
     }
 }

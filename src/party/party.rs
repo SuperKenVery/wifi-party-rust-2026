@@ -9,22 +9,22 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::audio::effects::Switch;
 use crate::audio::{AudioBatcher, AudioSample, Gain, LevelMeter, OpusEncoder, SimpleBuffer};
 use crate::io::{AudioInput, AudioOutput, LoopbackInput, NetworkSender};
-use crate::pipeline::Sink;
+use crate::pipeline::Pushable;
 use crate::state::{AppState, HostId, HostInfo, MusicStreamProgress, StreamInfo};
+use crate::{pull_chain, push_chain};
 
-use super::combinator::{BoxedSource, Mixer, Tee};
+use super::combinator::{Mixer, Tee};
 use super::config::PartyConfig;
 use super::music::MusicStream;
 use super::network::NetworkNode;
 use super::ntp::NtpService;
 use super::stream::{RealtimeAudioStream, RealtimeFramePacker, RealtimeStreamId, StreamSnapshot};
 use super::sync_stream::{SyncedAudioStreamManager, SyncedStreamState};
-use crate::pipeline::Source;
 
 pub struct Party<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     state: Arc<AppState>,
@@ -147,51 +147,50 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
         self.synced_stream = Some(synced_stream.clone());
         self.network_sender = Some(network_sink.clone());
 
-        let loopback_buffer: SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE> = SimpleBuffer::new();
+        let loopback_buffer = Arc::new(SimpleBuffer::<Sample, CHANNELS, SAMPLE_RATE>::new());
+        let network_sink_arc: Arc<dyn Pushable<_>> = Arc::new(network_sink);
 
         // ============================================================
         // Mic Pipeline: Mic -> LevelMeter -> Gain -> Tee
         //   -> AudioBatcher -> OpusEncoder -> RealtimeFramePacker(Mic) -> NetworkSink
         //   -> LoopbackSwitch -> loopback_buffer
         // ============================================================
-        self.mic_input = Some(Arc::new(AudioInput::new(
-            Tee::new(
-                network_sink
-                    .clone()
-                    .get_data_from(RealtimeFramePacker::new(RealtimeStreamId::Mic))
-                    .get_data_from(OpusEncoder::<Sample, CHANNELS, SAMPLE_RATE>::new()?)
-                    .get_data_from(AudioBatcher::<Sample, CHANNELS, SAMPLE_RATE>::new(20)),
-                loopback_buffer.clone().get_data_from(
-                    Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(
-                        self.state.loopback_enabled.clone(),
-                    ),
-                ),
-            )
-            .get_data_from(Gain::<Sample, CHANNELS, SAMPLE_RATE>::new(
-                self.state.mic_volume.clone(),
+        let mic_pipeline = push_chain![
+            LevelMeter::<Sample, CHANNELS, SAMPLE_RATE>::new(self.state.mic_audio_level.clone()),
+            Gain::<Sample, CHANNELS, SAMPLE_RATE>::new(self.state.mic_volume.clone()),
+            => Arc::new(Tee::new(
+                push_chain![
+                    AudioBatcher::<Sample, CHANNELS, SAMPLE_RATE>::new(20),
+                    OpusEncoder::<Sample, CHANNELS, SAMPLE_RATE>::new()?,
+                    RealtimeFramePacker::new(RealtimeStreamId::Mic),
+                    => network_sink_arc.clone()
+                ],
+                push_chain![
+                    Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(self.state.loopback_enabled.clone()),
+                    => loopback_buffer.clone()
+                ]
             ))
-            .get_data_from(LevelMeter::<Sample, CHANNELS, SAMPLE_RATE>::new(
-                self.state.mic_audio_level.clone(),
-            )),
+        ];
+
+        self.mic_input = Some(Arc::new(AudioInput::new(
+            mic_pipeline,
             self.config.input_device_id.clone(),
         )));
 
         // ============================================================
         // System Audio Pipeline: SystemAudio -> LevelMeter -> SystemSwitch -> AudioBatcher -> OpusEncoder -> RealtimeFramePacker(System) -> NetworkSink
         // ============================================================
-        let system_stream_result = LoopbackInput::new(
-            network_sink
-                .get_data_from(RealtimeFramePacker::new(RealtimeStreamId::System))
-                .get_data_from(OpusEncoder::<Sample, CHANNELS, SAMPLE_RATE>::new()?)
-                .get_data_from(AudioBatcher::<Sample, CHANNELS, SAMPLE_RATE>::new(10))
-                .get_data_from(Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(
-                    self.state.system_audio_enabled.clone(),
-                ))
-                .get_data_from(LevelMeter::<Sample, CHANNELS, SAMPLE_RATE>::new(
-                    self.state.system_audio_level.clone(),
-                )),
-        )
-        .start(self.config.output_device_id.as_ref());
+        let system_pipeline = push_chain![
+            LevelMeter::<Sample, CHANNELS, SAMPLE_RATE>::new(self.state.system_audio_level.clone()),
+            Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(self.state.system_audio_enabled.clone()),
+            AudioBatcher::<Sample, CHANNELS, SAMPLE_RATE>::new(10),
+            OpusEncoder::<Sample, CHANNELS, SAMPLE_RATE>::new()?,
+            RealtimeFramePacker::new(RealtimeStreamId::System),
+            => network_sink_arc.clone()
+        ];
+
+        let system_stream_result =
+            LoopbackInput::new(system_pipeline).start(self.config.output_device_id.as_ref());
         let system_stream = match system_stream_result {
             Ok(stream) => Some(stream),
             Err(e) => {
@@ -208,16 +207,19 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
         //                  + SyncedAudioStream (music) + loopback_buffer -> Speaker
         // listen_enabled controls whether network audio (realtime + synced) is played
         // ============================================================
-        let listen_switch =
-            Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(self.state.listen_enabled.clone());
-        let sources: Vec<BoxedSource<Sample, CHANNELS, SAMPLE_RATE>> = vec![
-            Box::new(realtime_stream.give_data_to(listen_switch.clone())),
-            Box::new(synced_stream.give_data_to(listen_switch)),
-            Box::new(loopback_buffer),
-        ];
-        let speaker_source = Mixer::new(sources);
+        let output_mixer = Mixer::with_inputs([
+            pull_chain![
+                realtime_stream.mixer().clone() =>,
+                Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(self.state.listen_enabled.clone())
+            ],
+            pull_chain![
+                synced_stream.clone() =>,
+                Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(self.state.listen_enabled.clone())
+            ],
+            loopback_buffer.clone(),
+        ]);
 
-        let audio_output: AudioOutput<_> = AudioOutput::new(speaker_source);
+        let audio_output = AudioOutput::new(output_mixer);
         let output_stream = audio_output.start(self.config.output_device_id.as_ref())?;
 
         let mut streams = vec![output_stream];
