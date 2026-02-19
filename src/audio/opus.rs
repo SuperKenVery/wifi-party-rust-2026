@@ -1,10 +1,11 @@
-//! Opus audio codec integration with Forward Error Correction (FEC).
+//! Opus audio codec integration.
 //!
 //! This module provides Opus encoding and decoding for network transmission.
 //! Opus is configured with:
-//! - **Inband FEC**: Each packet contains redundant data from the previous frame,
-//!   allowing recovery if the previous packet was lost.
-//! - **Low latency**: Uses the "restricted lowdelay" application mode.
+//! - **Low latency**: Uses the "restricted lowdelay" application mode (CELT-only).
+//!
+//! Note: In-band FEC is NOT available in CELT mode (only works with SILK/voice mode).
+//! Packet loss recovery relies on PLC (Packet Loss Concealment) instead.
 
 use std::sync::Mutex;
 
@@ -16,7 +17,6 @@ use super::frame::AudioBuffer;
 use crate::pipeline::Node;
 
 const OPUS_BITRATE: i32 = 128000;
-const OPUS_EXPECTED_PACKET_LOSS: i32 = 60;
 const MAX_OPUS_PACKET_SIZE: usize = 4000;
 const MAX_FRAME_SIZE: usize = 48000;
 
@@ -56,14 +56,6 @@ impl OpusEncoderState {
             .set_bitrate(Bitrate::Bits(OPUS_BITRATE))
             .context("Failed to set bitrate")?;
 
-        encoder
-            .set_inband_fec(true)
-            .context("Failed to enable FEC")?;
-
-        encoder
-            .set_packet_loss_perc(OPUS_EXPECTED_PACKET_LOSS)
-            .context("Failed to set packet loss percentage")?;
-
         Ok(Self {
             encoder,
             output_buffer: vec![0u8; MAX_OPUS_PACKET_SIZE],
@@ -83,8 +75,6 @@ impl OpusEncoderState {
 pub struct OpusDecoderState {
     decoder: Decoder,
     output_buffer: Vec<i16>,
-    fec_buffer: Vec<i16>,
-    last_packet_lost: bool,
 }
 
 impl OpusDecoderState {
@@ -97,8 +87,6 @@ impl OpusDecoderState {
         Ok(Self {
             decoder,
             output_buffer: vec![0i16; MAX_FRAME_SIZE],
-            fec_buffer: vec![0i16; MAX_FRAME_SIZE],
-            last_packet_lost: false,
         })
     }
 
@@ -108,19 +96,6 @@ impl OpusDecoderState {
         frame_size: usize,
         channels: usize,
     ) -> Result<&[i16]> {
-        if self.last_packet_lost {
-            let samples_per_channel = self
-                .decoder
-                .decode(opus_data, &mut self.fec_buffer[..frame_size], true)
-                .context("FEC decoding failed")?;
-            self.last_packet_lost = false;
-
-            let total_samples = samples_per_channel * channels;
-            if total_samples > 0 {
-                return Ok(&self.fec_buffer[..total_samples]);
-            }
-        }
-
         let samples_per_channel = self
             .decoder
             .decode(opus_data, &mut self.output_buffer[..frame_size], false)
@@ -131,20 +106,16 @@ impl OpusDecoderState {
     }
 
     pub fn decode_missing(&mut self, frame_size: usize) -> Result<&[i16]> {
-        self.last_packet_lost = true;
-
-        let len = self
+        let _ = self
             .decoder
             .decode_float(&[], &mut vec![0.0f32; frame_size], false)
             .ok();
-
-        let _ = len;
 
         Ok(&self.output_buffer[..frame_size.min(self.output_buffer.len())])
     }
 }
 
-/// Pipeline node that encodes PCM audio to Opus format with FEC enabled.
+/// Pipeline node that encodes PCM audio to Opus format.
 ///
 /// Input: AudioBuffer<Sample> (PCM samples)
 /// Output: OpusPacket (compressed Opus data)
@@ -453,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn test_opus_fec_recovery() {
+    fn test_opus_plc_recovery() {
         let decoder: OpusDecoder<i16, 2, 48000> = OpusDecoder::new().unwrap();
 
         let plc_output = decoder.decode_missing(960 * 2);
