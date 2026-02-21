@@ -22,7 +22,7 @@ use std::sync::{Arc, RwLock};
 use dashmap::DashMap;
 
 use super::dyn_traits::{Pullable, Pushable};
-use super::traits::Node;
+use super::node::Node;
 
 pub type OutputId = u64;
 
@@ -48,6 +48,7 @@ pub struct GraphNode<N: Node> {
     node: N,
     outputs: DashMap<OutputId, Arc<dyn Pushable<N::Output>>>,
     input: RwLock<Option<Arc<dyn Pullable<N::Input>>>>,
+    /// If we add_output for this Node, what would be its id (for removal)?
     next_output_id: AtomicU64,
 }
 

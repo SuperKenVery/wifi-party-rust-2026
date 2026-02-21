@@ -17,14 +17,14 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use rkyv::{Archive, Deserialize, Serialize};
 use tracing::info;
 
-use crate::audio::frame::{AudioBuffer, AudioFrame};
+use crate::audio::frame::AudioBuffer;
 use crate::audio::opus::OpusPacket;
 use crate::audio::{
     AudioSample, JitterBuffer, PullSnapshot, RealtimeFrameDecoder, RealtimeOpusFrame,
@@ -101,20 +101,6 @@ impl RealtimeFrame {
     }
 }
 
-/// Control commands for synced streams.
-#[derive(Archive, Serialize, Deserialize, Debug, Clone)]
-#[rkyv(compare(PartialEq))]
-pub enum SyncedControl {
-    Start {
-        stream_id: crate::party::sync_stream::SyncedStreamId,
-        party_clock_time: u64,
-        seq: u64,
-    },
-    Pause {
-        stream_id: crate::party::sync_stream::SyncedStreamId,
-    },
-}
-
 /// Top-level network packet enum.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone)]
 pub enum NetworkPacket {
@@ -125,7 +111,7 @@ pub enum NetworkPacket {
     /// Metadata for synced stream (song name etc.)
     SyncedMeta(SyncedStreamMeta),
     /// Control data for synced stream (play pause etc.)
-    SyncedControl(SyncedControl),
+    SyncedControl(super::sync_stream::SyncedControl),
     /// Request for missed frames, for synced stream
     RequestFrames {
         stream_id: crate::party::sync_stream::SyncedStreamId,
@@ -157,24 +143,6 @@ struct DecodeChain<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     last_seen: Instant,
 }
 
-/// Adapter to make JitterBuffer implement Pullable<AudioBuffer> instead of Pullable<AudioFrame>.
-///
-/// The DynamicMixer expects `Pullable<AudioBuffer>`, but JitterBuffer returns `AudioFrame`.
-/// This adapter strips the sequence number and returns just the AudioBuffer.
-struct JitterBufferAdapter<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    buffer: Arc<JitterBuffer<Sample, CHANNELS, SAMPLE_RATE>>,
-}
-
-impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
-    Pullable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>
-    for JitterBufferAdapter<Sample, CHANNELS, SAMPLE_RATE>
-{
-    fn pull(&self, len: usize) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
-        let frame: AudioFrame<Sample, CHANNELS, SAMPLE_RATE> = Pullable::pull(&*self.buffer, len)?;
-        Some(frame.samples)
-    }
-}
-
 fn create_decode_chain<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>(
     mixer: &Arc<Mixer<Sample, CHANNELS, SAMPLE_RATE>>,
 ) -> DecodeChain<Sample, CHANNELS, SAMPLE_RATE> {
@@ -184,11 +152,7 @@ fn create_decode_chain<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_
     ));
 
     decoder.add_output(jitter_buffer.clone());
-
-    let adapter = Arc::new(JitterBufferAdapter {
-        buffer: jitter_buffer.clone(),
-    });
-    let mixer_input_id = mixer.add_input(adapter);
+    let mixer_input_id = mixer.add_input(jitter_buffer.clone());
 
     DecodeChain {
         decoder,
@@ -343,6 +307,20 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             }
         }
         Vec::new()
+    }
+
+    /// Starts the background cleanup task.
+    ///
+    /// Must be called from within a Tokio runtime context.
+    pub fn start_cleanup_task(self: &Arc<Self>, shutdown: Arc<AtomicBool>) {
+        let stream = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            while !shutdown.load(Ordering::Relaxed) {
+                interval.tick().await;
+                stream.cleanup_stale();
+            }
+        });
     }
 }
 

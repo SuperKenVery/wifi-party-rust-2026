@@ -3,17 +3,20 @@
 //! Coordinates audio capture, network transport, and playback into a complete
 //! audio sharing pipeline.
 
+use std::net::UdpSocket;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing::{error, info};
 
 use crate::audio::effects::Switch;
 use crate::audio::{AudioBatcher, AudioSample, Gain, LevelMeter, OpusEncoder, SimpleBuffer};
-use crate::io::{AudioInput, AudioOutput, LoopbackInput, NetworkSender};
+use crate::io::{
+    AudioInput, AudioOutput, LoopbackInput, MulticastLock, NetworkSender, create_multicast_socket,
+};
 use crate::pipeline::Pushable;
 use crate::state::{AppState, HostId, HostInfo, MusicStreamProgress, StreamInfo};
 use crate::{pull_chain, push_chain};
@@ -21,15 +24,16 @@ use crate::{pull_chain, push_chain};
 use super::combinator::{Mixer, Tee};
 use super::config::PartyConfig;
 use super::music::MusicStream;
-use super::network::NetworkNode;
 use super::ntp::NtpService;
-use super::stream::{RealtimeAudioStream, RealtimeFramePacker, RealtimeStreamId, StreamSnapshot};
+use super::packet_dispatcher::PacketDispatcher;
+use super::realtime_stream::{
+    RealtimeAudioStream, RealtimeFramePacker, RealtimeStreamId, StreamSnapshot,
+};
 use super::sync_stream::{SyncedAudioStreamManager, SyncedStreamState};
 
 pub struct Party<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     state: Arc<AppState>,
     config: PartyConfig,
-    network_node: NetworkNode<Sample, CHANNELS, SAMPLE_RATE>,
     realtime_stream: Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
     synced_stream: Option<Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>>,
     ntp_service: Option<Arc<NtpService>>,
@@ -37,7 +41,9 @@ pub struct Party<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     music_streams: Mutex<Vec<MusicStream>>,
     mic_input: Option<Arc<AudioInput<Sample, CHANNELS, SAMPLE_RATE>>>,
     _audio_streams: Vec<cpal::Stream>,
-    host_sync_shutdown: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
+    #[allow(dead_code)]
+    multicast_lock: Option<MulticastLock>,
 }
 
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
@@ -47,7 +53,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         Self {
             state,
             config,
-            network_node: NetworkNode::new(),
             realtime_stream: Arc::new(RealtimeAudioStream::new()),
             synced_stream: None,
             ntp_service: None,
@@ -55,7 +60,8 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             music_streams: Mutex::new(Vec::new()),
             mic_input: None,
             _audio_streams: Vec::new(),
-            host_sync_shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            multicast_lock: None,
         }
     }
 
@@ -136,25 +142,69 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
     pub fn run(&mut self) -> Result<()> {
         info!("Starting Party pipelines with config {:#?}", self.config);
 
-        let (network_sink, realtime_stream, synced_stream, ntp_service) = self.network_node.start(
-            self.realtime_stream.clone(),
-            self.state.clone(),
-            self.config.ipv6,
-            self.config.send_interface_index,
-        )?;
+        self.multicast_lock = MulticastLock::acquire();
 
-        self.ntp_service = Some(ntp_service);
+        let (socket, multicast_addr, local_ips) =
+            create_multicast_socket(self.config.ipv6, self.config.send_interface_index)?;
+
+        let send_socket: UdpSocket = socket
+            .try_clone()
+            .context("Failed to clone socket for sender")?;
+        let network_sender = NetworkSender::new(send_socket, multicast_addr);
+
+        let ntp_service = NtpService::new(network_sender.clone(), self.shutdown.clone());
+
+        let ntp_for_synced = ntp_service.clone();
+        let synced_stream = Arc::new(SyncedAudioStreamManager::new(move || {
+            ntp_for_synced.party_now()
+        }));
+
+        self.ntp_service = Some(ntp_service.clone());
         self.synced_stream = Some(synced_stream.clone());
-        self.network_sender = Some(network_sink.clone());
+        self.network_sender = Some(network_sender.clone());
+
+        let realtime_stream = self.realtime_stream.clone();
+
+        thread::spawn({
+            let socket = socket;
+            let local_ips = local_ips;
+            let state = self.state.clone();
+            let realtime_stream = realtime_stream.clone();
+            let synced_stream = synced_stream.clone();
+            let ntp_service = ntp_service.clone();
+            let network_sender = network_sender.clone();
+            let shutdown = self.shutdown.clone();
+
+            move || {
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create Tokio runtime");
+
+                rt.block_on(async {
+                    ntp_service.start();
+                    realtime_stream.start_cleanup_task(shutdown.clone());
+                    synced_stream.start_cleanup_task(shutdown.clone());
+                    synced_stream.start_retransmit_task(network_sender, shutdown.clone());
+
+                    PacketDispatcher::start(
+                        socket,
+                        local_ips,
+                        state,
+                        realtime_stream,
+                        synced_stream,
+                        ntp_service,
+                        shutdown.clone(),
+                    )
+                    .await
+                    .ok();
+                });
+            }
+        });
 
         let loopback_buffer = Arc::new(SimpleBuffer::<Sample, CHANNELS, SAMPLE_RATE>::new());
-        let network_sink_arc: Arc<dyn Pushable<_>> = Arc::new(network_sink);
+        let network_sink_arc: Arc<dyn Pushable<_>> = Arc::new(network_sender);
 
-        // ============================================================
-        // Mic Pipeline: Mic -> LevelMeter -> Gain -> Tee
-        //   -> AudioBatcher -> OpusEncoder -> RealtimeFramePacker(Mic) -> NetworkSink
-        //   -> LoopbackSwitch -> loopback_buffer
-        // ============================================================
         let mic_pipeline = push_chain![
             LevelMeter::<Sample, CHANNELS, SAMPLE_RATE>::new(self.state.mic_audio_level.clone()),
             Gain::<Sample, CHANNELS, SAMPLE_RATE>::new(self.state.mic_volume.clone()),
@@ -177,9 +227,6 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
             self.config.input_device_id.clone(),
         )));
 
-        // ============================================================
-        // System Audio Pipeline: SystemAudio -> LevelMeter -> SystemSwitch -> AudioBatcher -> OpusEncoder -> RealtimeFramePacker(System) -> NetworkSink
-        // ============================================================
         let system_pipeline = push_chain![
             LevelMeter::<Sample, CHANNELS, SAMPLE_RATE>::new(self.state.system_audio_level.clone()),
             Switch::<Sample, CHANNELS, SAMPLE_RATE>::new(self.state.system_audio_enabled.clone()),
@@ -202,11 +249,6 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
             }
         };
 
-        // ============================================================
-        // Output Pipeline: RealtimeAudioStream (mixed from all hosts/streams)
-        //                  + SyncedAudioStream (music) + loopback_buffer -> Speaker
-        // listen_enabled controls whether network audio (realtime + synced) is played
-        // ============================================================
         let output_mixer = Mixer::with_inputs([
             pull_chain![
                 realtime_stream.mixer().clone() =>,
@@ -238,7 +280,7 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
     pub fn restart_with_config(&mut self, config: PartyConfig) -> Result<()> {
         info!("Restarting Party with new config...");
 
-        self.host_sync_shutdown.store(true, Ordering::Relaxed);
+        self.shutdown.store(true, Ordering::Relaxed);
 
         self._audio_streams.clear();
         self.mic_input = None;
@@ -246,15 +288,14 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
             let mut music_streams = self.music_streams.lock().unwrap();
             music_streams.clear();
         }
-        // Drop all NetworkSender references before shutting down NetworkNode
         self.network_sender = None;
         self.ntp_service = None;
         self.synced_stream = None;
+        self.multicast_lock = None;
 
         self.config = config;
-        self.network_node = NetworkNode::new();
         self.realtime_stream = Arc::new(RealtimeAudioStream::new());
-        self.host_sync_shutdown = Arc::new(AtomicBool::new(false));
+        self.shutdown = Arc::new(AtomicBool::new(false));
 
         self.run()
     }
@@ -301,14 +342,13 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
     fn start_host_sync_task(&self) {
         let state = self.state.clone();
         let realtime_stream = self.realtime_stream.clone();
-        let shutdown = self.host_sync_shutdown.clone();
+        let shutdown = self.shutdown.clone();
 
         thread::spawn(move || {
             while !shutdown.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(100));
 
                 let mut active_host_ids = realtime_stream.active_hosts();
-                // Sort hosts by ID to ensure stable UI order and prevent flickering
                 active_host_ids.sort_by_key(|h| h.to_string());
 
                 let mut host_infos_vec = Vec::new();

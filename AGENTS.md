@@ -47,23 +47,24 @@ Files:
   - `AudioInput` - Microphone capture
   - `LoopbackInput` - System audio capture
   - `AudioOutput` - Speaker playback
-- `network.rs` - UDP multicast transport
+- `network.rs` - UDP multicast networking
+  - `create_multicast_socket_v4/v6` - Socket factory with DSCP/QoS, AWDL support
   - `NetworkSender` - Broadcasts packets to multicast group
-  - `NetworkReceiver` - Receives and dispatches packets
+  - Constants: `MULTICAST_ADDR_V4/V6`, `MULTICAST_PORT`, `TTL`
 
 ### `src/party/` - Orchestration
 
 The main coordination layer that wires everything together.
 
 Files:
-- `party.rs` - Main `Party` struct that sets up all pipelines
+- `party.rs` - Main `Party` struct that sets up all pipelines and manages component lifecycle
 - `config.rs` - Configuration (device IDs, network settings)
-- `network.rs` - `NetworkNode` manages sender/receiver lifecycle
+- `packet_dispatcher.rs` - `PacketDispatcher` receives UDP packets and dispatches by type
 - `stream.rs` - `RealtimeAudioStream` manages per-host jitter buffers
-- `sync_stream.rs` - `SyncedAudioStream` for synchronized music playback
+- `sync_stream.rs` - `SyncedAudioStreamManager` for synchronized music playback
 - `ntp.rs` - NTP service for time synchronization
 - `music.rs` - Music file streaming
-- `combinator.rs` - Pipeline utilities (Tee, DynamicMixer)
+- `combinator.rs` - Pipeline utilities (Tee, Mixer)
 
 ### `src/pipeline/` - Processing Framework
 
@@ -132,14 +133,14 @@ LoopbackInput -> push_chain![
 
 ### Receiving
 
-1. `NetworkReceiver` runs in background thread, receives UDP packets
+1. `PacketDispatcher` runs in background thread, receives UDP packets
 2. Packets dispatched by type:
-   - `Realtime` → `RealtimeAudioStream` → per-host `DecodeChain` → `DynamicMixer`
-   - `Synced` → `SyncedAudioStream` (NTP-synchronized playback)
+   - `Realtime` → `RealtimeAudioStream` → per-host `DecodeChain` → `Mixer`
+   - `Synced` → `SyncedAudioStreamManager` (NTP-synchronized playback)
    - `Ntp` → `NtpService`
 3. Per-host DecodeChain (created dynamically on first packet):
-   - `GraphNode<RealtimeFrameDecoder>` → `JitterBuffer` → registered with `DynamicMixer`
-4. Output mixer built with `DynamicMixer::with_inputs()`:
+   - `GraphNode<RealtimeFrameDecoder>` → `JitterBuffer` → registered with `Mixer`
+4. Output mixer built with `Mixer::with_inputs()`:
    - `pull_chain![realtime_stream.mixer() =>, Switch]` - network voice/system audio
    - `pull_chain![synced_stream =>, Switch]` - network music
    - `loopback_buffer` - local mic loopback (no switch)
@@ -169,7 +170,7 @@ Files:
 - `assets/AndroidManifest.xml` - Declares `CHANGE_WIFI_MULTICAST_STATE` and `ACCESS_WIFI_STATE` permissions
 - `src/io/multicast_lock.rs` - JNI wrapper that acquires/releases MulticastLock via WifiManager
 
-The lock is acquired in `NetworkNode::start()` and held for the lifetime of the network connection.
+The lock is acquired in `Party::run()` and held for the lifetime of the network connection.
 
 ## Key Components Detail
 
@@ -184,26 +185,31 @@ Slot-based buffer indexed by sequence number. Key behaviors:
 ### RealtimeAudioStream (`src/party/stream.rs`)
 
 Manages per-host decode chains using the dynamic pipeline architecture:
-- `DecodeChain`: `GraphNode<RealtimeFrameDecoder>` → `JitterBuffer` → `DynamicMixer`
+- `DecodeChain`: `GraphNode<RealtimeFrameDecoder>` → `JitterBuffer` → `Mixer`
 - Creates chain on first packet from new source (dynamic host management)
-- Internal `DynamicMixer` combines audio from all per-host JitterBuffers
+- Internal `Mixer` combines audio from all per-host JitterBuffers
 - Implements `Source` trait - `pull` delegates to internal mixer
 - On cleanup timeout: removes chain from DashMap and deregisters from mixer
+- Has `start_cleanup_task()` for background stale host cleanup
 
-### SyncedAudioStream (`src/party/sync_stream.rs`)
+### SyncedAudioStreamManager (`src/party/sync_stream.rs`)
 
 For synchronized music playback. Uses NTP time to schedule frame playback. Supports retransmission requests for missing frames.
 
 Key design: No re-encoding. Raw compressed packets from the original audio file are forwarded over the network. Receiver creates a symphonia decoder based on `WireCodecParams` from metadata.
 
+Has `start_cleanup_task()` and `start_retransmit_task()` for background operations.
+
 ### Party (`src/party/party.rs`)
 
 Main orchestrator. `Party::run()` sets up all pipelines:
-1. Starts `NetworkNode` which spawns receiver thread
-2. Creates mic pipeline with all effects
-3. Creates system audio pipeline
-4. Creates output pipeline with Mixer
-5. Starts host sync task (updates UI with active hosts)
+1. Creates multicast socket via `create_multicast_socket()`
+2. Creates `NetworkSender` for packet transmission
+3. Creates `NtpService`, `SyncedAudioStreamManager` with their background tasks
+4. Spawns network thread with `PacketDispatcher` for receiving
+5. Creates mic and system audio pipelines
+6. Creates output pipeline with Mixer
+7. Starts host sync task (updates UI with active hosts)
 
 ## Entry Point
 

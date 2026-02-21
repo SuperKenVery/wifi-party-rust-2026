@@ -28,22 +28,21 @@
 //! - [`party`] - Main [`Party`] orchestrator that wires everything together
 //! - [`stream`] - Realtime audio stream abstraction ([`NetworkPacket`], [`RealtimeAudioStream`])
 //! - [`sync_stream`] - Synchronized audio stream for music playback
-//! - [`network`] - [`NetworkNode`] for managing network send/receive
-//! - [`codec`] - Legacy frame packing/unpacking (deprecated)
+//! - [`packet_dispatcher`] - Network packet receiving and dispatching
 //! - [`combinator`] - Pipeline routing utilities (tee, switch, mix)
 
 pub mod combinator;
 pub mod config;
 pub mod music;
-pub mod network;
 pub mod ntp;
+pub mod packet_dispatcher;
 pub mod party;
-pub mod stream;
+pub mod realtime_stream;
 pub mod sync_stream;
 
 pub use config::PartyConfig;
 
 pub use ntp::NtpDebugInfo;
 pub use party::Party;
-pub use stream::StreamSnapshot;
+pub use realtime_stream::StreamSnapshot;
 pub use sync_stream::{SyncedStreamId, SyncedStreamState};

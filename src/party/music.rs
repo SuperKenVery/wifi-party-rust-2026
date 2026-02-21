@@ -28,7 +28,8 @@ use crate::audio::AudioSample;
 use crate::audio::symphonia_compat::WireCodecParams;
 use crate::io::NetworkSender;
 use crate::party::ntp::NtpService;
-use crate::party::stream::{NetworkPacket, SyncedControl};
+use crate::party::realtime_stream::NetworkPacket;
+use crate::party::sync_stream::SyncedControl;
 use crate::party::sync_stream::{
     RawPacket, SyncedAudioStreamManager, SyncedFrame, SyncedStreamId, SyncedStreamMeta,
     new_stream_id,
@@ -67,10 +68,7 @@ impl MusicStream {
     ) -> Result<Self> {
         info!("Starting music stream for: {}", file_name);
 
-        let extension = file_name
-            .rsplit('.')
-            .next()
-            .map(|s| s.to_lowercase());
+        let extension = file_name.rsplit('.').next().map(|s| s.to_lowercase());
         let source = AudioSource::open(data, extension.as_deref())?;
         let codec_params = WireCodecParams::from_symphonia(&source.codec_params())
             .ok_or_else(|| anyhow!("Unsupported codec"))?;
@@ -479,12 +477,8 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
                 break;
             };
             if let Some(packet) = self.vault.get(&seq) {
-                let frame = SyncedFrame::new(
-                    self.meta.stream_id,
-                    seq,
-                    packet.dur,
-                    packet.data.clone(),
-                );
+                let frame =
+                    SyncedFrame::new(self.meta.stream_id, seq, packet.dur, packet.data.clone());
                 self.network_sender.push(NetworkPacket::Synced(frame));
             }
         }

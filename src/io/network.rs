@@ -1,14 +1,8 @@
-//! Network I/O using UDP multicast.
+//! UDP multicast network I/O.
 //!
-//! This module provides low-level network transport for audio packets:
-//!
-//! - [`NetworkSender`] - Broadcasts audio packets to all peers via UDP multicast
-//! - [`NetworkReceiver`] - Receives packets from peers and dispatches to stream handlers
-//!
-//! # Protocol
-//!
-//! Audio data is wrapped in [`NetworkPacket`] (Opus-encoded) and serialized using `rkyv`.
-//! Each packet is sent over UDP multicast.
+//! This module provides:
+//! - Socket creation and configuration for UDP multicast
+//! - [`NetworkSender`] for broadcasting audio packets to all peers
 //!
 //! # Multicast Configuration
 //!
@@ -22,33 +16,289 @@
 //! - Port: `7667`
 //! - Hop limit: `1` (local network only)
 
-use anyhow::{Context, Result};
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
-use tokio::time::interval;
+
+use anyhow::{Context, Result};
+use network_interface::NetworkInterfaceConfig;
+use socket2::{Domain, Protocol, Socket, Type};
 use tracing::{error, info, warn};
 
-use crate::party::ntp::NtpService;
-use crate::party::stream::NetworkPacket;
-use crate::party::sync_stream::SyncedAudioStreamManager;
+use crate::party::realtime_stream::NetworkPacket;
 use crate::pipeline::Pushable;
-use crate::state::{AppState, ConnectionStatus};
 
 pub const MULTICAST_ADDR_V4: &str = "239.255.43.2";
 pub const MULTICAST_ADDR_V6: &str = "ff02::7667";
 pub const MULTICAST_PORT: u16 = 7667;
 pub const TTL: u32 = 1;
 
+const DSCP_EF: u32 = 0xB8;
+
+fn set_socket_dscp(socket: &Socket, ipv6: bool) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = socket.as_raw_fd();
+        let dscp = DSCP_EF as libc::c_int;
+
+        let (level, optname) = if ipv6 {
+            (libc::IPPROTO_IPV6, libc::IPV6_TCLASS)
+        } else {
+            (libc::IPPROTO_IP, libc::IP_TOS)
+        };
+
+        let ret = unsafe {
+            libc::setsockopt(
+                fd,
+                level,
+                optname,
+                &dscp as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if ret != 0 {
+            warn!(
+                "Failed to set DSCP for voice QoS: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Networking::WinSock::{
+            IP_TOS, IPPROTO_IP, IPPROTO_IPV6, IPV6_TCLASS, setsockopt,
+        };
+
+        let fd = socket.as_raw_socket();
+        let dscp = DSCP_EF as i32;
+
+        let (level, optname) = if ipv6 {
+            (IPPROTO_IPV6, IPV6_TCLASS)
+        } else {
+            (IPPROTO_IP, IP_TOS)
+        };
+
+        let ret = unsafe {
+            setsockopt(
+                fd as usize,
+                level,
+                optname,
+                &dscp as *const _ as *const i8,
+                std::mem::size_of::<i32>() as i32,
+            )
+        };
+        if ret != 0 {
+            warn!(
+                "Failed to set DSCP for voice QoS: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+}
+
+fn allow_awdl(socket: &Socket, allow: bool) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use libc::{SOL_SOCKET, c_int, setsockopt};
+        use std::os::unix::io::AsRawFd;
+
+        const SO_RECV_ANYIF: c_int = 0x1104;
+
+        let fd = socket.as_raw_fd();
+        let value: c_int = if allow { 1 } else { 0 };
+        let ret = unsafe {
+            setsockopt(
+                fd,
+                SOL_SOCKET,
+                SO_RECV_ANYIF,
+                &value as *const _ as *const libc::c_void,
+                std::mem::size_of::<c_int>() as libc::socklen_t,
+            )
+        };
+        if ret != 0 {
+            Err(std::io::Error::last_os_error().into())
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = socket;
+        let _ = allow;
+        Ok(())
+    }
+}
+
+/// Creates an IPv4 multicast socket ready for sending and receiving.
+///
+/// Returns the socket, multicast address, and list of local IPs (for filtering own packets).
+pub fn create_multicast_socket_v4(
+    send_interface_index: Option<u32>,
+) -> Result<(UdpSocket, SocketAddr, Vec<IpAddr>)> {
+    let multicast_ip: Ipv4Addr = MULTICAST_ADDR_V4
+        .parse()
+        .context("Invalid multicast address")?;
+    let multicast_addr = SocketAddr::new(IpAddr::V4(multicast_ip), MULTICAST_PORT);
+
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
+        .context("Failed to create socket")?;
+    socket
+        .set_reuse_address(true)
+        .context("Failed to set reuse_address")?;
+    socket
+        .set_nonblocking(true)
+        .context("Failed to set nonblocking")?;
+    socket
+        .set_multicast_ttl_v4(TTL)
+        .context("Failed to set multicast_ttl_v4")?;
+    socket
+        .set_multicast_loop_v4(false)
+        .context("Failed to set multicast_loop_v4")?;
+    set_socket_dscp(&socket, false);
+    let _ = allow_awdl(&socket, true);
+
+    let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), MULTICAST_PORT);
+    socket
+        .bind(&bind_addr.into())
+        .context(format!("Failed to bind to {:?}", bind_addr))?;
+
+    let mut local_ips = Vec::new();
+    let mut send_ip: Option<Ipv4Addr> = None;
+
+    match network_interface::NetworkInterface::show() {
+        Ok(interfaces) => {
+            for iface in interfaces {
+                for addr in &iface.addr {
+                    if let IpAddr::V4(ip) = addr.ip() {
+                        if ip.is_loopback() {
+                            continue;
+                        }
+                        local_ips.push(IpAddr::V4(ip));
+                        if send_interface_index == Some(iface.index) {
+                            send_ip = Some(ip);
+                        }
+                        match socket.join_multicast_v4(&multicast_ip, &ip) {
+                            Ok(()) => info!("Joined multicast on {} ({})", iface.name, ip),
+                            Err(e) => warn!(
+                                "Failed to join multicast on {} ({}): {}",
+                                iface.name, ip, e
+                            ),
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            warn!("Failed to enumerate interfaces: {:?}, using default", e);
+            socket.join_multicast_v4(&multicast_ip, &Ipv4Addr::UNSPECIFIED)?;
+        }
+    }
+
+    if let Some(ip) = send_ip {
+        socket.set_multicast_if_v4(&ip)?;
+        info!("Send interface set to {}", ip);
+    }
+
+    info!(
+        "IPv4 multicast socket ready on {}:{}",
+        MULTICAST_ADDR_V4, MULTICAST_PORT
+    );
+    Ok((socket.into(), multicast_addr, local_ips))
+}
+
+/// Creates an IPv6 multicast socket ready for sending and receiving.
+///
+/// Returns the socket, multicast address, and list of local IPs (for filtering own packets).
+pub fn create_multicast_socket_v6(
+    send_interface_index: Option<u32>,
+) -> Result<(UdpSocket, SocketAddr, Vec<IpAddr>)> {
+    let multicast_ip: Ipv6Addr = MULTICAST_ADDR_V6
+        .parse()
+        .context("Invalid IPv6 multicast address")?;
+    let multicast_addr = SocketAddr::V6(SocketAddrV6::new(multicast_ip, MULTICAST_PORT, 0, 0));
+
+    let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))
+        .context("Failed to create IPv6 socket")?;
+    socket
+        .set_reuse_address(true)
+        .context("Failed to set reuse_address")?;
+    socket
+        .set_nonblocking(true)
+        .context("Failed to set nonblocking")?;
+    socket
+        .set_multicast_hops_v6(TTL)
+        .context("Failed to set multicast_hops_v6")?;
+    socket
+        .set_multicast_loop_v6(false)
+        .context("Failed to set multicast_loop_v6")?;
+    set_socket_dscp(&socket, true);
+    let _ = allow_awdl(&socket, true);
+
+    if let Some(index) = send_interface_index {
+        socket
+            .set_multicast_if_v6(index)
+            .context("Failed to set multicast_if_v6")?;
+        info!("Send interface set to index {}", index);
+    }
+
+    let bind_addr = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, MULTICAST_PORT, 0, 0);
+    socket
+        .bind(&bind_addr.into())
+        .context(format!("Failed to bind to {:?}", bind_addr))?;
+
+    let mut local_ips = Vec::new();
+    match network_interface::NetworkInterface::show() {
+        Ok(interfaces) => {
+            for iface in interfaces {
+                for addr in &iface.addr {
+                    if let IpAddr::V6(ip) = addr.ip() {
+                        if ip.is_loopback() {
+                            continue;
+                        }
+                        local_ips.push(IpAddr::V6(ip));
+                        match socket.join_multicast_v6(&multicast_ip, iface.index) {
+                            Ok(()) => info!("Joined IPv6 multicast on {} ({})", iface.name, ip),
+                            Err(e) => warn!(
+                                "Failed to join IPv6 multicast on {} ({}): {}",
+                                iface.name, ip, e
+                            ),
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            warn!("Failed to enumerate interfaces: {:?}, using default", e);
+            socket.join_multicast_v6(&multicast_ip, 0)?;
+        }
+    }
+
+    info!(
+        "IPv6 multicast socket ready on [{}]:{}",
+        MULTICAST_ADDR_V6, MULTICAST_PORT
+    );
+    Ok((socket.into(), multicast_addr, local_ips))
+}
+
+/// Creates a multicast socket based on the IPv6 flag.
+pub fn create_multicast_socket(
+    ipv6: bool,
+    send_interface_index: Option<u32>,
+) -> Result<(UdpSocket, SocketAddr, Vec<IpAddr>)> {
+    if ipv6 {
+        create_multicast_socket_v6(send_interface_index)
+    } else {
+        create_multicast_socket_v4(send_interface_index)
+    }
+}
+
 /// Sends audio packets to all peers via UDP multicast.
 ///
-/// Implements [`Sink`] so it can be used directly in the audio pipeline.
+/// Implements [`Pushable`] so it can be used directly in the audio pipeline.
 /// Packets are serialized with `rkyv` and broadcast to the multicast group.
-///
-/// # Error Handling
-///
-/// Send failures are logged but don't propagate errors.
 ///
 /// # Cloning
 ///
@@ -97,194 +347,5 @@ impl NetworkSender {
 impl Pushable<NetworkPacket> for NetworkSender {
     fn push(&self, input: NetworkPacket) {
         self.send_packet(&input);
-    }
-}
-
-/// Receives audio packets from peers and dispatches them to stream handlers.
-///
-/// Runs in a dedicated thread (see [`NetworkNode`](crate::party::network::NetworkNode)),
-/// continuously listening for UDP multicast packets. Each received packet is:
-///
-/// 1. Deserialized from `rkyv` format
-/// 2. Filtered (packets from self are ignored based on source IP)
-/// 3. Dispatched to the appropriate stream handler based on packet type
-///
-/// The receiver also periodically cleans up stale stream buffers.
-pub struct NetworkReceiver<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    socket: UdpSocket,
-    state: Arc<AppState>,
-    network_sender: NetworkSender,
-    realtime_stream: Arc<crate::party::stream::RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
-    synced_stream: Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>,
-    ntp_service: Arc<NtpService>,
-    local_ips: Vec<std::net::IpAddr>,
-    shutdown_flag: Arc<AtomicBool>,
-}
-
-impl<Sample: crate::audio::AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
-    NetworkReceiver<Sample, CHANNELS, SAMPLE_RATE>
-{
-    pub fn new(
-        socket: UdpSocket,
-        state: Arc<AppState>,
-        network_sender: NetworkSender,
-        realtime_stream: Arc<
-            crate::party::stream::RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>,
-        >,
-        synced_stream: Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>,
-        ntp_service: Arc<NtpService>,
-        local_ips: Vec<std::net::IpAddr>,
-        shutdown_flag: Arc<AtomicBool>,
-    ) -> Self {
-        info!("Network receiver initialized, local IPs: {:?}", local_ips);
-
-        Self {
-            socket,
-            state,
-            network_sender,
-            realtime_stream,
-            synced_stream,
-            ntp_service,
-            local_ips,
-            shutdown_flag,
-        }
-    }
-
-    pub fn run(self) {
-        info!("Network receiver started");
-
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("Failed to create Tokio runtime for network receiver");
-
-        rt.block_on(self.run_async());
-
-        info!("Network receiver shutting down");
-    }
-
-    async fn run_async(self) {
-        let Self {
-            socket,
-            state,
-            network_sender,
-            realtime_stream,
-            synced_stream,
-            ntp_service,
-            local_ips,
-            shutdown_flag,
-        } = self;
-
-        let socket = Arc::new(
-            tokio::net::UdpSocket::from_std(socket).expect("Failed to convert to tokio UdpSocket"),
-        );
-
-        ntp_service.start();
-
-        *state.connection_status.lock().unwrap() = ConnectionStatus::Connected;
-
-        // Clean up stale hosts
-        let shutdown = shutdown_flag.clone();
-        let rt_clone = realtime_stream.clone();
-        let sync_clone = synced_stream.clone();
-        let cleanup_task = tokio::spawn(async move {
-            let mut cleanup_interval = interval(Duration::from_secs(1));
-            while !shutdown.load(Ordering::Relaxed) {
-                cleanup_interval.tick().await;
-                rt_clone.cleanup_stale();
-                sync_clone.cleanup_stale();
-            }
-        });
-
-        // Find missing frames in synced stream, and request a resend
-        let shutdown = shutdown_flag.clone();
-        let sync_clone = synced_stream.clone();
-        let sender_clone = network_sender.clone();
-        let retransmit_task = tokio::spawn(async move {
-            let mut retransmit_interval = interval(Duration::from_millis(200));
-            while !shutdown.load(Ordering::Relaxed) {
-                retransmit_interval.tick().await;
-                for (_addr, stream_id, seqs) in sync_clone.get_missing_frames() {
-                    sender_clone.push(NetworkPacket::RequestFrames { stream_id, seqs });
-                }
-            }
-        });
-
-        // Handle realtime stream packets
-        let shutdown = shutdown_flag.clone();
-        let recv_task = tokio::spawn(async move {
-            let mut buf = [0u8; 65536];
-            while !shutdown.load(Ordering::Relaxed) {
-                match socket.recv_from(&mut buf).await {
-                    Ok((size, source_addr)) => {
-                        handle_packet(
-                            &buf[..size],
-                            source_addr,
-                            &local_ips,
-                            &state,
-                            &realtime_stream,
-                            &synced_stream,
-                            &ntp_service,
-                        );
-                    }
-                    Err(e) => {
-                        error!("Failed to receive UDP packet: {:?}", e);
-                    }
-                }
-            }
-        });
-
-        let _ = tokio::join!(cleanup_task, retransmit_task, recv_task);
-    }
-}
-
-fn handle_packet<
-    Sample: crate::audio::AudioSample,
-    const CHANNELS: usize,
-    const SAMPLE_RATE: u32,
->(
-    data: &[u8],
-    source_addr: SocketAddr,
-    local_ips: &[std::net::IpAddr],
-    state: &Arc<AppState>,
-    realtime_stream: &Arc<crate::party::stream::RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
-    synced_stream: &Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>,
-    ntp_service: &Arc<NtpService>,
-) {
-    if local_ips.contains(&source_addr.ip()) {
-        return;
-    }
-
-    let packet: NetworkPacket = match rkyv::from_bytes::<NetworkPacket, rkyv::rancor::Error>(data) {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("Deserialization error: {:?}", e);
-            return;
-        }
-    };
-
-    match packet {
-        NetworkPacket::Realtime(frame) => {
-            realtime_stream.receive(source_addr, frame);
-        }
-        NetworkPacket::Synced(frame) => {
-            synced_stream.receive(source_addr, frame);
-        }
-        NetworkPacket::SyncedMeta(meta) => {
-            synced_stream.receive_meta(source_addr, meta);
-        }
-        NetworkPacket::SyncedControl(control) => {
-            synced_stream.receive_control(source_addr, control);
-        }
-        NetworkPacket::RequestFrames { stream_id, seqs } => {
-            if let Ok(party) = state.party.lock()
-                && let Some(party) = party.as_ref()
-            {
-                party.handle_retransmission_request(stream_id, seqs);
-            }
-        }
-        NetworkPacket::Ntp(ntp_packet) => {
-            ntp_service.handle_packet(ntp_packet);
-        }
     }
 }

@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -142,6 +142,20 @@ struct BufferEntry<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     start_seq: u64,
 }
 
+/// Control commands for synced streams.
+#[derive(Archive, Serialize, Deserialize, Debug, Clone)]
+#[rkyv(compare(PartialEq))]
+pub enum SyncedControl {
+    Start {
+        stream_id: crate::party::sync_stream::SyncedStreamId,
+        party_clock_time: u64,
+        seq: u64,
+    },
+    Pause {
+        stream_id: crate::party::sync_stream::SyncedStreamId,
+    },
+}
+
 fn create_decoder(
     codec_params: &WireCodecParams,
 ) -> Option<Box<dyn symphonia::core::codecs::Decoder>> {
@@ -263,14 +277,10 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     }
 
     /// Receives playback control.
-    pub fn receive_control(
-        &self,
-        source_addr: SocketAddr,
-        control: crate::party::stream::SyncedControl,
-    ) {
+    pub fn receive_control(&self, source_addr: SocketAddr, control: SyncedControl) {
         let stream_id = match &control {
-            crate::party::stream::SyncedControl::Start { stream_id, .. } => *stream_id,
-            crate::party::stream::SyncedControl::Pause { stream_id } => *stream_id,
+            SyncedControl::Start { stream_id, .. } => *stream_id,
+            SyncedControl::Pause { stream_id } => *stream_id,
         };
 
         let key = BufferKey {
@@ -284,7 +294,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         };
 
         match control {
-            crate::party::stream::SyncedControl::Start {
+            SyncedControl::Start {
                 party_clock_time,
                 seq,
                 ..
@@ -303,7 +313,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                     key, seq, party_clock_time
                 );
             }
-            crate::party::stream::SyncedControl::Pause { .. } => {
+            SyncedControl::Pause { .. } => {
                 entry.playing = false;
                 entry.last_seen = Instant::now();
                 info!("Stream {:?} paused", key);
@@ -566,6 +576,44 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             }
         }
         result
+    }
+
+    /// Starts the background cleanup task.
+    ///
+    /// Must be called from within a Tokio runtime context.
+    pub fn start_cleanup_task(self: &Arc<Self>, shutdown: Arc<AtomicBool>) {
+        let stream = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            while !shutdown.load(Ordering::Relaxed) {
+                interval.tick().await;
+                stream.cleanup_stale();
+            }
+        });
+    }
+
+    /// Starts the background retransmit request task.
+    ///
+    /// Periodically checks for missing frames and sends retransmission requests.
+    /// Must be called from within a Tokio runtime context.
+    pub fn start_retransmit_task(
+        self: &Arc<Self>,
+        sender: crate::io::NetworkSender,
+        shutdown: Arc<AtomicBool>,
+    ) {
+        use crate::party::realtime_stream::NetworkPacket;
+        use crate::pipeline::Pushable;
+
+        let stream = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(200));
+            while !shutdown.load(Ordering::Relaxed) {
+                interval.tick().await;
+                for (_addr, stream_id, seqs) in stream.get_missing_frames() {
+                    sender.push(NetworkPacket::RequestFrames { stream_id, seqs });
+                }
+            }
+        });
     }
 }
 

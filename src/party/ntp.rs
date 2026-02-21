@@ -43,7 +43,7 @@ use tokio::time::{interval, sleep};
 use tracing::{debug, info, warn};
 
 use crate::io::NetworkSender;
-use crate::party::stream::NetworkPacket;
+use crate::party::realtime_stream::NetworkPacket;
 use crate::pipeline::Pushable;
 
 #[derive(Debug, Clone, PartialEq)]

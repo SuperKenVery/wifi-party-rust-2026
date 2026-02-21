@@ -34,8 +34,8 @@
 
 pub mod dyn_traits;
 pub mod graph_node;
-pub mod traits;
+pub mod node;
 
 pub use dyn_traits::{Pullable, Pushable};
 pub use graph_node::{GraphNode, OutputId};
-pub use traits::Node;
+pub use node::Node;

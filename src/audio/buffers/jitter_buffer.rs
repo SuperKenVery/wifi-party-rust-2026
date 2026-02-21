@@ -11,13 +11,13 @@
 
 use crate::audio::AudioSample;
 use crate::audio::effects::calculate_rms_level;
-use crate::audio::frame::AudioFrame;
+use crate::audio::frame::{AudioBuffer, AudioFrame};
 use crate::pipeline::{Pullable, Pushable};
 use crossbeam::atomic::AtomicCell;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use tracing::debug;
+use tracing::{debug, error};
 
 const EMA_ALPHA: f64 = 0.01;
 const RESET_THRESHOLD_COUNT: u64 = 50;
@@ -569,11 +569,11 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 }
 
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
-    Pullable<AudioFrame<Sample, CHANNELS, SAMPLE_RATE>>
+    Pullable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>
     for JitterBuffer<Sample, CHANNELS, SAMPLE_RATE>
 {
-    fn pull(&self, len: usize) -> Option<AudioFrame<Sample, CHANNELS, SAMPLE_RATE>> {
-        let (samples, seq) = self.collect_samples(len).unwrap();
+    fn pull(&self, len: usize) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
+        let (samples, _seq) = self.collect_samples(len).unwrap();
 
         debug_assert_eq!(
             samples.len(),
@@ -583,7 +583,13 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             len
         );
 
-        AudioFrame::new(seq, samples).ok()
+        match AudioBuffer::new(samples) {
+            Ok(buffer) => Some(buffer),
+            Err(err) => {
+                error!("Failed to create audio buffer from samples: {:?}", err);
+                None
+            }
+        }
     }
 }
 
@@ -594,6 +600,7 @@ mod tests {
 
     type TestBuffer = JitterBuffer<f32, 2, 48000>;
     type TestFrame = AudioFrame<f32, 2, 48000>;
+    type TestAudioBuffer = AudioBuffer<f32, 2, 48000>;
 
     fn make_frame(seq: u64, len: usize) -> TestFrame {
         let samples: Vec<f32> = (0..len)
@@ -606,7 +613,7 @@ mod tests {
         Pushable::push(buffer, frame);
     }
 
-    fn pull(buffer: &TestBuffer, len: usize) -> Option<TestFrame> {
+    fn pull(buffer: &TestBuffer, len: usize) -> Option<TestAudioBuffer> {
         Pullable::pull(buffer, len)
     }
 
@@ -620,8 +627,7 @@ mod tests {
         let pulled = pull(&buffer, 1920);
         assert!(pulled.is_some());
         let pulled = pulled.unwrap();
-        assert_eq!(pulled.samples.data().len(), 1920);
-        assert_eq!(pulled.sequence_number, 1);
+        assert_eq!(pulled.data().len(), 1920);
     }
 
     #[test]
@@ -633,11 +639,11 @@ mod tests {
 
         let pulled = pull(&buffer, 1000);
         assert!(pulled.is_some());
-        assert_eq!(pulled.unwrap().samples.data().len(), 1000);
+        assert_eq!(pulled.unwrap().data().len(), 1000);
 
         let pulled = pull(&buffer, 500);
         assert!(pulled.is_some());
-        assert_eq!(pulled.unwrap().samples.data().len(), 500);
+        assert_eq!(pulled.unwrap().data().len(), 500);
     }
 
     #[test]
@@ -649,7 +655,7 @@ mod tests {
 
         let pulled = pull(&buffer, 2500);
         assert!(pulled.is_some());
-        assert_eq!(pulled.unwrap().samples.data().len(), 2500);
+        assert_eq!(pulled.unwrap().data().len(), 2500);
     }
 
     #[test]
@@ -660,13 +666,13 @@ mod tests {
 
         let pulled = pull(&buffer, 1920);
         assert!(pulled.is_some());
-        assert_eq!(pulled.unwrap().samples.data().len(), 1920);
+        assert_eq!(pulled.unwrap().data().len(), 1920);
 
         let pulled = pull(&buffer, 1920);
         assert!(pulled.is_some());
         let data = pulled.unwrap();
-        assert_eq!(data.samples.data().len(), 1920);
-        assert!(data.samples.data().iter().all(|&s| s == 0.0));
+        assert_eq!(data.data().len(), 1920);
+        assert!(data.data().iter().all(|&s| s == 0.0));
     }
 
     #[test]
@@ -679,15 +685,15 @@ mod tests {
 
         let pulled = pull(&buffer, 1920);
         assert!(pulled.is_some());
-        assert_eq!(pulled.unwrap().sequence_number, 1);
+        assert_eq!(pulled.unwrap().data().len(), 1920);
 
         let pulled = pull(&buffer, 1920);
         assert!(pulled.is_some());
-        assert_eq!(pulled.unwrap().sequence_number, 2);
+        assert_eq!(pulled.unwrap().data().len(), 1920);
 
         let pulled = pull(&buffer, 1920);
         assert!(pulled.is_some());
-        assert_eq!(pulled.unwrap().sequence_number, 3);
+        assert_eq!(pulled.unwrap().data().len(), 1920);
     }
 
     #[test]
@@ -698,11 +704,11 @@ mod tests {
 
         let pulled1 = pull(&buffer, 1000);
         assert!(pulled1.is_some());
-        assert_eq!(pulled1.unwrap().samples.data().len(), 1000);
+        assert_eq!(pulled1.unwrap().data().len(), 1000);
 
         let pulled2 = pull(&buffer, 920);
         assert!(pulled2.is_some());
-        assert_eq!(pulled2.unwrap().samples.data().len(), 920);
+        assert_eq!(pulled2.unwrap().data().len(), 920);
     }
 
     #[test]
@@ -713,7 +719,7 @@ mod tests {
             push(&buffer, make_frame(seq, 1920));
             let pulled = pull(&buffer, 1920);
             assert!(pulled.is_some());
-            assert_eq!(pulled.unwrap().samples.data().len(), 1920);
+            assert_eq!(pulled.unwrap().data().len(), 1920);
         }
     }
 
@@ -730,7 +736,7 @@ mod tests {
             let pulled = pull(&buffer, len);
             assert!(pulled.is_some(), "pull({}) returned None", len);
             assert_eq!(
-                pulled.unwrap().samples.data().len(),
+                pulled.unwrap().data().len(),
                 len,
                 "pull({}) returned wrong length",
                 len
@@ -750,7 +756,7 @@ mod tests {
         for &len in &test_lengths {
             let pulled = pull(&buffer, len);
             assert!(pulled.is_some(), "pull({}) returned None", len);
-            let actual_len = pulled.unwrap().samples.data().len();
+            let actual_len = pulled.unwrap().data().len();
             assert_eq!(
                 actual_len, len,
                 "pull({}) returned {} samples instead",
@@ -765,7 +771,7 @@ mod tests {
 
         let pulled = pull(&buffer, 1920);
         assert!(pulled.is_some(), "Empty buffer should return silence");
-        let data = pulled.unwrap().samples.into_inner();
+        let data = pulled.unwrap().into_inner();
         assert_eq!(data.len(), 1920);
         assert!(
             data.iter().all(|&x| x == 0.0),
@@ -793,7 +799,7 @@ mod tests {
         for _ in 0..available_frames {
             let pulled = pull(&buffer, 1920);
             assert!(pulled.is_some());
-            all_pulled.extend(pulled.unwrap().samples.into_inner());
+            all_pulled.extend(pulled.unwrap().into_inner());
         }
 
         assert_eq!(all_pulled.len(), 1920 * available_frames);
@@ -837,15 +843,9 @@ mod tests {
         push(&buffer, make_frame(1, 1920));
         push(&buffer, make_frame(5, 1920));
 
-        let target_latency = buffer.stats.target_latency();
-        let expected_read_seq = 5u64.saturating_sub(target_latency);
-
         let pulled1 = pull(&buffer, 1920);
         assert!(pulled1.is_some());
-
-        if expected_read_seq <= 1 {
-            assert_eq!(pulled1.unwrap().sequence_number, 1);
-        }
+        assert_eq!(pulled1.unwrap().data().len(), 1920);
 
         let pulled2 = pull(&buffer, 1920);
         assert!(pulled2.is_some());
@@ -862,14 +862,14 @@ mod tests {
 
         let pulled1 = pull(&buffer, 1920);
         assert!(pulled1.is_some());
-        assert_eq!(pulled1.unwrap().sequence_number, 1);
+        assert_eq!(pulled1.unwrap().data().len(), 1920);
 
         let read_before = buffer.read_seq.load(Ordering::Acquire);
 
         let pulled2 = pull(&buffer, 1920);
         assert!(pulled2.is_some());
         let data = pulled2.unwrap();
-        assert!(data.samples.data().iter().all(|&s| s == 0.0));
+        assert!(data.data().iter().all(|&s| s == 0.0));
 
         let read_after = buffer.read_seq.load(Ordering::Acquire);
         assert_eq!(
