@@ -52,7 +52,6 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use network_interface::NetworkInterfaceConfig;
@@ -211,7 +210,7 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     }
 
     pub fn shutdown(&mut self) {
-        self.shutdown_flag.store(true, Ordering::SeqCst);
+        self.shutdown_flag.store(true, Ordering::Relaxed);
         if let Some(handle) = self.receiver_handle.take() {
             let _ = handle.join();
         }
@@ -279,9 +278,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             ntp_for_synced.party_now()
         }));
 
-        socket
-            .set_read_timeout(Some(Duration::from_millis(100)))
-            .context("Failed to set socket read timeout")?;
+
 
         let realtime_stream_clone = realtime_stream.clone();
         let synced_stream_clone = synced_stream.clone();
@@ -321,7 +318,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             .set_reuse_address(true)
             .context("Failed to set reuse_address")?;
         socket
-            .set_nonblocking(false)
+            .set_nonblocking(true)
             .context("Failed to set nonblocking")?;
         socket
             .set_multicast_ttl_v4(TTL)
@@ -395,7 +392,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             .set_reuse_address(true)
             .context("Failed to set reuse_address")?;
         socket
-            .set_nonblocking(false)
+            .set_nonblocking(true)
             .context("Failed to set nonblocking")?;
         socket
             .set_multicast_hops_v6(TTL)

@@ -23,11 +23,11 @@
 //! - Hop limit: `1` (local network only)
 
 use anyhow::{Context, Result};
-use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::interval;
 use tracing::{error, info, warn};
 
 use crate::party::ntp::NtpService;
@@ -150,101 +150,141 @@ impl<Sample: crate::audio::AudioSample, const CHANNELS: usize, const SAMPLE_RATE
         }
     }
 
-    pub fn run(mut self) {
-        info!("Network receive thread started");
+    pub fn run(self) {
+        info!("Network receiver started");
 
-        let rt = tokio::runtime::Builder::new_current_thread()
+        let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("Failed to create Tokio runtime for network receiver");
 
-        // Enter the runtime context so tokio::spawn works
-        let _guard = rt.enter();
+        rt.block_on(self.run_async());
 
-        // Start the NTP service within this runtime
-        self.ntp_service.start();
-
-        *self.state.connection_status.lock().unwrap() = ConnectionStatus::Connected;
-
-        let mut buf = [0u8; 65536];
-        let mut last_cleanup = Instant::now();
-        let mut last_retransmit_request = Instant::now();
-
-        while !self.shutdown_flag.load(Ordering::SeqCst) {
-            // Poll the runtime to process any pending async tasks (like NTP timers)
-            rt.block_on(async {
-                tokio::task::yield_now().await;
-            });
-
-            if let Err(e) = self.handle_packet(&mut buf)
-                && !self.shutdown_flag.load(Ordering::SeqCst)
-            {
-                warn!("Error processing packet: {:?}", e);
-            }
-
-            if last_cleanup.elapsed() > Duration::from_secs(1) {
-                self.realtime_stream.cleanup_stale();
-                self.synced_stream.cleanup_stale();
-                last_cleanup = Instant::now();
-            }
-
-            if last_retransmit_request.elapsed() > Duration::from_millis(200) {
-                for (_addr, stream_id, seqs) in self.synced_stream.get_missing_frames() {
-                    self.network_sender
-                        .push(NetworkPacket::RequestFrames { stream_id, seqs });
-                }
-                last_retransmit_request = Instant::now();
-            }
-        }
-
-        info!("Network receive thread shutting down");
+        info!("Network receiver shutting down");
     }
 
-    fn handle_packet(&mut self, buf: &mut [u8]) -> Result<()> {
-        let (size, source_addr) = match self.socket.recv_from(buf) {
-            Ok(result) => result,
-            Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {
-                return Ok(());
-            }
-            Err(e) => return Err(e).context("Failed to receive UDP packet"),
-        };
+    async fn run_async(self) {
+        let Self {
+            socket,
+            state,
+            network_sender,
+            realtime_stream,
+            synced_stream,
+            ntp_service,
+            local_ips,
+            shutdown_flag,
+        } = self;
 
-        if self.local_ips.contains(&source_addr.ip()) {
-            return Ok(());
-        }
+        let socket = Arc::new(
+            tokio::net::UdpSocket::from_std(socket).expect("Failed to convert to tokio UdpSocket"),
+        );
 
-        let received_data = &buf[..size];
+        ntp_service.start();
 
-        let packet: NetworkPacket =
-            rkyv::from_bytes::<NetworkPacket, rkyv::rancor::Error>(received_data)
-                .map_err(|e| anyhow::anyhow!("Deserialization error: {:?}", e))?;
+        *state.connection_status.lock().unwrap() = ConnectionStatus::Connected;
 
-        match packet {
-            NetworkPacket::Realtime(frame) => {
-                self.realtime_stream.receive(source_addr, frame);
+        // Clean up stale hosts
+        let shutdown = shutdown_flag.clone();
+        let rt_clone = realtime_stream.clone();
+        let sync_clone = synced_stream.clone();
+        let cleanup_task = tokio::spawn(async move {
+            let mut cleanup_interval = interval(Duration::from_secs(1));
+            while !shutdown.load(Ordering::Relaxed) {
+                cleanup_interval.tick().await;
+                rt_clone.cleanup_stale();
+                sync_clone.cleanup_stale();
             }
-            NetworkPacket::Synced(frame) => {
-                self.synced_stream.receive(source_addr, frame);
-            }
-            NetworkPacket::SyncedMeta(meta) => {
-                self.synced_stream.receive_meta(source_addr, meta);
-            }
-            NetworkPacket::SyncedControl(control) => {
-                self.synced_stream.receive_control(source_addr, control);
-            }
-            NetworkPacket::RequestFrames { stream_id, seqs } => {
-                // Handle retransmission requests if we are the sender
-                if let Ok(party) = self.state.party.lock()
-                    && let Some(party) = party.as_ref()
-                {
-                    party.handle_retransmission_request(stream_id, seqs);
+        });
+
+        // Find missing frames in synced stream, and request a resend
+        let shutdown = shutdown_flag.clone();
+        let sync_clone = synced_stream.clone();
+        let sender_clone = network_sender.clone();
+        let retransmit_task = tokio::spawn(async move {
+            let mut retransmit_interval = interval(Duration::from_millis(200));
+            while !shutdown.load(Ordering::Relaxed) {
+                retransmit_interval.tick().await;
+                for (_addr, stream_id, seqs) in sync_clone.get_missing_frames() {
+                    sender_clone.push(NetworkPacket::RequestFrames { stream_id, seqs });
                 }
             }
-            NetworkPacket::Ntp(ntp_packet) => {
-                self.ntp_service.handle_packet(ntp_packet);
+        });
+
+        // Handle realtime stream packets
+        let shutdown = shutdown_flag.clone();
+        let recv_task = tokio::spawn(async move {
+            let mut buf = [0u8; 65536];
+            while !shutdown.load(Ordering::Relaxed) {
+                match socket.recv_from(&mut buf).await {
+                    Ok((size, source_addr)) => {
+                        handle_packet(
+                            &buf[..size],
+                            source_addr,
+                            &local_ips,
+                            &state,
+                            &realtime_stream,
+                            &synced_stream,
+                            &ntp_service,
+                        );
+                    }
+                    Err(e) => {
+                        error!("Failed to receive UDP packet: {:?}", e);
+                    }
+                }
+            }
+        });
+
+        let _ = tokio::join!(cleanup_task, retransmit_task, recv_task);
+    }
+}
+
+fn handle_packet<
+    Sample: crate::audio::AudioSample,
+    const CHANNELS: usize,
+    const SAMPLE_RATE: u32,
+>(
+    data: &[u8],
+    source_addr: SocketAddr,
+    local_ips: &[std::net::IpAddr],
+    state: &Arc<AppState>,
+    realtime_stream: &Arc<crate::party::stream::RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
+    synced_stream: &Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>,
+    ntp_service: &Arc<NtpService>,
+) {
+    if local_ips.contains(&source_addr.ip()) {
+        return;
+    }
+
+    let packet: NetworkPacket = match rkyv::from_bytes::<NetworkPacket, rkyv::rancor::Error>(data) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("Deserialization error: {:?}", e);
+            return;
+        }
+    };
+
+    match packet {
+        NetworkPacket::Realtime(frame) => {
+            realtime_stream.receive(source_addr, frame);
+        }
+        NetworkPacket::Synced(frame) => {
+            synced_stream.receive(source_addr, frame);
+        }
+        NetworkPacket::SyncedMeta(meta) => {
+            synced_stream.receive_meta(source_addr, meta);
+        }
+        NetworkPacket::SyncedControl(control) => {
+            synced_stream.receive_control(source_addr, control);
+        }
+        NetworkPacket::RequestFrames { stream_id, seqs } => {
+            if let Ok(party) = state.party.lock()
+                && let Some(party) = party.as_ref()
+            {
+                party.handle_retransmission_request(stream_id, seqs);
             }
         }
-
-        Ok(())
+        NetworkPacket::Ntp(ntp_packet) => {
+            ntp_service.handle_packet(ntp_packet);
+        }
     }
 }
