@@ -4,7 +4,7 @@ use crate::state::{AppState, HostInfo};
 use dioxus::prelude::*;
 use std::sync::Arc;
 
-use super::sidebar::SidebarMenu;
+use super::sidebar::{BottomNav, SidebarMenu};
 use super::sidebar_panels::{AudioControlPanel, DebugPanel, ParticipantsPanel, ShareMusicPanel};
 use crate::party::{NtpDebugInfo, SyncedStreamState};
 
@@ -173,7 +173,16 @@ fn AppLayout() -> Element {
             class: "flex h-screen w-full bg-slate-900 text-slate-100 font-sans overflow-hidden selection:bg-indigo-500 selection:text-white",
 
             if (ui.is_narrow)() {
-                Outlet::<Route> {}
+                div {
+                    class: "flex flex-col h-full w-full max-h-screen",
+                    div {
+                        class: "flex-1 flex flex-col min-h-0 overflow-hidden",
+                        Outlet::<Route> {}
+                    }
+                    BottomNav {
+                        selected: Some(route),
+                    }
+                }
             } else {
                 SidebarMenu {
                     selected: Some(route),
@@ -190,17 +199,8 @@ fn AppLayout() -> Element {
 fn Menu() -> Element {
     let ui = use_context::<UIState>();
 
-    if (ui.is_narrow)() {
-        rsx! {
-            SidebarMenu {
-                selected: None,
-                full_width: true,
-            }
-        }
-    } else {
-        rsx! {
-            ParticipantsPanel { hosts: (ui.active_hosts)() }
-        }
+    rsx! {
+        ParticipantsPanel { hosts: (ui.active_hosts)() }
     }
 }
 
@@ -208,20 +208,9 @@ fn Menu() -> Element {
 #[component]
 fn Senders() -> Element {
     let ui = use_context::<UIState>();
-    let nav = use_navigator();
 
-    let on_back = move |_| {
-        nav.push(Route::Menu);
-    };
-
-    if (ui.is_narrow)() {
-        rsx! {
-            ParticipantsPanel { hosts: (ui.active_hosts)(), on_back }
-        }
-    } else {
-        rsx! {
-            ParticipantsPanel { hosts: (ui.active_hosts)() }
-        }
+    rsx! {
+        ParticipantsPanel { hosts: (ui.active_hosts)() }
     }
 }
 
@@ -229,34 +218,15 @@ fn Senders() -> Element {
 #[component]
 fn AudioControl() -> Element {
     let ui = use_context::<UIState>();
-    let nav = use_navigator();
 
-    let on_back = move |_| {
-        nav.push(Route::Menu);
-    };
-
-    if (ui.is_narrow)() {
-        rsx! {
-            AudioControlPanel {
-                mic_volume: (ui.mic_volume)(),
-                mic_audio_level: (ui.mic_audio_level)(),
-                loopback_enabled: (ui.loopback_enabled)(),
-                system_audio_enabled: (ui.system_audio_enabled)(),
-                system_audio_level: (ui.system_audio_level)(),
-                listen_enabled: (ui.listen_enabled)(),
-                on_back,
-            }
-        }
-    } else {
-        rsx! {
-            AudioControlPanel {
-                mic_volume: (ui.mic_volume)(),
-                mic_audio_level: (ui.mic_audio_level)(),
-                loopback_enabled: (ui.loopback_enabled)(),
-                system_audio_enabled: (ui.system_audio_enabled)(),
-                system_audio_level: (ui.system_audio_level)(),
-                listen_enabled: (ui.listen_enabled)(),
-            }
+    rsx! {
+        AudioControlPanel {
+            mic_volume: (ui.mic_volume)(),
+            mic_audio_level: (ui.mic_audio_level)(),
+            loopback_enabled: (ui.loopback_enabled)(),
+            system_audio_enabled: (ui.system_audio_enabled)(),
+            system_audio_level: (ui.system_audio_level)(),
+            listen_enabled: (ui.listen_enabled)(),
         }
     }
 }
@@ -265,20 +235,9 @@ fn AudioControl() -> Element {
 #[component]
 fn ShareMusic() -> Element {
     let ui = use_context::<UIState>();
-    let nav = use_navigator();
 
-    let on_back = move |_| {
-        nav.push(Route::Menu);
-    };
-
-    if (ui.is_narrow)() {
-        rsx! {
-            ShareMusicPanel { active_streams: (ui.synced_streams)(), on_back }
-        }
-    } else {
-        rsx! {
-            ShareMusicPanel { active_streams: (ui.synced_streams)() }
-        }
+    rsx! {
+        ShareMusicPanel { active_streams: (ui.synced_streams)() }
     }
 }
 
@@ -286,19 +245,8 @@ fn ShareMusic() -> Element {
 #[component]
 fn Debug() -> Element {
     let ui = use_context::<UIState>();
-    let nav = use_navigator();
 
-    let on_back = move |_| {
-        nav.push(Route::Menu);
-    };
-
-    if (ui.is_narrow)() {
-        rsx! {
-            DebugPanel { ntp_info: (ui.ntp_info)(), on_back }
-        }
-    } else {
-        rsx! {
-            DebugPanel { ntp_info: (ui.ntp_info)() }
-        }
+    rsx! {
+        DebugPanel { ntp_info: (ui.ntp_info)() }
     }
 }

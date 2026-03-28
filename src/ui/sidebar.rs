@@ -42,7 +42,7 @@ pub fn SidebarMenu(
                 for route in Route::menu_items() {
                     MenuItem {
                         route,
-                        is_selected: selected == Some(route),
+                        is_selected: selected == Some(route) || (selected == Some(Route::Menu) && route == Route::Senders),
                     }
                 }
             }
@@ -72,6 +72,44 @@ fn MenuItem(route: Route, is_selected: bool) -> Element {
             class: "{base_class} {selected_class}",
             span { class: "text-lg", "{route.icon()}" }
             span { class: "text-sm font-medium", "{route.label()}" }
+        }
+    }
+}
+
+#[allow(non_snake_case)]
+#[component]
+pub fn BottomNav(#[props(default)] selected: Option<Route>) -> Element {
+    rsx! {
+        div {
+            class: "flex w-full glass-strong border-t border-slate-800 z-20 pb-2",
+            div {
+                class: "flex-1 flex justify-around items-center px-2 py-2",
+                for route in Route::menu_items() {
+                    BottomNavItem {
+                        route,
+                        is_selected: selected == Some(route) || (selected == Some(Route::Menu) && route == Route::Senders),
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[allow(non_snake_case)]
+#[component]
+fn BottomNavItem(route: Route, is_selected: bool) -> Element {
+    let selected_class = if is_selected {
+        "text-indigo-400"
+    } else {
+        "text-slate-500 hover:text-slate-300"
+    };
+
+    rsx! {
+        Link {
+            to: route,
+            class: "flex-1 flex flex-col items-center justify-center gap-1 p-2 {selected_class} transition-colors duration-200",
+            span { class: "text-2xl", "{route.icon()}" }
+            span { class: "text-[10px] font-medium tracking-wide", "{route.label()}" }
         }
     }
 }
