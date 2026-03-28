@@ -170,7 +170,7 @@ fn AppLayout() -> Element {
 
     rsx! {
         div {
-            class: "flex h-screen w-full bg-slate-900 text-slate-100 font-sans overflow-hidden selection:bg-indigo-500 selection:text-white",
+            class: "flex h-screen w-full bg-slate-900 text-slate-100 font-sans overflow-hidden selection:bg-indigo-500 selection:text-white safe-area-layout",
 
             if (ui.is_narrow)() {
                 div {

@@ -19,7 +19,7 @@ pub fn PanelHeader(
 ) -> Element {
     rsx! {
         div {
-            class: "h-20 px-8 flex items-center justify-between z-10",
+            class: "h-20 px-8 flex items-center justify-between z-10 pt-[env(safe-area-inset-top)]",
             div {
                 class: "flex items-center gap-4",
                 if let Some(handler) = on_back {

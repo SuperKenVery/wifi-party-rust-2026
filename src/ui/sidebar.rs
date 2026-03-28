@@ -81,7 +81,7 @@ fn MenuItem(route: Route, is_selected: bool) -> Element {
 pub fn BottomNav(#[props(default)] selected: Option<Route>) -> Element {
     rsx! {
         div {
-            class: "flex w-full glass-strong border-t border-slate-800 z-20 pb-2",
+            class: "flex w-full glass-strong border-t border-slate-800 z-20 pb-[env(safe-area-inset-bottom)]",
             div {
                 class: "flex-1 flex justify-around items-center px-2 py-2",
                 for route in Route::menu_items() {

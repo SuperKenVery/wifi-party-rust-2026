@@ -51,11 +51,13 @@ fn run() -> Result<()> {
 
     dioxus::LaunchBuilder::desktop()
         .with_cfg(
-            dioxus::desktop::Config::new().with_window(
-                dioxus::desktop::WindowBuilder::new()
-                    .with_title("Wi-Fi Party KTV")
-                    .with_always_on_top(false),
-            ),
+            dioxus::desktop::Config::new()
+                .with_window(
+                    dioxus::desktop::WindowBuilder::new()
+                        .with_title("Wi-Fi Party KTV")
+                        .with_always_on_top(false),
+                )
+                .with_custom_head(r#"<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">"#.into()),
         )
         .with_context(state)
         .launch(ui::App);
