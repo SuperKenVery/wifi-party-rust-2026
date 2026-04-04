@@ -291,7 +291,6 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
 {
     fn run(mut self) -> Result<()> {
         self.init_with_duration();
-        self.progress.is_encoding.store(true, Ordering::Relaxed);
 
         while self.is_running.load(Ordering::Relaxed) {
             if self.should_stop_for_other_stream() {
@@ -323,9 +322,6 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
         let total_samples = (duration * self.sample_rate() as f64) as u64;
         self.meta.total_frames = est_packets;
         self.meta.total_samples = total_samples;
-        self.progress
-            .encoding_total
-            .store(est_packets, Ordering::Relaxed);
         self.progress
             .streaming_total
             .store(est_packets, Ordering::Relaxed);
@@ -410,7 +406,6 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
                 info!("Seeked to {} samples (seq {})", target_samples, seq);
                 self.frames_read = seq - 1;
                 self.is_complete = false;
-                self.progress.is_encoding.store(true, Ordering::Relaxed);
             }
         }
 
@@ -452,14 +447,10 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
                 Ok(Some(raw)) => {
                     self.frames_read += 1;
                     self.vault.insert(self.frames_read, raw);
-                    self.progress
-                        .encoding_current
-                        .store(self.frames_read, Ordering::Relaxed);
                 }
                 Ok(None) => {
                     // EOF - calculate exact total_samples from all packets
                     self.is_complete = true;
-                    self.progress.is_encoding.store(false, Ordering::Relaxed);
                     self.meta.total_frames = self.frames_read;
                     self.meta.total_samples = self.vault.iter().map(|r| r.dur as u64).sum();
                     self.network_sender
