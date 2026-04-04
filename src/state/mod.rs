@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex};
 
 use crate::party::{NtpDebugInfo, Party, PartyConfig, StreamSnapshot, SyncedStreamState};
+use crate::music_provider::ProviderFactory;
 
 /// Unique identifier for a remote host, derived from their IP address.
 /// We use IP address instead of SocketAddr to keep the host identity stable
@@ -67,12 +68,9 @@ pub enum ConnectionStatus {
     Connected,
 }
 
-/// Progress state for music stream encoding and playback
+/// Progress state for music stream sending and playback
 pub struct MusicStreamProgress {
     pub file_name: Mutex<Option<String>>,
-    pub is_encoding: AtomicBool,
-    pub encoding_current: AtomicU64,
-    pub encoding_total: AtomicU64,
     pub is_streaming: AtomicBool,
     pub streaming_current: AtomicU64,
     pub streaming_total: AtomicU64,
@@ -82,9 +80,6 @@ impl MusicStreamProgress {
     pub fn new() -> Self {
         Self {
             file_name: Mutex::new(None),
-            is_encoding: AtomicBool::new(false),
-            encoding_current: AtomicU64::new(0),
-            encoding_total: AtomicU64::new(0),
             is_streaming: AtomicBool::new(false),
             streaming_current: AtomicU64::new(0),
             streaming_total: AtomicU64::new(0),
@@ -93,12 +88,6 @@ impl MusicStreamProgress {
 
     pub fn reset(&self) {
         *self.file_name.lock().unwrap() = None;
-        self.is_encoding
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        self.encoding_current
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-        self.encoding_total
-            .store(0, std::sync::atomic::Ordering::Relaxed);
         self.is_streaming
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.streaming_current
@@ -120,6 +109,7 @@ pub struct AppState {
     pub host_infos: Arc<Mutex<Vec<HostInfo>>>,
     pub music_progress: Arc<MusicStreamProgress>,
     pub party: Mutex<Option<Party<f32, 2, 48000>>>,
+    pub music_provider_factories: &'static [ProviderFactory],
 }
 
 impl AppState {
@@ -135,6 +125,7 @@ impl AppState {
             host_infos: Arc::new(Mutex::new(Vec::new())),
             music_progress: Arc::new(MusicStreamProgress::new()),
             party: Mutex::new(None),
+            music_provider_factories: &[crate::music_provider::local_file::factory],
         });
 
         let mut party = Party::new(state.clone(), config);

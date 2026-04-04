@@ -15,6 +15,7 @@
 
 mod audio;
 mod io;
+mod music_provider;
 mod party;
 mod pipeline;
 mod platform_support;

@@ -2,26 +2,24 @@
 
 ## Prerequisites
 
-- Rust (edition 2024)
-- Node.js & npm
-- [Dioxus CLI](https://dioxuslabs.com/learn/0.7/getting_started)
-
-```bash
-cargo install dioxus-cli
-```
+- nix with flake support
+- a shell with direnv
 
 ## Development Setup
 
 You need two terminals running:
 
 **Terminal 1** — Dioxus dev server:
+
 ```bash
 dx serve
 ```
 
 **Terminal 2** — Tailwind CSS watcher:
+
 ```bash
 cd assets
+npm i
 npx @tailwindcss/cli -i tailwind.css -o tailwind_output.css --watch
 ```
 
