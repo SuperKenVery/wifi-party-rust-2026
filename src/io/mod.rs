@@ -14,7 +14,7 @@ pub mod multicast_lock;
 pub mod network;
 
 pub use audio::{AudioInput, AudioOutput, LoopbackInput};
-pub use file_picker::{pick_audio_file, FilePickerResult};
+pub use file_picker::{FilePickerResult, pick_audio_file};
 pub use multicast_lock::MulticastLock;
 pub use network::{
     MULTICAST_ADDR_V4, MULTICAST_ADDR_V6, MULTICAST_PORT, NetworkSender, TTL,

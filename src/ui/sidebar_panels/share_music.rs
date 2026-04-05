@@ -1,6 +1,6 @@
+use crate::music_provider::MusicProvider;
 use crate::party::SyncedStreamState;
 use crate::state::AppState;
-use crate::music_provider::MusicProvider;
 use dioxus::prelude::*;
 use std::sync::Arc;
 
@@ -33,7 +33,6 @@ pub fn ShareMusicPanel(
 ) -> Element {
     let state_arc = use_context::<Arc<AppState>>();
     let mut selected_provider = use_signal(|| 0usize);
-    let provider_count = state_arc.music_provider_factories.len();
 
     let providers: Vec<Box<dyn MusicProvider>> = state_arc
         .music_provider_factories
@@ -68,7 +67,7 @@ pub fn ShareMusicPanel(
 
                         p {
                             class: "text-sm text-slate-400",
-                            "Share a music file with all participants. The audio will be synchronized across all connected devices using NTP-like time synchronization."
+                            "Share local files or Apple Music tracks with all participants. Playback stays synchronized across connected devices using shared party time."
                         }
 
                         div {

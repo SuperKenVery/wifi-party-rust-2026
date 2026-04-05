@@ -62,7 +62,12 @@ impl Route {
     }
 
     pub fn menu_items() -> [Route; 4] {
-        [Route::Senders, Route::AudioControl, Route::ShareMusic, Route::Debug]
+        [
+            Route::Senders,
+            Route::AudioControl,
+            Route::ShareMusic,
+            Route::Debug,
+        ]
     }
 }
 

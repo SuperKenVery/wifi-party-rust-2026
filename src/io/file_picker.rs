@@ -13,9 +13,9 @@
 #[cfg(target_os = "android")]
 mod android {
     use crate::platform_support::android_utils::{get_activity, with_jni};
+    use jni::JNIEnv;
     use jni::objects::{JObject, JString, JValue};
     use jni::sys::jobject;
-    use jni::JNIEnv;
     use tokio::sync::oneshot;
     use tracing::{error, info};
 
@@ -70,11 +70,9 @@ mod android {
     fn launch_file_picker(env: &mut JNIEnv<'_>, activity: &JObject<'_>) -> jni::errors::Result<()> {
         let intent_class = env.find_class("android/content/Intent")?;
 
-        let action_get_content = env.get_static_field(
-            &intent_class,
-            "ACTION_GET_CONTENT",
-            "Ljava/lang/String;",
-        )?.l()?;
+        let action_get_content = env
+            .get_static_field(&intent_class, "ACTION_GET_CONTENT", "Ljava/lang/String;")?
+            .l()?;
 
         let intent = env.new_object(
             &intent_class,
@@ -90,11 +88,9 @@ mod android {
             &[JValue::Object(&mime_type)],
         )?;
 
-        let category_openable = env.get_static_field(
-            &intent_class,
-            "CATEGORY_OPENABLE",
-            "Ljava/lang/String;",
-        )?.l()?;
+        let category_openable = env
+            .get_static_field(&intent_class, "CATEGORY_OPENABLE", "Ljava/lang/String;")?
+            .l()?;
         env.call_method(
             &intent,
             "addCategory",
@@ -106,10 +102,16 @@ mod android {
             activity,
             "startActivityForResult",
             "(Landroid/content/Intent;I)V",
-            &[JValue::Object(&intent), JValue::Int(FILE_PICKER_REQUEST_CODE)],
+            &[
+                JValue::Object(&intent),
+                JValue::Int(FILE_PICKER_REQUEST_CODE),
+            ],
         )?;
 
-        info!("startActivityForResult called with request code {}", FILE_PICKER_REQUEST_CODE);
+        info!(
+            "startActivityForResult called with request code {}",
+            FILE_PICKER_REQUEST_CODE
+        );
         Ok(())
     }
 
@@ -120,13 +122,18 @@ mod android {
             return;
         }
 
-        info!("handle_activity_result: request_code={}, result_code={}", request_code, result_code);
+        info!(
+            "handle_activity_result: request_code={}, result_code={}",
+            request_code, result_code
+        );
 
         let result = with_jni(|env| {
             // RESULT_OK = -1
             if result_code == -1 && !data_ptr.is_null() {
                 let data = unsafe { JObject::from_raw(data_ptr) };
-                let uri = env.call_method(&data, "getData", "()Landroid/net/Uri;", &[])?.l()?;
+                let uri = env
+                    .call_method(&data, "getData", "()Landroid/net/Uri;", &[])?
+                    .l()?;
 
                 if !uri.is_null() {
                     return read_file_from_uri(env, &uri).map(Some);
@@ -161,25 +168,32 @@ mod android {
         handle_activity_result(request_code, result_code, data.as_raw());
     }
 
-    fn read_file_from_uri(env: &mut JNIEnv<'_>, uri: &JObject<'_>) -> jni::errors::Result<FilePickerResult> {
+    fn read_file_from_uri(
+        env: &mut JNIEnv<'_>,
+        uri: &JObject<'_>,
+    ) -> jni::errors::Result<FilePickerResult> {
         let activity = get_activity(env)?;
 
-        let content_resolver = env.call_method(
-            &activity,
-            "getContentResolver",
-            "()Landroid/content/ContentResolver;",
-            &[],
-        )?.l()?;
+        let content_resolver = env
+            .call_method(
+                &activity,
+                "getContentResolver",
+                "()Landroid/content/ContentResolver;",
+                &[],
+            )?
+            .l()?;
 
         let name = get_display_name(env, &content_resolver, uri)?;
         info!("Reading file: {}", name);
 
-        let input_stream = env.call_method(
-            &content_resolver,
-            "openInputStream",
-            "(Landroid/net/Uri;)Ljava/io/InputStream;",
-            &[JValue::Object(uri)],
-        )?.l()?;
+        let input_stream = env
+            .call_method(
+                &content_resolver,
+                "openInputStream",
+                "(Landroid/net/Uri;)Ljava/io/InputStream;",
+                &[JValue::Object(uri)],
+            )?
+            .l()?;
 
         let data = read_input_stream(env, &input_stream)?;
         info!("Read {} bytes", data.len());
@@ -194,11 +208,8 @@ mod android {
         content_resolver: &JObject<'_>,
         uri: &JObject<'_>,
     ) -> jni::errors::Result<String> {
-        let projection = env.new_object_array(
-            1,
-            "java/lang/String",
-            &env.new_string("_display_name")?,
-        )?;
+        let projection =
+            env.new_object_array(1, "java/lang/String", &env.new_string("_display_name")?)?;
 
         let cursor = env.call_method(
             content_resolver,
@@ -219,20 +230,24 @@ mod android {
             let has_first: bool = env.call_method(&cursor, "moveToFirst", "()Z", &[])?.z()?;
             if has_first {
                 let display_name_str = env.new_string("_display_name")?;
-                let col_index: i32 = env.call_method(
-                    &cursor,
-                    "getColumnIndex",
-                    "(Ljava/lang/String;)I",
-                    &[JValue::Object(&display_name_str)],
-                )?.i()?;
+                let col_index: i32 = env
+                    .call_method(
+                        &cursor,
+                        "getColumnIndex",
+                        "(Ljava/lang/String;)I",
+                        &[JValue::Object(&display_name_str)],
+                    )?
+                    .i()?;
 
                 if col_index >= 0 {
-                    let name_obj = env.call_method(
-                        &cursor,
-                        "getString",
-                        "(I)Ljava/lang/String;",
-                        &[JValue::Int(col_index)],
-                    )?.l()?;
+                    let name_obj = env
+                        .call_method(
+                            &cursor,
+                            "getString",
+                            "(I)Ljava/lang/String;",
+                            &[JValue::Int(col_index)],
+                        )?
+                        .l()?;
 
                     if !name_obj.is_null() {
                         let name_str: JString = name_obj.into();
@@ -246,17 +261,17 @@ mod android {
         Ok(name)
     }
 
-    fn read_input_stream(env: &mut JNIEnv<'_>, input_stream: &JObject<'_>) -> jni::errors::Result<Vec<u8>> {
+    fn read_input_stream(
+        env: &mut JNIEnv<'_>,
+        input_stream: &JObject<'_>,
+    ) -> jni::errors::Result<Vec<u8>> {
         let mut data = Vec::new();
         let buffer = env.new_byte_array(8192)?;
 
         loop {
-            let bytes_read: i32 = env.call_method(
-                input_stream,
-                "read",
-                "([B)I",
-                &[JValue::Object(&buffer)],
-            )?.i()?;
+            let bytes_read: i32 = env
+                .call_method(input_stream, "read", "([B)I", &[JValue::Object(&buffer)])?
+                .i()?;
 
             if bytes_read < 0 {
                 break;
@@ -272,7 +287,7 @@ mod android {
 }
 
 #[cfg(target_os = "android")]
-pub use android::{pick_audio_file, FilePickerResult, FILE_PICKER_REQUEST_CODE};
+pub use android::{FILE_PICKER_REQUEST_CODE, FilePickerResult, pick_audio_file};
 
 #[cfg(not(target_os = "android"))]
 #[derive(Debug, Clone)]

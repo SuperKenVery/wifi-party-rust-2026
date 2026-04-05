@@ -2,8 +2,8 @@ use dioxus::prelude::*;
 use std::sync::Arc;
 use tracing::error;
 
-use crate::state::AppState;
 use crate::music_provider::MusicProvider;
+use crate::state::AppState;
 
 pub fn factory(state: Arc<AppState>) -> Box<dyn MusicProvider> {
     Box::new(LocalFileProvider::new(state))

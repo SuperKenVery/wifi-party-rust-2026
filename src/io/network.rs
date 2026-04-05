@@ -182,10 +182,9 @@ pub fn create_multicast_socket_v4(
                         }
                         match socket.join_multicast_v4(&multicast_ip, &ip) {
                             Ok(()) => info!("Joined multicast on {} ({})", iface.name, ip),
-                            Err(e) => warn!(
-                                "Failed to join multicast on {} ({}): {}",
-                                iface.name, ip, e
-                            ),
+                            Err(e) => {
+                                warn!("Failed to join multicast on {} ({}): {}", iface.name, ip, e)
+                            }
                         }
                     }
                 }

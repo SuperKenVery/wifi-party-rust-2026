@@ -5,9 +5,9 @@
 
 #[cfg(target_os = "android")]
 mod android {
+    use jni::JNIEnv;
     use jni::objects::JObject;
     use jni::sys::jobject;
-    use jni::JNIEnv;
     use ndk_context::AndroidContext;
     use std::sync::Arc;
 

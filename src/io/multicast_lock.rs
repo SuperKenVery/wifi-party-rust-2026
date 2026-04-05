@@ -6,8 +6,8 @@
 #[cfg(target_os = "android")]
 mod android {
     use crate::platform_support::android_utils::with_jni_context;
-    use jni::objects::JObject;
     use jni::JNIEnv;
+    use jni::objects::JObject;
     use tracing::{error, info};
 
     pub struct MulticastLock {

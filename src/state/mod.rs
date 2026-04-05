@@ -10,8 +10,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex};
 
-use crate::party::{NtpDebugInfo, Party, PartyConfig, StreamSnapshot, SyncedStreamState};
 use crate::music_provider::ProviderFactory;
+use crate::party::{NtpDebugInfo, Party, PartyConfig, StreamSnapshot, SyncedStreamState};
 
 /// Unique identifier for a remote host, derived from their IP address.
 /// We use IP address instead of SocketAddr to keep the host identity stable
