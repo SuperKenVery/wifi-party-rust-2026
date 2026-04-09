@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::state::AppState;
 
+pub mod apple_music;
 pub mod local_file;
 
 /// Type alias for a provider factory function.

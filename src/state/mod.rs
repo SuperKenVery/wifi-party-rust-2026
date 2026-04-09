@@ -125,7 +125,10 @@ impl AppState {
             host_infos: Arc::new(Mutex::new(Vec::new())),
             music_progress: Arc::new(MusicStreamProgress::new()),
             party: Mutex::new(None),
-            music_provider_factories: &[crate::music_provider::local_file::factory],
+            music_provider_factories: &[
+                crate::music_provider::local_file::factory,
+                crate::music_provider::apple_music::factory,
+            ],
         });
 
         let mut party = Party::new(state.clone(), config);

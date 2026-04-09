@@ -88,6 +88,20 @@ Single file `mod.rs` containing:
 - `HostInfo` - Peer metadata and stream info
 - `MusicStreamProgress` - Music encoding/streaming progress
 
+### `src/music_provider/` - Music Source Providers
+
+Pluggable music source system. Each provider implements `MusicProvider` trait with `name()` and `render()`.
+
+Files:
+- `mod.rs` - `MusicProvider` trait and `ProviderFactory` type alias
+- `local_file.rs` - `LocalFileProvider` for local file picker upload
+- `apple_music.rs` - `AppleMusicProvider` for Apple Music search, download, decrypt, and stream
+  - Token: Scraped JWT from music.apple.com JS bundle
+  - Search: Apple Music catalog API
+  - Download: Fetches fMP4 via enhancedHls m3u8
+  - Decrypt: TCP protocol to Frida wrapper at 100.69.234.108:10020 (CBCS decryption)
+  - Feeds decrypted m4a to `start_music_stream()`
+
 ### `src/ui/` - User Interface
 
 Dioxus-based desktop UI.
