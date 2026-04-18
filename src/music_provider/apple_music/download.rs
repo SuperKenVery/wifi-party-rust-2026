@@ -20,10 +20,14 @@ pub const ALAC_MAX_SAMPLE_RATE: u32 = 192000;
 ///   - `https://music.apple.com/{sf}/album/{slug}/{album_id}?i={song_id}`
 ///   - `https://music.apple.com/{sf}/song/{slug}/{song_id}`
 pub fn parse_song_url(url: &str) -> Result<(String, String)> {
-    let album_re =
-        Regex::new(r"^https://(?:beta\.music|music|classical\.music)\.apple\.com/(\w{2})/album/[^/?]+/(\d+)").unwrap();
-    let song_re =
-        Regex::new(r"^https://(?:beta\.music|music|classical\.music)\.apple\.com/(\w{2})/song/[^/?]+/(\d+)").unwrap();
+    let album_re = Regex::new(
+        r"^https://(?:beta\.music|music|classical\.music)\.apple\.com/(\w{2})/album/[^/?]+/(\d+)",
+    )
+    .unwrap();
+    let song_re = Regex::new(
+        r"^https://(?:beta\.music|music|classical\.music)\.apple\.com/(\w{2})/song/[^/?]+/(\d+)",
+    )
+    .unwrap();
     let i_re = Regex::new(r"[?&]i=(\d+)").unwrap();
 
     if let Some(m) = song_re.captures(url) {
@@ -204,6 +208,7 @@ mod tests {
     #[ignore = "requires wrapper running on 127.0.0.1:10020 and network"]
     async fn download_dont_you_worry_child_decodes_past_15s() {
         let url = "https://music.apple.com/cn/album/dont-you-worry-child-radio-edit-feat-john-martin/716018055?i=716018386";
+        // let url = "https://music.apple.com/cn/album/%E8%AF%BB%E4%BD%A0/299097222?i=299097258"; // 蔡琴 读你
         let client = Client::builder().build().unwrap();
         let token = api::get_token(&client).await.expect("token");
 
@@ -227,7 +232,10 @@ mod tests {
         let dump = std::env::var("DUMP_DECRYPTED").ok();
         if let Some(path) = dump.as_deref() {
             std::fs::write(path, &song.bytes).expect("write dump");
-            println!("wrote decrypted file to {path} ({} bytes)", song.bytes.len());
+            println!(
+                "wrote decrypted file to {path} ({} bytes)",
+                song.bytes.len()
+            );
         }
         let cursor = Cursor::new(song.bytes.clone());
         let mss = MediaSourceStream::new(Box::new(cursor), Default::default());
@@ -242,16 +250,9 @@ mod tests {
             )
             .expect("probe");
         let mut format = probed.format;
-        let track = format
-            .default_track()
-            .expect("default track")
-            .clone();
+        let track = format.default_track().expect("default track").clone();
         let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
-        let channels = track
-            .codec_params
-            .channels
-            .map(|c| c.count())
-            .unwrap_or(2) as u64;
+        let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(2) as u64;
         let mut decoder = symphonia::default::get_codecs()
             .make(&track.codec_params, &DecoderOptions::default())
             .expect("make decoder");
@@ -283,16 +284,12 @@ mod tests {
                     Err(SymError::DecodeError(e)) => {
                         panic!("decode error at sample {total_samples}: {e}");
                     }
-                    Err(SymError::IoError(e))
-                        if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-                    {
+                    Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                         break;
                     }
                     Err(e) => panic!("decoder error at sample {total_samples}: {e:?}"),
                 },
-                Err(SymError::IoError(e))
-                    if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-                {
+                Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                     break;
                 }
                 Err(e) => panic!("packet error at sample {total_samples}: {e:?}"),

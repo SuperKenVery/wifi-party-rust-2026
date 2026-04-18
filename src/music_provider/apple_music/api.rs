@@ -249,7 +249,7 @@ mod tests {
         for s in &songs.data {
             println!(
                 "  - {} / {} ({})",
-                s.attributes.name, s.attributes.artist_name, s.id
+                s.attributes.name, s.attributes.artist_name, s.attributes.url
             );
         }
     }

@@ -321,7 +321,7 @@ impl NetworkSender {
 
     fn send_packet(&self, packet: &NetworkPacket) {
         if let Err(error) = self.send_inner(packet) {
-            error!("{}", error);
+            error!("{:?}", error);
         }
     }
 
