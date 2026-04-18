@@ -40,6 +40,8 @@ pub mod party;
 pub mod realtime_stream;
 pub mod sync_stream;
 
+mod tests;
+
 pub use config::PartyConfig;
 
 pub use ntp::NtpDebugInfo;

@@ -3,6 +3,25 @@
 //! Unlike realtime streams that play immediately, synced streams buffer audio
 //! and play at a specified party clock time, ensuring all participants hear
 //! the same audio at the same moment.
+//!
+//! # Architecture (pull-based pipeline)
+//!
+//! ```text
+//! Network packets → BufferEntry (stores compressed packets, reassembles fragments)
+//!                     ↓ push_packet()
+//!                   CompressedPacketQueue
+//!                     ↑ pull()
+//!                   SymphoniaDecoder (per-channel f32 PCM)
+//!                     ↑ pull()
+//!                   FftResampler or Interleaver (interleaved AudioBuffer)
+//!                     ↑ pull()
+//!                   SyncedAudioStreamManager::pull_and_mix() (NTP-timed playback)
+//!                     ↑ pull()
+//!                   Output Mixer → Speaker
+//! ```
+//!
+//! Each pipeline node is an `Arc` implementing `Pullable`. Decoding and
+//! resampling happen lazily on pull, not eagerly on receive.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -12,14 +31,15 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use rkyv::{Archive, Deserialize, Serialize};
+use rubato::FftFixedIn;
 use symphonia::core::codecs::DecoderOptions;
 use tracing::{error, info, warn};
 
 use crate::audio::AudioSample;
+use crate::audio::decoders::{CompressedPacketQueue, FftResampler, Interleaver, SymphoniaDecoder};
 use crate::audio::frame::AudioBuffer;
-use crate::audio::symphonia_compat::{WireCodecParams, extract_and_resample};
+use crate::audio::symphonia_compat::WireCodecParams;
 use crate::pipeline::Pullable;
-use rubato::FftFixedIn;
 
 const SYNCED_STREAM_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -80,12 +100,6 @@ pub struct RawPacket {
     pub data: Vec<u8>,
 }
 
-/// Decoded PCM frame stored in buffer, ready for playback.
-#[derive(Clone)]
-pub struct DecodedFrame<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    pub samples: AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>,
-}
-
 impl SyncedFrame {
     /// Build a non-fragmented frame (`fragment_total = 1`).
     pub fn whole(stream_id: SyncedStreamId, sequence_number: u64, dur: u32, data: Vec<u8>) -> Self {
@@ -136,31 +150,6 @@ struct BufferKey {
     stream_id: SyncedStreamId,
 }
 
-/// A buffer for a single stream from a single source.
-///
-/// Created only when metadata arrives with valid decoder.
-/// Stores decoded PCM frames for immediate playback.
-///
-/// Frames must be decoded in sequence order because codecs like MP3/AAC/FLAC
-/// are stateful. Out-of-order frames are buffered in `pending_raw` until
-/// their predecessors arrive.
-struct BufferEntry<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    decoder: Box<dyn symphonia::core::codecs::Decoder>,
-    resampler: Option<FftFixedIn<f32>>,
-    meta: SyncedStreamMeta,
-    /// Out of order frames
-    pending_raw: HashMap<u64, SyncedFrame>,
-    /// Long frames are segmented to fit MTU, here we store segments
-    pending_fragments: HashMap<u64, FragmentSet>,
-    next_decode_seq: u64,
-    decoded_frames: HashMap<u64, DecodedFrame<Sample, CHANNELS, SAMPLE_RATE>>,
-    last_seen: Instant,
-
-    playing: bool,
-    start_party_time: u64,
-    start_seq: u64,
-}
-
 /// Collects fragments of a single logical `SyncedFrame` (same seq) until
 /// complete. Cleared on seek or stream teardown; otherwise it just stays
 /// until the full set arrives (possibly via retransmission).
@@ -176,13 +165,51 @@ struct FragmentSet {
 #[rkyv(compare(PartialEq))]
 pub enum SyncedControl {
     Start {
-        stream_id: crate::party::sync_stream::SyncedStreamId,
+        stream_id: SyncedStreamId,
         party_clock_time: u64,
         seq: u64,
     },
     Pause {
-        stream_id: crate::party::sync_stream::SyncedStreamId,
+        stream_id: SyncedStreamId,
     },
+}
+
+// ---------------------------------------------------------------------------
+//  BufferEntry — per-source/stream state using pipeline nodes
+// ---------------------------------------------------------------------------
+
+/// A buffer for a single stream from a single source.
+///
+/// Stores compressed packets, reassembles fragments, and owns the decode
+/// pipeline nodes. Packets are pushed into the `packet_queue` in sequence
+/// order (out-of-order packets wait in `pending_raw`). Decoding happens
+/// lazily when audio is pulled from `output`.
+struct BufferEntry<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    // -- Pipeline nodes (all Arc for thread safety) --
+    packet_queue: Arc<CompressedPacketQueue>,
+    decoder: Arc<SymphoniaDecoder<CHANNELS>>,
+    /// The tail of the decode pipeline. Either FftResampler (if resampling)
+    /// or Interleaver (if same sample rate). Pull from this to get audio.
+    output: Arc<dyn Pullable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>>,
+    /// Resets the output node's internal buffers on seek.
+    /// Captures the concrete Arc so we can call `.reset()` through `dyn Pullable`.
+    output_reset: Box<dyn Fn() + Send + Sync>,
+
+    meta: SyncedStreamMeta,
+    /// Out of order compressed frames waiting for predecessors.
+    pending_raw: HashMap<u64, SyncedFrame>,
+    /// Long frames segmented to fit MTU, here we store segments.
+    pending_fragments: HashMap<u64, FragmentSet>,
+    /// Next expected sequence number for feeding into packet_queue.
+    next_feed_seq: u64,
+    last_seen: Instant,
+
+    // -- Playback state --
+    playing: bool,
+    /// Party clock time (µs) when playback should start / resumed.
+    start_party_time: u64,
+    /// Total samples pulled to output (for progress UI).
+    samples_played: u64,
 }
 
 fn create_decoder(
@@ -247,19 +274,28 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             stream_id: meta.stream_id,
         };
 
-        // Metadata update
+        // Metadata update for existing entry.
         if let Some(mut entry) = self.buffers.get_mut(&key) {
             entry.meta = meta;
             entry.last_seen = Instant::now();
             return;
         }
 
-        // New metadata, create decoder
+        // New stream — create decoder and wire up pipeline nodes.
         let Some(decoder) = create_decoder(&meta.codec_params) else {
             return;
         };
 
-        let resampler = if meta.codec_params.sample_rate != SAMPLE_RATE {
+        let packet_queue = Arc::new(CompressedPacketQueue::new());
+        let decoder_node = Arc::new(SymphoniaDecoder::<CHANNELS>::new(decoder));
+        decoder_node.set_source(packet_queue.clone());
+
+        // Build output stage: resampler if sample rates differ, otherwise interleaver.
+        let (output, output_reset): (
+            Arc<dyn Pullable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>>,
+            Box<dyn Fn() + Send + Sync>,
+        ) = if meta.codec_params.sample_rate != SAMPLE_RATE {
+            // Resampling path
             match FftFixedIn::<f32>::new(
                 meta.codec_params.sample_rate as usize,
                 SAMPLE_RATE as usize,
@@ -272,15 +308,38 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                         "Created resampler {}Hz -> {}Hz for stream {}",
                         meta.codec_params.sample_rate, SAMPLE_RATE, meta.stream_id
                     );
-                    Some(r)
+                    let resampler_node =
+                        Arc::new(FftResampler::<Sample, CHANNELS, SAMPLE_RATE>::new(r));
+                    resampler_node.set_source(decoder_node.clone());
+                    let reset_handle = resampler_node.clone();
+                    (
+                        resampler_node as Arc<dyn Pullable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>>,
+                        Box::new(move || reset_handle.reset()) as Box<dyn Fn() + Send + Sync>,
+                    )
                 }
                 Err(e) => {
                     error!("Failed to create resampler: {}", e);
-                    None
+                    // Fall back to interleaver (will produce wrong sample rate, but won't crash)
+                    let interleaver_node =
+                        Arc::new(Interleaver::<Sample, CHANNELS, SAMPLE_RATE>::new());
+                    interleaver_node.set_source(decoder_node.clone());
+                    let reset_handle = interleaver_node.clone();
+                    (
+                        interleaver_node
+                            as Arc<dyn Pullable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>>,
+                        Box::new(move || reset_handle.reset()) as Box<dyn Fn() + Send + Sync>,
+                    )
                 }
             }
         } else {
-            None
+            // No resampling needed — use interleaver directly
+            let interleaver_node = Arc::new(Interleaver::<Sample, CHANNELS, SAMPLE_RATE>::new());
+            interleaver_node.set_source(decoder_node.clone());
+            let reset_handle = interleaver_node.clone();
+            (
+                interleaver_node as Arc<dyn Pullable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>>,
+                Box::new(move || reset_handle.reset()) as Box<dyn Fn() + Send + Sync>,
+            )
         };
 
         info!(
@@ -291,17 +350,18 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         self.buffers.insert(
             key,
             BufferEntry {
-                decoder,
-                resampler,
+                packet_queue,
+                decoder: decoder_node,
+                output,
+                output_reset,
                 meta,
                 pending_raw: HashMap::new(),
                 pending_fragments: HashMap::new(),
-                next_decode_seq: 1,
-                decoded_frames: HashMap::new(),
+                next_feed_seq: 1,
                 last_seen: Instant::now(),
                 playing: false,
                 start_party_time: 0,
-                start_seq: 1,
+                samples_played: 0,
             },
         );
     }
@@ -331,14 +391,21 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             } => {
                 entry.playing = true;
                 entry.start_party_time = party_clock_time;
-                entry.start_seq = seq;
                 entry.last_seen = Instant::now();
-                if seq > entry.next_decode_seq {
-                    // Seeking forward: update decode position, clear pending
-                    entry.next_decode_seq = seq;
+
+                // Reset pipeline and pending queues on seek.
+                // Sender handles seeking in the source file — receiver just
+                // starts fresh from the new seq. For resume (seq == next_feed_seq),
+                // reset is harmless since no packets are queued ahead.
+                if seq != entry.next_feed_seq {
+                    entry.packet_queue.reset();
+                    entry.decoder.reset();
+                    (entry.output_reset)();
+                    entry.next_feed_seq = seq;
                     entry.pending_raw.clear();
                     entry.pending_fragments.clear();
                 }
+
                 info!(
                     "Stream {:?} starting at seq {} at party time {}",
                     key, seq, party_clock_time
@@ -354,10 +421,9 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
     /// Receives audio frame. Only stores if entry exists.
     ///
-    /// Frames are decoded in sequence order to maintain correct decoder state.
-    /// Out-of-order frames are buffered until their predecessors arrive.
-    /// Fragmented frames (`fragment_total > 1`) are reassembled by seq before
-    /// being fed to the same buffering path.
+    /// Compressed packets are fed into the packet queue in sequence order.
+    /// Out-of-order packets wait in `pending_raw` until predecessors arrive.
+    /// Fragmented frames are reassembled before feeding.
     pub fn receive(&self, source_addr: SocketAddr, frame: SyncedFrame) {
         let key = BufferKey {
             source_addr,
@@ -373,14 +439,12 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
         let seq = frame.sequence_number;
 
-        // Duplicate or old frame (already decoded or reassembled).
-        if seq < entry.next_decode_seq
-            || entry.decoded_frames.contains_key(&seq)
-            || entry.pending_raw.contains_key(&seq)
-        {
+        // Duplicate or old frame.
+        if seq < entry.next_feed_seq || entry.pending_raw.contains_key(&seq) {
             return;
         }
 
+        // Reassemble fragments if needed.
         let frame = if frame.fragment_total <= 1 {
             frame
         } else {
@@ -390,13 +454,17 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             }
         };
 
-        if seq == entry.next_decode_seq {
-            Self::decode_frame(entry, &frame);
-            entry.next_decode_seq += 1;
+        // Feed into packet queue in order.
+        if seq == entry.next_feed_seq {
+            entry.packet_queue.push_packet(seq, frame.dur, frame.data);
+            entry.next_feed_seq += 1;
 
-            while let Some(pending) = entry.pending_raw.remove(&entry.next_decode_seq) {
-                Self::decode_frame(entry, &pending);
-                entry.next_decode_seq += 1;
+            // Drain any consecutive pending packets.
+            while let Some(pending) = entry.pending_raw.remove(&entry.next_feed_seq) {
+                entry
+                    .packet_queue
+                    .push_packet(entry.next_feed_seq, pending.dur, pending.data);
+                entry.next_feed_seq += 1;
             }
         } else {
             entry.pending_raw.insert(seq, frame);
@@ -404,13 +472,10 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     }
 
     /// Insert a fragment; return the assembled whole frame once complete.
-    fn insert_fragment<const C: usize, const R: u32>(
-        entry: &mut BufferEntry<Sample, C, R>,
+    fn insert_fragment(
+        entry: &mut BufferEntry<Sample, CHANNELS, SAMPLE_RATE>,
         frame: SyncedFrame,
-    ) -> Option<SyncedFrame>
-    where
-        Sample: AudioSample,
-    {
+    ) -> Option<SyncedFrame> {
         let seq = frame.sequence_number;
         let total = frame.fragment_total;
         let idx = frame.fragment_idx;
@@ -458,102 +523,32 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         Some(SyncedFrame::whole(entry.meta.stream_id, seq, set.dur, data))
     }
 
-    fn decode_frame<const C: usize, const R: u32>(
-        entry: &mut BufferEntry<Sample, C, R>,
-        frame: &SyncedFrame,
-    ) where
-        Sample: AudioSample,
-    {
-        let packet =
-            symphonia::core::formats::Packet::new_from_slice(0, 0, frame.dur as u64, &frame.data);
-
-        let Ok(decoded) = entry.decoder.decode(&packet) else {
-            error!("Failed to decode frame seq={}", frame.sequence_number);
-            return;
-        };
-
-        let buf = extract_and_resample::<Sample, C, R>(&decoded, entry.resampler.as_mut());
-
-        entry
-            .decoded_frames
-            .insert(frame.sequence_number, DecodedFrame { samples: buf });
-    }
-
     /// Pulls samples from all streams and mixes them together.
     ///
-    /// All decoded frames are already resampled to SAMPLE_RATE, so we can directly
-    /// calculate elapsed samples from elapsed time without rate conversion.
+    /// For each playing stream whose start_party_time has arrived, pulls
+    /// PCM samples from its output pipeline node. Multiple streams are mixed.
     pub fn pull_and_mix(
         &self,
         num_frames: usize,
     ) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
         let party_now = (self.party_now_fn)();
-        let mut mixed: AudioBuffer<i64, CHANNELS, SAMPLE_RATE> =
-            AudioBuffer::new_zeroed(num_frames);
+        let num_samples = num_frames * CHANNELS;
+        let mut mixed: Vec<i64> = vec![0i64; num_samples];
         let mut source_count = 0usize;
-        let mut frames_collected = 0usize;
 
-        // iter each synced stream, although there should only be one
-        for entry in self.buffers.iter() {
+        for mut entry in self.buffers.iter_mut() {
             if !entry.playing || entry.start_party_time > party_now {
                 continue;
             }
 
-            let start_seq = entry.start_seq;
-            let start_party_time = entry.start_party_time;
+            let Some(buf) = entry.output.pull(num_samples) else {
+                continue;
+            };
 
-            let mut local_buf: AudioBuffer<i64, CHANNELS, SAMPLE_RATE> =
-                AudioBuffer::new_zeroed(num_frames);
-            let mut local_frames = 0usize;
-
-            'fill_local: while local_frames < num_frames {
-                let elapsed_samples = (party_now - start_party_time) * SAMPLE_RATE as u64
-                    / 1_000_000
-                    + local_frames as u64;
-
-                // Find which frame contains the `elapsed_samples`th sample
-                let (frame, frame_start_sample) = {
-                    let mut cumulative = 0u64;
-                    let mut seq = start_seq;
-                    loop {
-                        let Some(frame) = entry.decoded_frames.get(&seq) else {
-                            // Have loss packet, can't calculate where to read. Give up.
-                            break 'fill_local;
-                        };
-                        let frame_end = cumulative + frame.samples.samples_per_channel() as u64;
-                        if elapsed_samples < frame_end {
-                            break (frame, cumulative);
-                        }
-                        cumulative = frame_end;
-                        seq += 1;
-                    }
-                };
-
-                let frame_offset = (elapsed_samples - frame_start_sample) as usize;
-                let remaining = frame
-                    .samples
-                    .samples_per_channel()
-                    .saturating_sub(frame_offset);
-                let take_frames = (num_frames - local_frames).min(remaining);
-
-                for f in 0..take_frames {
-                    for ch in 0..CHANNELS {
-                        *local_buf.get_mut(local_frames + f, ch) =
-                            frame.samples.get(frame_offset + f, ch).to_i64_for_mix();
-                    }
-                }
-                local_frames += take_frames;
-            }
-
-            // Add local buffer to mix buffer
-            if local_frames > 0 {
-                source_count += 1;
-                for f in 0..local_frames {
-                    for ch in 0..CHANNELS {
-                        *mixed.get_mut(f, ch) += *local_buf.get(f, ch);
-                    }
-                }
-                frames_collected = frames_collected.max(local_frames);
+            source_count += 1;
+            entry.samples_played += buf.data().len() as u64 / CHANNELS as u64;
+            for (i, sample) in buf.data().iter().enumerate() {
+                mixed[i] += sample.to_i64_for_mix();
             }
         }
 
@@ -561,12 +556,11 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             return None;
         }
 
-        let divided_samples: Vec<Sample> = mixed
-            .into_inner()
+        let result: Vec<Sample> = mixed
             .into_iter()
             .map(|s| Sample::from_i64_mixed(s, source_count))
             .collect();
-        AudioBuffer::new(divided_samples).ok()
+        AudioBuffer::new(result).ok()
     }
 
     pub fn cleanup_stale(&self) {
@@ -584,34 +578,9 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     }
 
     pub fn active_streams(&self) -> Vec<SyncedStreamState> {
-        let party_now = (self.party_now_fn)();
         let mut result = Vec::new();
 
         for entry in self.buffers.iter() {
-            let buffered_frames = entry.decoded_frames.len();
-            let highest_seq_received = entry.decoded_frames.keys().max().copied().unwrap_or(0);
-
-            let mut total_samples = 0u64;
-            for frame in entry.decoded_frames.values() {
-                total_samples += frame.samples.samples_per_channel() as u64;
-            }
-
-            let samples_played = if entry.playing && party_now > entry.start_party_time {
-                let mut cumulative_samples = 0u64;
-                for seq in entry.start_seq.. {
-                    if let Some(frame) = entry.decoded_frames.get(&seq) {
-                        cumulative_samples += frame.samples.samples_per_channel() as u64;
-                    } else {
-                        break;
-                    }
-                }
-                let elapsed_us = party_now - entry.start_party_time;
-                let elapsed_samples = elapsed_us * SAMPLE_RATE as u64 / 1_000_000;
-                elapsed_samples.min(cumulative_samples)
-            } else {
-                0
-            };
-
             let is_local_sender =
                 entry.key().source_addr.ip().is_loopback() && entry.key().source_addr.port() == 0;
 
@@ -619,11 +588,11 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 stream_id: entry.key().stream_id,
                 meta: entry.meta.clone(),
                 progress: SyncedStreamProgress {
-                    samples_played,
-                    total_samples,
-                    buffered_frames: buffered_frames as u64,
+                    samples_played: entry.samples_played,
+                    total_samples: entry.meta.total_samples,
+                    buffered_frames: entry.packet_queue.packets_pushed(),
                     is_playing: entry.playing,
-                    highest_seq_received,
+                    highest_seq_received: entry.packet_queue.highest_seq(),
                 },
                 is_local_sender,
             });
@@ -632,35 +601,24 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         result
     }
 
-    /// Identifies gaps in the buffered packets and returns them for retransmission requests.
+    /// Identifies gaps in the received packets and returns them for retransmission.
     pub fn get_missing_frames(&self) -> Vec<(SocketAddr, SyncedStreamId, Vec<u64>)> {
         let mut result = Vec::new();
-        let party_now = (self.party_now_fn)();
 
         for entry in self.buffers.iter() {
             let mut missing = Vec::new();
+            let next_feed = entry.next_feed_seq;
 
-            let current_seq = if entry.playing && party_now > entry.start_party_time {
-                let elapsed_us = party_now - entry.start_party_time;
-                let elapsed_samples = elapsed_us * SAMPLE_RATE as u64 / 1_000_000;
-                let mut cumulative = 0u64;
-                let mut seq = entry.start_seq;
-                while let Some(frame) = entry.decoded_frames.get(&seq) {
-                    if cumulative >= elapsed_samples {
-                        break;
-                    }
-                    cumulative += frame.samples.samples_per_channel() as u64;
-                    seq += 1;
-                }
-                seq
-            } else {
-                entry.start_seq
-            };
+            // Check from next_feed_seq up to a lookahead window.
+            let end_check = (next_feed + 200).min(entry.meta.total_frames);
 
-            let end_check = (current_seq + 200).min(entry.meta.total_frames);
-
-            for seq in 1..=end_check {
-                if !entry.decoded_frames.contains_key(&seq) {
+            // Missing frames are those in pending_raw gaps plus anything
+            // beyond next_feed_seq that we haven't received.
+            // Since we feed sequentially, any seq < next_feed_seq is already
+            // fed. Gaps are in the pending_raw range.
+            for seq in next_feed..=end_check {
+                if !entry.pending_raw.contains_key(&seq) && seq >= next_feed {
+                    // This seq hasn't arrived yet.
                     missing.push(seq);
                     if missing.len() >= 100 {
                         break;
@@ -731,422 +689,5 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     fn pull(&self, len: usize) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
         let num_frames = len / CHANNELS;
         self.pull_and_mix(num_frames)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Cursor;
-    use std::net::SocketAddr;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Arc;
-    use symphonia::core::codecs::CODEC_TYPE_NULL;
-    use symphonia::core::formats::FormatOptions;
-    use symphonia::core::io::MediaSourceStream;
-    use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::probe::Hint;
-
-    use rubato::FftFixedIn;
-    use symphonia::core::codecs::DecoderOptions;
-
-    use crate::audio::symphonia_compat::{WireCodecParams, extract_and_resample};
-
-    const SR: u32 = 48000;
-    const CH: usize = 2;
-
-    fn test_addr() -> SocketAddr {
-        "127.0.0.1:1234".parse().unwrap()
-    }
-
-    fn load_packets(limit: usize) -> (WireCodecParams, Vec<(u32, Vec<u8>)>) {
-        let data = std::fs::read("assets/read_you.m4a").expect("assets/read_you.m4a not found");
-        let mss = MediaSourceStream::new(Box::new(Cursor::new(data)), Default::default());
-        let mut hint = Hint::new();
-        hint.with_extension("m4a");
-
-        let probed = symphonia::default::get_probe()
-            .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
-            .unwrap();
-        let mut format = probed.format;
-
-        let track = format
-            .tracks()
-            .iter()
-            .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-            .unwrap();
-        let codec_params = WireCodecParams::from_symphonia(&track.codec_params).unwrap();
-        let track_id = track.id;
-
-        let mut packets = Vec::new();
-        loop {
-            match format.next_packet() {
-                Ok(pkt) if pkt.track_id() == track_id => {
-                    packets.push((pkt.dur as u32, pkt.data.to_vec()));
-                    if packets.len() >= limit {
-                        break;
-                    }
-                }
-                Ok(_) => {}
-                Err(_) => break,
-            }
-        }
-        (codec_params, packets)
-    }
-
-    fn make_manager(clock: Arc<AtomicU64>) -> SyncedAudioStreamManager<f32, CH, SR> {
-        let c = clock.clone();
-        SyncedAudioStreamManager::<f32, CH, SR>::new(move || c.load(Ordering::Relaxed))
-    }
-
-    fn feed_and_start(
-        mgr: &SyncedAudioStreamManager<f32, CH, SR>,
-        addr: SocketAddr,
-        codec_params: WireCodecParams,
-        packets: &[(u32, Vec<u8>)],
-        stream_id: SyncedStreamId,
-    ) {
-        let meta = SyncedStreamMeta {
-            stream_id,
-            file_name: "read_you.m4a".to_string(),
-            total_frames: packets.len() as u64,
-            total_samples: packets.iter().map(|(d, _)| *d as u64).sum(),
-            codec_params,
-        };
-        mgr.receive_meta(addr, meta);
-        for (seq, (dur, data)) in packets.iter().enumerate() {
-            mgr.receive(
-                addr,
-                SyncedFrame::whole(stream_id, seq as u64 + 1, *dur, data.clone()),
-            );
-        }
-        mgr.receive_control(
-            addr,
-            SyncedControl::Start {
-                stream_id,
-                party_clock_time: 0,
-                seq: 1,
-            },
-        );
-    }
-
-    fn pull_all(
-        mgr: &SyncedAudioStreamManager<f32, CH, SR>,
-        clock: &Arc<AtomicU64>,
-    ) -> Vec<f32> {
-        const CHUNK: usize = 480;
-        let mut samples = Vec::new();
-        let mut t = 0u64;
-        for _ in 0..1_000_000 {
-            clock.store(t, Ordering::Relaxed);
-            match mgr.pull_and_mix(CHUNK) {
-                Some(buf) => {
-                    samples.extend_from_slice(buf.data());
-                    t += CHUNK as u64 * 1_000_000 / SR as u64;
-                }
-                None => break,
-            }
-        }
-        samples
-    }
-
-    /// Decode the same packets directly through symphonia (no synced stream manager)
-    /// to get a ground-truth reference signal for comparison.
-    fn decode_reference(
-        codec_params: &WireCodecParams,
-        packets: &[(u32, Vec<u8>)],
-    ) -> Vec<f32> {
-        let params = codec_params.to_symphonia();
-        let mut decoder = symphonia::default::get_codecs()
-            .make(&params, &DecoderOptions::default())
-            .unwrap();
-        let mut resampler: Option<FftFixedIn<f32>> = if codec_params.sample_rate != SR {
-            Some(
-                FftFixedIn::new(
-                    codec_params.sample_rate as usize,
-                    SR as usize,
-                    1024,
-                    1,
-                    CH,
-                )
-                .unwrap(),
-            )
-        } else {
-            None
-        };
-        let mut all = Vec::new();
-        for (dur, data) in packets {
-            let pkt = symphonia::core::formats::Packet::new_from_slice(0, 0, *dur as u64, data);
-            if let Ok(decoded) = decoder.decode(&pkt) {
-                let buf: AudioBuffer<f32, CH, SR> =
-                    extract_and_resample(&decoded, resampler.as_mut());
-                all.extend_from_slice(buf.data());
-            }
-        }
-        all
-    }
-
-    /// Feeds the m4a through SyncedAudioStreamManager and compares the output
-    /// against a direct symphonia decode of the same packets.
-    ///
-    /// A timing bug (e.g. 10x playback speed) would cause the synced stream
-    /// to skip ahead, producing fewer output samples or different audio content.
-    #[test]
-    fn test_output_matches_reference_decode() {
-        let sid = new_stream_id();
-        let (codec_params, packets) = load_packets(100);
-        let reference = decode_reference(&codec_params, &packets);
-        assert!(!reference.is_empty(), "Reference decode produced no samples");
-
-        let clock = Arc::new(AtomicU64::new(0));
-        let mgr = make_manager(clock.clone());
-        feed_and_start(&mgr, test_addr(), codec_params, &packets, sid);
-        let output = pull_all(&mgr, &clock);
-        assert!(!output.is_empty(), "Synced stream produced no samples");
-
-        // The synced stream should produce approximately the same number of samples
-        // as the reference decode. A timing bug that causes 10x speed would yield
-        // ~1/10 the samples because pull_and_mix skips ahead based on party clock.
-        let tolerance = reference.len() / 10;
-        assert!(
-            output.len().abs_diff(reference.len()) <= tolerance,
-            "Synced output has {} samples, reference has {} (±{} tolerance). \
-             A speed bug would show as a large mismatch.",
-            output.len(),
-            reference.len(),
-            tolerance,
-        );
-
-        // Compare actual audio content of the first few samples.
-        // Even with different resampler state, the initial samples should be close.
-        let compare_len = output.len().min(reference.len()).min(4800);
-        let max_diff: f64 = output[..compare_len]
-            .iter()
-            .zip(&reference[..compare_len])
-            .map(|(a, b)| (a - b).abs() as f64)
-            .fold(0.0, f64::max);
-        assert!(
-            max_diff < 0.5,
-            "Audio content diverges (max sample diff = {:.4}) — possible speed/timing bug",
-            max_diff,
-        );
-    }
-
-    /// Checks the audio output is not silent (non-trivial signal present).
-    #[test]
-    fn test_output_not_silent() {
-        let sid = new_stream_id();
-        let (codec_params, packets) = load_packets(20);
-
-        let clock = Arc::new(AtomicU64::new(0));
-        let mgr = make_manager(clock.clone());
-        feed_and_start(&mgr, test_addr(), codec_params, &packets, sid);
-        let output = pull_all(&mgr, &clock);
-
-        assert!(!output.is_empty(), "No audio output produced");
-        let rms = (output.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / output.len() as f64)
-            .sqrt();
-        assert!(rms > 1e-4, "Output is silent (RMS = {:.2e})", rms);
-    }
-
-    /// Sends frames out of order and verifies all are eventually decoded and played.
-    #[test]
-    fn test_out_of_order_frames_all_decoded() {
-        let sid = new_stream_id();
-        let (codec_params, packets) = load_packets(6);
-
-        let clock = Arc::new(AtomicU64::new(0));
-        let mgr = make_manager(clock.clone());
-        let meta = SyncedStreamMeta {
-            stream_id: sid,
-            file_name: "read_you.m4a".to_string(),
-            total_frames: packets.len() as u64,
-            total_samples: packets.iter().map(|(d, _)| *d as u64).sum(),
-            codec_params,
-        };
-        mgr.receive_meta(test_addr(), meta);
-
-        // Send in order: seq 1, 3, 2, 5, 4, 6
-        for &i in &[0usize, 2, 1, 4, 3, 5] {
-            let (dur, data) = &packets[i];
-            mgr.receive(
-                test_addr(),
-                SyncedFrame::whole(sid, i as u64 + 1, *dur, data.clone()),
-            );
-        }
-        mgr.receive_control(
-            test_addr(),
-            SyncedControl::Start {
-                stream_id: sid,
-                party_clock_time: 0,
-                seq: 1,
-            },
-        );
-
-        let streams = mgr.active_streams();
-        let state = streams.iter().find(|s| s.stream_id == sid).unwrap();
-        assert_eq!(
-            state.progress.buffered_frames, 6,
-            "All 6 frames should be decoded despite out-of-order delivery"
-        );
-
-        clock.store(0, Ordering::Relaxed);
-        assert!(
-            mgr.pull_and_mix(480).is_some(),
-            "Should produce audio from seq 1"
-        );
-    }
-
-    /// Splits one frame across two fragments and verifies it is reassembled before decoding.
-    #[test]
-    fn test_fragment_reassembly() {
-        let sid = new_stream_id();
-        let (codec_params, packets) = load_packets(3);
-
-        let clock = Arc::new(AtomicU64::new(0));
-        let mgr = make_manager(clock);
-        let meta = SyncedStreamMeta {
-            stream_id: sid,
-            file_name: "read_you.m4a".to_string(),
-            total_frames: packets.len() as u64,
-            total_samples: packets.iter().map(|(d, _)| *d as u64).sum(),
-            codec_params,
-        };
-        mgr.receive_meta(test_addr(), meta);
-
-        // Send frame 1 as two fragments
-        let (dur1, data1) = &packets[0];
-        let mid = data1.len() / 2;
-        mgr.receive(
-            test_addr(),
-            SyncedFrame {
-                stream_id: sid,
-                sequence_number: 1,
-                dur: *dur1,
-                fragment_idx: 0,
-                fragment_total: 2,
-                data: data1[..mid].to_vec(),
-            },
-        );
-        // First fragment only — frame 1 must not be decoded yet
-        let before = mgr.active_streams();
-        let before_state = before.iter().find(|s| s.stream_id == sid).unwrap();
-        assert_eq!(
-            before_state.progress.buffered_frames, 0,
-            "Frame 1 should not be decoded with only one fragment"
-        );
-
-        mgr.receive(
-            test_addr(),
-            SyncedFrame {
-                stream_id: sid,
-                sequence_number: 1,
-                dur: *dur1,
-                fragment_idx: 1,
-                fragment_total: 2,
-                data: data1[mid..].to_vec(),
-            },
-        );
-        // Send frames 2 and 3 whole
-        for i in 1..3 {
-            let (dur, data) = &packets[i];
-            mgr.receive(
-                test_addr(),
-                SyncedFrame::whole(sid, i as u64 + 1, *dur, data.clone()),
-            );
-        }
-
-        mgr.receive_control(
-            test_addr(),
-            SyncedControl::Start {
-                stream_id: sid,
-                party_clock_time: 0,
-                seq: 1,
-            },
-        );
-
-        let streams = mgr.active_streams();
-        let state = streams.iter().find(|s| s.stream_id == sid).unwrap();
-        assert_eq!(
-            state.progress.buffered_frames, 3,
-            "All 3 frames (including fragmented) should be decoded"
-        );
-    }
-
-    /// Checks that extract_and_resample with a persistent resampler (chunk_size=1024)
-    /// produces approximately `dur` samples per frame. If the resampler only consumes
-    /// chunk_size input samples per process() call, the remaining samples are lost,
-    /// causing pull_and_mix to skip ahead and play audio too fast.
-    #[test]
-    fn test_decoded_frame_sample_counts_match_dur() {
-        let (codec_params, packets) = load_packets(10);
-        let src_rate = codec_params.sample_rate;
-
-        if src_rate == SR {
-            return;
-        }
-
-        let params = codec_params.to_symphonia();
-        let mut decoder = symphonia::default::get_codecs()
-            .make(&params, &DecoderOptions::default())
-            .unwrap();
-        let mut resampler = FftFixedIn::<f32>::new(
-            src_rate as usize,
-            SR as usize,
-            1024,
-            1,
-            CH,
-        )
-        .unwrap();
-
-        let mut total_decoded = 0usize;
-        for (dur, data) in &packets {
-            let pkt = symphonia::core::formats::Packet::new_from_slice(0, 0, *dur as u64, data);
-            let decoded = decoder.decode(&pkt).unwrap();
-            let buf: AudioBuffer<f32, CH, SR> =
-                extract_and_resample(&decoded, Some(&mut resampler));
-            total_decoded += buf.samples_per_channel();
-        }
-
-        let expected_total: usize = packets
-            .iter()
-            .map(|(dur, _)| *dur as usize * SR as usize / src_rate as usize)
-            .sum();
-
-        let ratio = total_decoded as f64 / expected_total as f64;
-        assert!(
-            ratio > 0.9 && ratio < 1.1,
-            "Persistent resampler produced {} samples, expected {} (ratio={:.2}). \
-             The resampler chunk_size (1024) is smaller than the ALAC frame size (~4096), \
-             so process() must be called in a loop to consume all input.",
-            total_decoded,
-            expected_total,
-            ratio,
-        );
-    }
-
-    /// Verifies that pausing stops audio output.
-    #[test]
-    fn test_pause_stops_output() {
-        let sid = new_stream_id();
-        let (codec_params, packets) = load_packets(10);
-
-        let clock = Arc::new(AtomicU64::new(0));
-        let mgr = make_manager(clock.clone());
-        feed_and_start(&mgr, test_addr(), codec_params, &packets, sid);
-
-        clock.store(0, Ordering::Relaxed);
-        assert!(
-            mgr.pull_and_mix(480).is_some(),
-            "Should produce audio before pause"
-        );
-
-        mgr.receive_control(test_addr(), SyncedControl::Pause { stream_id: sid });
-
-        clock.store(10_000, Ordering::Relaxed);
-        assert!(
-            mgr.pull_and_mix(480).is_none(),
-            "Should produce no audio after pause"
-        );
     }
 }

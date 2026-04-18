@@ -25,6 +25,7 @@
 //! - [`effects::level_meter`] - Audio level metering
 
 pub mod buffers;
+pub mod decoders;
 pub mod effects;
 pub mod frame;
 pub mod opus;
