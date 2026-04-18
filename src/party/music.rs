@@ -31,8 +31,8 @@ use crate::party::ntp::NtpService;
 use crate::party::realtime_stream::NetworkPacket;
 use crate::party::sync_stream::SyncedControl;
 use crate::party::sync_stream::{
-    RawPacket, SyncedAudioStreamManager, SyncedFrame, SyncedStreamId, SyncedStreamMeta,
-    new_stream_id,
+    MAX_FRAGMENT_DATA, RawPacket, SyncedAudioStreamManager, SyncedFrame, SyncedStreamId,
+    SyncedStreamMeta, new_stream_id,
 };
 use crate::pipeline::Pushable;
 use crate::state::MusicStreamProgress;
@@ -468,9 +468,9 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
                 break;
             };
             if let Some(packet) = self.vault.get(&seq) {
-                let frame =
-                    SyncedFrame::new(self.meta.stream_id, seq, packet.dur, packet.data.clone());
-                self.network_sender.push(NetworkPacket::Synced(frame));
+                for frame in fragment_raw_packet(self.meta.stream_id, seq, &packet) {
+                    self.network_sender.push(NetworkPacket::Synced(frame));
+                }
             }
         }
     }
@@ -487,22 +487,26 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
 
         for _ in 0..frames_to_send {
             if let Some(packet) = self.vault.get(&self.next_seq_to_send) {
-                let frame = SyncedFrame::new(
+                let seq = self.next_seq_to_send;
+                let fragments = fragment_raw_packet(self.meta.stream_id, seq, &packet);
+
+                for _ in 0..REDUNDANCY_COUNT {
+                    for frame in &fragments {
+                        self.network_sender
+                            .push(NetworkPacket::Synced(frame.clone()));
+                    }
+                }
+
+                // Local loopback skips the wire, so hand it the unfragmented frame.
+                let local = SyncedFrame::whole(
                     self.meta.stream_id,
-                    self.next_seq_to_send,
+                    seq,
                     packet.dur,
                     packet.data.clone(),
                 );
+                self.synced_stream.receive(LOCAL_ADDR, local);
 
-                for _ in 0..REDUNDANCY_COUNT {
-                    self.network_sender
-                        .push(NetworkPacket::Synced(frame.clone()));
-                }
-                self.synced_stream.receive(LOCAL_ADDR, frame);
-
-                self.progress
-                    .streaming_current
-                    .store(self.next_seq_to_send, Ordering::Relaxed);
+                self.progress.streaming_current.store(seq, Ordering::Relaxed);
                 self.next_seq_to_send += 1;
             } else if self.is_complete && self.next_seq_to_send > self.meta.total_frames {
                 break;
@@ -512,4 +516,33 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
         }
         self.last_send_time = now;
     }
+}
+
+/// Split a `RawPacket` into one or more `SyncedFrame`s whose `data` fits in
+/// a single UDP datagram. All fragments share the same sequence number.
+fn fragment_raw_packet(
+    stream_id: SyncedStreamId,
+    seq: u64,
+    packet: &RawPacket,
+) -> Vec<SyncedFrame> {
+    let data = &packet.data;
+    if data.len() <= MAX_FRAGMENT_DATA {
+        return vec![SyncedFrame::whole(stream_id, seq, packet.dur, data.clone())];
+    }
+
+    let total = data.len().div_ceil(MAX_FRAGMENT_DATA) as u16;
+    (0..total)
+        .map(|idx| {
+            let start = idx as usize * MAX_FRAGMENT_DATA;
+            let end = (start + MAX_FRAGMENT_DATA).min(data.len());
+            SyncedFrame {
+                stream_id,
+                sequence_number: seq,
+                dur: packet.dur,
+                fragment_idx: idx,
+                fragment_total: total,
+                data: data[start..end].to_vec(),
+            }
+        })
+        .collect()
 }

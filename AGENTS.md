@@ -11,6 +11,7 @@ Real-time audio sharing application using UDP multicast on local networks.
 ## Key Engineering Challenge
 
 Reducing latency. Techniques used:
+
 - Lock-free queues (atomic cells in JitterBuffer)
 - Low-level cpal API with minimal buffer sizes (3ms)
 - Adaptive jitter buffering
@@ -24,12 +25,14 @@ Reducing latency. Techniques used:
 Core audio types and processing nodes.
 
 Files:
+
 - `sample.rs` - `AudioSample` trait for sample types (f32, i16)
 - `frame.rs` - `AudioBuffer` (raw PCM) and `AudioFrame` (buffer + sequence number)
 - `opus.rs` - Opus encoder/decoder with FEC (used for realtime mic/system audio)
 - `symphonia_compat.rs` - Symphonia compatibility layer: `WireCodecType`, `WireCodecParams` for network serialization
 
 Subdirectories:
+
 - `buffers/` - Buffer implementations
   - `simple_buffer.rs` - Basic FIFO buffer
   - `audio_batcher.rs` - Batches samples to reduce packet frequency
@@ -43,6 +46,7 @@ Subdirectories:
 ### `src/io/` - Hardware & Network I/O
 
 Files:
+
 - `audio.rs` - cpal-based audio device access
   - `AudioInput` - Microphone capture
   - `LoopbackInput` - System audio capture
@@ -57,6 +61,7 @@ Files:
 The main coordination layer that wires everything together.
 
 Files:
+
 - `party.rs` - Main `Party` struct that sets up all pipelines and manages component lifecycle
 - `config.rs` - Configuration (device IDs, network settings)
 - `packet_dispatcher.rs` - `PacketDispatcher` receives UDP packets and dispatches by type
@@ -71,6 +76,7 @@ Files:
 Dynamic pipeline architecture for data flow with runtime graph modification.
 
 Files:
+
 - `traits.rs` - Core `Node` trait for data transformation
   - `Node` - Transforms input to output (has associated types `Input`/`Output`)
 - `dyn_traits.rs` - Object-safe dynamic traits and pipeline macros
@@ -83,6 +89,7 @@ Files:
 ### `src/state/` - Application State
 
 Single file `mod.rs` containing:
+
 - `AppState` - Global state (volumes, enabled flags, host list)
 - `HostId` - Remote peer identifier (IP-based)
 - `HostInfo` - Peer metadata and stream info
@@ -93,6 +100,7 @@ Single file `mod.rs` containing:
 Dioxus-based desktop UI.
 
 Files:
+
 - `app.rs` - Main app component
 - `sidebar.rs` - Navigation sidebar
 - `sidebar_panels/` - Panel components
@@ -106,6 +114,7 @@ Files:
 ### Sending (Mic Pipeline)
 
 Built with `push_chain!` macro:
+
 ```
 AudioInput -> push_chain![
     LevelMeter,
@@ -120,6 +129,7 @@ AudioInput -> push_chain![
 ### Sending (System Audio Pipeline)
 
 Built with `push_chain!` macro:
+
 ```
 LoopbackInput -> push_chain![
     LevelMeter,
@@ -149,10 +159,12 @@ LoopbackInput -> push_chain![
 ## Network Protocol
 
 Multicast addresses:
+
 - IPv4: `239.255.43.2:7667`, TTL=1
 - IPv6: `ff02::7667:7667`, hop_limit=1
 
 Packet types (serialized with rkyv):
+
 - `Realtime` - Opus audio for realtime streams (mic/system)
 - `Synced` - Original codec audio for synchronized music (pass-through, no re-encoding)
 - `SyncedMeta` - Music stream metadata (includes `WireCodecParams` for receiver decoding)
@@ -167,6 +179,7 @@ Packet types (serialized with rkyv):
 Android requires `WifiManager.MulticastLock` to receive multicast UDP packets. Without it, the OS filters out multicast traffic to save battery.
 
 Files:
+
 - `assets/AndroidManifest.xml` - Declares `CHANGE_WIFI_MULTICAST_STATE` and `ACCESS_WIFI_STATE` permissions
 - `src/io/multicast_lock.rs` - JNI wrapper that acquires/releases MulticastLock via WifiManager
 
@@ -177,6 +190,7 @@ The lock is acquired in `Party::run()` and held for the lifetime of the network 
 ### JitterBuffer (`src/audio/buffers/jitter_buffer.rs`)
 
 Slot-based buffer indexed by sequence number. Key behaviors:
+
 - On push: clamp read_seq forward if outside target latency window
 - On pull: only hold back on underrun (read_seq > write_seq)
 - Adaptive latency: increases on high loss (>5%), decreases when stable
@@ -185,6 +199,7 @@ Slot-based buffer indexed by sequence number. Key behaviors:
 ### RealtimeAudioStream (`src/party/stream.rs`)
 
 Manages per-host decode chains using the dynamic pipeline architecture:
+
 - `DecodeChain`: `GraphNode<RealtimeFrameDecoder>` → `JitterBuffer` → `Mixer`
 - Creates chain on first packet from new source (dynamic host management)
 - Internal `Mixer` combines audio from all per-host JitterBuffers
@@ -203,6 +218,7 @@ Has `start_cleanup_task()` and `start_retransmit_task()` for background operatio
 ### Party (`src/party/party.rs`)
 
 Main orchestrator. `Party::run()` sets up all pipelines:
+
 1. Creates multicast socket via `create_multicast_socket()`
 2. Creates `NetworkSender` for packet transmission
 3. Creates `NtpService`, `SyncedAudioStreamManager` with their background tasks
@@ -214,7 +230,14 @@ Main orchestrator. `Party::run()` sets up all pipelines:
 ## Entry Point
 
 `src/main.rs`:
+
 1. Initialize logger
 2. Create `PartyConfig::default()`
 3. Create `AppState::new(config)` which internally creates and runs `Party`
 4. Launch Dioxus desktop app with `AppState` as context
+
+# Developing notes
+
+## Environment
+
+Environment is managed via nix flake and devshell. Try `nix develop --command cargo` for cargo.

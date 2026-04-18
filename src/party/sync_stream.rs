@@ -51,14 +51,27 @@ pub struct SyncedStreamMeta {
 ///
 /// Contains raw compressed bytes from the original audio file.
 /// Timing is calculated from sequence_number + control messages.
+///
+/// Large payloads (e.g. ALAC frames of 3–8 KB) exceed the link MTU, so we
+/// split them across multiple `SyncedFrame`s that share the same
+/// `sequence_number` but differ in `fragment_idx`. Receivers reassemble by
+/// seq before decoding. Frames that fit in a single datagram use
+/// `fragment_idx = 0, fragment_total = 1`.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone)]
 #[rkyv(compare(PartialEq))]
 pub struct SyncedFrame {
     pub stream_id: SyncedStreamId,
     pub sequence_number: u64,
     pub dur: u32,
+    pub fragment_idx: u16,
+    pub fragment_total: u16,
     pub data: Vec<u8>,
 }
+
+/// Max bytes of compressed audio per fragment. Leaves headroom under a
+/// conservative 1400-byte UDP payload for the rest of `SyncedFrame`,
+/// the `NetworkPacket::Synced` wrapper, and rkyv framing overhead.
+pub const MAX_FRAGMENT_DATA: usize = 1200;
 
 /// Raw packet stored for sender-side retransmission.
 #[derive(Clone)]
@@ -74,11 +87,14 @@ pub struct DecodedFrame<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
 }
 
 impl SyncedFrame {
-    pub fn new(stream_id: SyncedStreamId, sequence_number: u64, dur: u32, data: Vec<u8>) -> Self {
+    /// Build a non-fragmented frame (`fragment_total = 1`).
+    pub fn whole(stream_id: SyncedStreamId, sequence_number: u64, dur: u32, data: Vec<u8>) -> Self {
         Self {
             stream_id,
             sequence_number,
             dur,
+            fragment_idx: 0,
+            fragment_total: 1,
             data,
         }
     }
@@ -132,7 +148,10 @@ struct BufferEntry<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     decoder: Box<dyn symphonia::core::codecs::Decoder>,
     resampler: Option<FftFixedIn<f32>>,
     meta: SyncedStreamMeta,
+    /// Out of order frames
     pending_raw: HashMap<u64, SyncedFrame>,
+    /// Long frames are segmented to fit MTU, here we store segments
+    pending_fragments: HashMap<u64, FragmentSet>,
     next_decode_seq: u64,
     decoded_frames: HashMap<u64, DecodedFrame<Sample, CHANNELS, SAMPLE_RATE>>,
     last_seen: Instant,
@@ -140,6 +159,16 @@ struct BufferEntry<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     playing: bool,
     start_party_time: u64,
     start_seq: u64,
+}
+
+/// Collects fragments of a single logical `SyncedFrame` (same seq) until
+/// complete. Cleared on seek or stream teardown; otherwise it just stays
+/// until the full set arrives (possibly via retransmission).
+struct FragmentSet {
+    total: u16,
+    received_count: u16,
+    dur: u32,
+    parts: Vec<Option<Vec<u8>>>,
 }
 
 /// Control commands for synced streams.
@@ -266,6 +295,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 resampler,
                 meta,
                 pending_raw: HashMap::new(),
+                pending_fragments: HashMap::new(),
                 next_decode_seq: 1,
                 decoded_frames: HashMap::new(),
                 last_seen: Instant::now(),
@@ -307,6 +337,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                     // Seeking forward: update decode position, clear pending
                     entry.next_decode_seq = seq;
                     entry.pending_raw.clear();
+                    entry.pending_fragments.clear();
                 }
                 info!(
                     "Stream {:?} starting at seq {} at party time {}",
@@ -325,6 +356,8 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     ///
     /// Frames are decoded in sequence order to maintain correct decoder state.
     /// Out-of-order frames are buffered until their predecessors arrive.
+    /// Fragmented frames (`fragment_total > 1`) are reassembled by seq before
+    /// being fed to the same buffering path.
     pub fn receive(&self, source_addr: SocketAddr, frame: SyncedFrame) {
         let key = BufferKey {
             source_addr,
@@ -340,13 +373,22 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
         let seq = frame.sequence_number;
 
-        // Duplicate or old frame
+        // Duplicate or old frame (already decoded or reassembled).
         if seq < entry.next_decode_seq
             || entry.decoded_frames.contains_key(&seq)
             || entry.pending_raw.contains_key(&seq)
         {
             return;
         }
+
+        let frame = if frame.fragment_total <= 1 {
+            frame
+        } else {
+            match Self::insert_fragment(entry, frame) {
+                Some(assembled) => assembled,
+                None => return,
+            }
+        };
 
         if seq == entry.next_decode_seq {
             Self::decode_frame(entry, &frame);
@@ -359,6 +401,61 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         } else {
             entry.pending_raw.insert(seq, frame);
         }
+    }
+
+    /// Insert a fragment; return the assembled whole frame once complete.
+    fn insert_fragment<const C: usize, const R: u32>(
+        entry: &mut BufferEntry<Sample, C, R>,
+        frame: SyncedFrame,
+    ) -> Option<SyncedFrame>
+    where
+        Sample: AudioSample,
+    {
+        let seq = frame.sequence_number;
+        let total = frame.fragment_total;
+        let idx = frame.fragment_idx;
+
+        if total == 0 || idx >= total {
+            warn!("Bad fragment for seq={}: idx={}, total={}", seq, idx, total);
+            return None;
+        }
+
+        let set = entry
+            .pending_fragments
+            .entry(seq)
+            .or_insert_with(|| FragmentSet {
+                total,
+                received_count: 0,
+                dur: frame.dur,
+                parts: vec![None; total as usize],
+            });
+
+        if set.total != total {
+            warn!(
+                "Fragment total mismatch for seq={} ({} vs {}), dropping",
+                seq, set.total, total
+            );
+            return None;
+        }
+
+        let slot = &mut set.parts[idx as usize];
+        if slot.is_none() {
+            *slot = Some(frame.data);
+            set.received_count += 1;
+        }
+
+        if set.received_count < set.total {
+            return None;
+        }
+
+        let set = entry.pending_fragments.remove(&seq)?;
+        let total_len: usize = set.parts.iter().flatten().map(|v| v.len()).sum();
+        let mut data = Vec::with_capacity(total_len);
+        for part in set.parts.into_iter().flatten() {
+            data.extend_from_slice(&part);
+        }
+
+        Some(SyncedFrame::whole(entry.meta.stream_id, seq, set.dur, data))
     }
 
     fn decode_frame<const C: usize, const R: u32>(
