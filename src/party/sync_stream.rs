@@ -535,6 +535,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         let num_samples = num_frames * CHANNELS;
         let mut mixed: Vec<i64> = vec![0i64; num_samples];
         let mut source_count = 0usize;
+        let mut actual_len = 0usize;
 
         for mut entry in self.buffers.iter_mut() {
             if !entry.playing || entry.start_party_time > party_now {
@@ -546,8 +547,10 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             };
 
             source_count += 1;
-            entry.samples_played += buf.data().len() as u64 / CHANNELS as u64;
-            for (i, sample) in buf.data().iter().enumerate() {
+            let buf_data = buf.data();
+            actual_len = actual_len.max(buf_data.len());
+            entry.samples_played += buf_data.len() as u64 / CHANNELS as u64;
+            for (i, sample) in buf_data.iter().enumerate() {
                 mixed[i] += sample.to_i64_for_mix();
             }
         }
@@ -556,9 +559,10 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             return None;
         }
 
-        let result: Vec<Sample> = mixed
-            .into_iter()
-            .map(|s| Sample::from_i64_mixed(s, source_count))
+        // Only return the actual amount of audio produced, not the full requested size.
+        let result: Vec<Sample> = mixed[..actual_len]
+            .iter()
+            .map(|s| Sample::from_i64_mixed(*s, source_count))
             .collect();
         AudioBuffer::new(result).ok()
     }

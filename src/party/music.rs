@@ -118,6 +118,7 @@ impl MusicStream {
             last_pause_seq: 1,
             last_start_party_time: start_at,
             last_start_seq: 1,
+            frame_dur_us: None,
         };
 
         let handle = thread::spawn(move || {
@@ -284,6 +285,9 @@ struct StreamContext<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     last_pause_seq: u64,
     last_start_party_time: u64,
     last_start_seq: u64,
+    /// Microseconds per compressed frame, computed from the first packet's dur.
+    /// `None` until the first packet is read.
+    frame_dur_us: Option<u64>,
 }
 
 impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u32>
@@ -318,8 +322,17 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
             return;
         };
 
-        let est_packets = (duration * self.sample_rate() as f64 / 1152.0) as u64;
+        // Read first batch to get frame_dur_us for packet count estimation
+        self.read_packets();
+
         let total_samples = (duration * self.sample_rate() as f64) as u64;
+        // Estimate total packets from first packet's dur, or fall back to 1024
+        let samples_per_frame = self
+            .vault
+            .get(&1)
+            .map(|p| p.dur as u64)
+            .unwrap_or(1024);
+        let est_packets = total_samples / samples_per_frame;
         self.meta.total_frames = est_packets;
         self.meta.total_samples = total_samples;
         self.progress
@@ -446,6 +459,11 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
             match self.source.next_packet() {
                 Ok(Some(raw)) => {
                     self.frames_read += 1;
+                    // Compute frame duration from the first packet
+                    if self.frame_dur_us.is_none() && raw.dur > 0 {
+                        self.frame_dur_us =
+                            Some(raw.dur as u64 * 1_000_000 / self.sample_rate() as u64);
+                    }
                     self.vault.insert(self.frames_read, raw);
                 }
                 Ok(None) => {
@@ -478,8 +496,9 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
     fn send_packets(&mut self) {
         let now = Instant::now();
         let elapsed_us = now.duration_since(self.last_send_time).as_micros() as u64;
-        let avg_frame_dur_us = 20_000u64;
-        let frames_to_send = (elapsed_us * SEND_RATE_MULTIPLIER as u64) / avg_frame_dur_us;
+        // Use actual frame duration; fall back to 20ms if not yet known.
+        let frame_dur_us = self.frame_dur_us.unwrap_or(20_000);
+        let frames_to_send = (elapsed_us * SEND_RATE_MULTIPLIER as u64) / frame_dur_us;
 
         if frames_to_send == 0 {
             return;
