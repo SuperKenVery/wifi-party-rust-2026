@@ -230,10 +230,26 @@ pub fn extract_and_resample<T: AudioSample, const CHANNELS: usize, const SAMPLE_
 
     match resampler {
         Some(r) => {
-            let resampled = r
-                .process(&extracted.channels, None)
-                .expect("Resampling failed");
-            channels_to_interleaved(&resampled)
+            let chunk_size = r.input_frames_next();
+            let mut all_channels: Vec<Vec<f32>> = vec![Vec::new(); CHANNELS];
+            let total_frames = extracted.channels[0].len();
+            let mut offset = 0;
+            while offset < total_frames {
+                let end = (offset + chunk_size).min(total_frames);
+                let chunks: Vec<&[f32]> = extracted
+                    .channels
+                    .iter()
+                    .map(|c| &c[offset..end])
+                    .collect();
+                let resampled = r
+                    .process(chunks.as_slice(), None)
+                    .expect("Resampling failed");
+                for (ch, data) in all_channels.iter_mut().enumerate() {
+                    data.extend_from_slice(&resampled[ch]);
+                }
+                offset = end;
+            }
+            channels_to_interleaved(&all_channels)
         }
         None => {
             let num_frames = extracted.channels[0].len();
