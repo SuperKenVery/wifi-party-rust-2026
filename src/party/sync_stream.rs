@@ -656,19 +656,19 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         let mut result = Vec::new();
 
         for entry in self.buffers.iter() {
-            let mut missing = Vec::new();
             let next_feed = entry.next_feed_seq;
 
-            // Check from next_feed_seq up to a lookahead window.
-            let end_check = (next_feed + 200).min(entry.meta.total_frames);
+            // The highest seq we've actually received is the max of
+            // (next_feed_seq - 1) and pending_raw keys. If pending_raw is
+            // empty, everything up to next_feed_seq has been fed — no gaps.
+            let Some(&highest) = entry.pending_raw.keys().max() else {
+                continue;
+            };
 
-            // Missing frames are those in pending_raw gaps plus anything
-            // beyond next_feed_seq that we haven't received.
-            // Since we feed sequentially, any seq < next_feed_seq is already
-            // fed. Gaps are in the pending_raw range.
-            for seq in next_feed..=end_check {
-                if !entry.pending_raw.contains_key(&seq) && seq >= next_feed {
-                    // This seq hasn't arrived yet.
+            // Scan gaps between next_feed_seq and the highest pending packet.
+            let mut missing = Vec::new();
+            for seq in next_feed..highest {
+                if !entry.pending_raw.contains_key(&seq) {
                     missing.push(seq);
                     if missing.len() >= 100 {
                         break;
