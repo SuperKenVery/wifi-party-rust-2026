@@ -10,7 +10,7 @@
 use std::collections::VecDeque;
 use std::io::Cursor;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -27,14 +27,15 @@ use tracing::{info, warn};
 use crate::audio::AudioSample;
 use crate::audio::symphonia_compat::WireCodecParams;
 use crate::io::NetworkSender;
+use crate::party::network_stream::NetworkStream;
 use crate::party::ntp::NtpService;
 use crate::party::sync_stream::SyncedControl;
 use crate::party::sync_stream::{
-    MAX_FRAGMENT_DATA, RawPacket, SyncedAudioStreamManager, SyncedFrame, SyncedStreamId,
-    SyncedStreamMeta, new_stream_id,
+    MAX_FRAGMENT_DATA, RawPacket, RequestFramesPayload, SyncedAudioStreamManager, SyncedFrame,
+    SyncedStreamId, SyncedStreamMeta, new_stream_id,
 };
 use crate::party::tagged_packet::{
-    SYNCED_CONTROL_TAG, SYNCED_META_TAG, SYNCED_TAG, TaggedPacket,
+    PacketTag, REQUEST_FRAMES_TAG, SYNCED_CONTROL_TAG, SYNCED_META_TAG, SYNCED_TAG, TaggedPacket,
 };
 use crate::pipeline::Pushable;
 use crate::state::MusicStreamProgress;
@@ -177,6 +178,94 @@ impl MusicStream {
 impl Drop for MusicStream {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+/// Owns outgoing music streams and routes retransmit/control operations by stream id.
+///
+/// Implements [`NetworkStream`] so inbound `RequestFrames` packets are dispatched
+/// to the corresponding outgoing stream without `Party` having to wire it up.
+pub struct MusicStreamRegistry {
+    streams: Mutex<Vec<MusicStream>>,
+}
+
+impl MusicStreamRegistry {
+    pub fn new() -> Self {
+        Self {
+            streams: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn push(&self, stream: MusicStream) {
+        self.streams.lock().unwrap().push(stream);
+    }
+
+    pub fn clear(&self) {
+        self.streams.lock().unwrap().clear();
+    }
+
+    pub fn handle_retransmission(&self, stream_id: SyncedStreamId, seqs: Vec<u64>) {
+        let streams = self.streams.lock().unwrap();
+        for stream in streams.iter() {
+            if stream.stream_id() == stream_id {
+                stream.handle_retransmission_request(seqs);
+                break;
+            }
+        }
+    }
+
+    pub fn pause(&self, stream_id: SyncedStreamId) -> Result<()> {
+        let streams = self.streams.lock().unwrap();
+        for stream in streams.iter() {
+            if stream.stream_id() == stream_id {
+                return stream.pause();
+            }
+        }
+        Err(anyhow!("Stream not found"))
+    }
+
+    pub fn resume(&self, stream_id: SyncedStreamId) -> Result<()> {
+        let streams = self.streams.lock().unwrap();
+        for stream in streams.iter() {
+            if stream.stream_id() == stream_id {
+                return stream.resume();
+            }
+        }
+        Err(anyhow!("Stream not found"))
+    }
+
+    pub fn seek(&self, stream_id: SyncedStreamId, position_ms: u64) -> Result<()> {
+        let streams = self.streams.lock().unwrap();
+        for stream in streams.iter() {
+            if stream.stream_id() == stream_id {
+                return stream.seek(position_ms);
+            }
+        }
+        Err(anyhow!("Stream not found"))
+    }
+}
+
+impl Default for MusicStreamRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<S: AudioSample, const C: usize, const SR: u32> NetworkStream<S, C, SR> for MusicStreamRegistry {
+    fn tags(&self) -> &'static [PacketTag] {
+        &[REQUEST_FRAMES_TAG]
+    }
+
+    fn handle(
+        &self,
+        _source: SocketAddr,
+        _tag: PacketTag,
+        bytes: &[u8],
+    ) -> anyhow::Result<()> {
+        let req = rkyv::from_bytes::<RequestFramesPayload, rkyv::rancor::Error>(bytes)
+            .map_err(|e| anyhow::anyhow!("RequestFramesPayload deserialize: {:?}", e))?;
+        self.handle_retransmission(req.stream_id, req.seqs);
+        Ok(())
     }
 }
 

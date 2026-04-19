@@ -4,8 +4,8 @@
 //! audio sharing pipeline.
 
 use std::net::UdpSocket;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -23,47 +23,14 @@ use crate::{pull_chain, push_chain};
 
 use super::combinator::{Mixer, Tee};
 use super::config::PartyConfig;
-use super::music::MusicStream;
+use super::music::{MusicStream, MusicStreamRegistry};
 use super::network_stream::{NetworkStream, StreamRegistry};
 use super::ntp::NtpService;
 use super::packet_dispatcher::PacketDispatcher;
 use super::realtime_stream::{
     RealtimeAudioStream, RealtimeFramePacker, RealtimeStreamId, StreamSnapshot,
 };
-use super::sync_stream::{RequestFramesPayload, SyncedAudioStreamManager, SyncedStreamState};
-use super::tagged_packet::{PacketTag, REQUEST_FRAMES_TAG};
-
-/// Handles `RequestFrames` packets on behalf of active music streams.
-struct RetransmitHandler {
-    music_streams: Arc<Mutex<Vec<MusicStream>>>,
-}
-
-impl<S: crate::audio::AudioSample, const C: usize, const SR: u32> NetworkStream<S, C, SR>
-    for RetransmitHandler
-{
-    fn tags(&self) -> &'static [PacketTag] {
-        &[REQUEST_FRAMES_TAG]
-    }
-
-    fn handle(
-        &self,
-        _source: std::net::SocketAddr,
-        _tag: PacketTag,
-        bytes: &[u8],
-    ) -> anyhow::Result<()> {
-        let req =
-            rkyv::from_bytes::<RequestFramesPayload, rkyv::rancor::Error>(bytes)
-                .map_err(|e| anyhow::anyhow!("RequestFramesPayload deserialize: {:?}", e))?;
-        let streams = self.music_streams.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
-        for stream in streams.iter() {
-            if stream.stream_id() == req.stream_id {
-                stream.handle_retransmission_request(req.seqs);
-                break;
-            }
-        }
-        Ok(())
-    }
-}
+use super::sync_stream::{SyncedAudioStreamManager, SyncedStreamState};
 
 pub struct Party<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     state: Arc<AppState>,
@@ -72,7 +39,7 @@ pub struct Party<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     synced_stream: Option<Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>>,
     ntp_service: Option<Arc<NtpService>>,
     network_sender: Option<NetworkSender>,
-    music_streams: Arc<Mutex<Vec<MusicStream>>>,
+    music_streams: Arc<MusicStreamRegistry>,
     mic_input: Option<Arc<AudioInput<Sample, CHANNELS, SAMPLE_RATE>>>,
     _audio_streams: Vec<cpal::Stream>,
     shutdown: Arc<AtomicBool>,
@@ -91,7 +58,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             synced_stream: None,
             ntp_service: None,
             network_sender: None,
-            music_streams: Arc::new(Mutex::new(Vec::new())),
+            music_streams: Arc::new(MusicStreamRegistry::new()),
             mic_input: None,
             _audio_streams: Vec::new(),
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -123,35 +90,15 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         stream_id: super::sync_stream::SyncedStreamId,
         seqs: Vec<u64>,
     ) {
-        let music_streams = self.music_streams.lock().unwrap();
-        for stream in music_streams.iter() {
-            if stream.stream_id() == stream_id {
-                stream.handle_retransmission_request(seqs);
-                break;
-            }
-        }
+        self.music_streams.handle_retransmission(stream_id, seqs);
     }
 
     pub fn pause_music(&self, stream_id: super::sync_stream::SyncedStreamId) -> Result<()> {
-        let music_streams = self.music_streams.lock().unwrap();
-        for stream in music_streams.iter() {
-            if stream.stream_id() == stream_id {
-                stream.pause()?;
-                return Ok(());
-            }
-        }
-        anyhow::bail!("Stream not found")
+        self.music_streams.pause(stream_id)
     }
 
     pub fn resume_music(&self, stream_id: super::sync_stream::SyncedStreamId) -> Result<()> {
-        let music_streams = self.music_streams.lock().unwrap();
-        for stream in music_streams.iter() {
-            if stream.stream_id() == stream_id {
-                stream.resume()?;
-                return Ok(());
-            }
-        }
-        anyhow::bail!("Stream not found")
+        self.music_streams.resume(stream_id)
     }
 
     pub fn seek_music(
@@ -159,14 +106,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         stream_id: super::sync_stream::SyncedStreamId,
         position_ms: u64,
     ) -> Result<()> {
-        let music_streams = self.music_streams.lock().unwrap();
-        for stream in music_streams.iter() {
-            if stream.stream_id() == stream_id {
-                stream.seek(position_ms)?;
-                return Ok(());
-            }
-        }
-        anyhow::bail!("Stream not found")
+        self.music_streams.seek(stream_id, position_ms)
     }
 }
 
@@ -204,9 +144,7 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
         registry.register(realtime_stream.clone() as Arc<dyn NetworkStream<_, _, _>>);
         registry.register(synced_stream.clone() as Arc<dyn NetworkStream<_, _, _>>);
         registry.register(ntp_service.clone() as Arc<dyn NetworkStream<_, _, _>>);
-        registry.register(Arc::new(RetransmitHandler {
-            music_streams: self.music_streams.clone(),
-        }) as Arc<dyn NetworkStream<_, _, _>>);
+        registry.register(self.music_streams.clone() as Arc<dyn NetworkStream<_, _, _>>);
         let registry = Arc::new(registry);
 
         thread::spawn({
@@ -327,10 +265,7 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
 
         self._audio_streams.clear();
         self.mic_input = None;
-        {
-            let mut music_streams = self.music_streams.lock().unwrap();
-            music_streams.clear();
-        }
+        self.music_streams.clear();
         self.network_sender = None;
         self.ntp_service = None;
         self.synced_stream = None;
@@ -376,8 +311,7 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
             progress,
         )?;
 
-        let mut music_streams = self.music_streams.lock().unwrap();
-        music_streams.push(music_stream);
+        self.music_streams.push(music_stream);
 
         Ok(())
     }
