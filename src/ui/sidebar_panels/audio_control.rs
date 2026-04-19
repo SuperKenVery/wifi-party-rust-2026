@@ -428,7 +428,7 @@ fn DeviceSettings() -> Element {
                 && let Some(party) = party_guard.as_mut()
                 && let Err(e) = party.restart_with_config(config)
             {
-                tracing::error!("Failed to restart party: {}", e);
+                tracing::error!("Failed to restart party: {:?}", e);
             }
         }
     };

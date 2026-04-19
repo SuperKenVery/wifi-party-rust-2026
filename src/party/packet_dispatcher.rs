@@ -9,7 +9,6 @@
 
 use std::net::{IpAddr, UdpSocket};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::task::JoinHandle;
 use tracing::{error, info};
@@ -26,10 +25,9 @@ impl PacketDispatcher {
         local_ips: Vec<IpAddr>,
         state: Arc<AppState>,
         registry: Arc<StreamRegistry<S, C, SR>>,
-        shutdown: Arc<AtomicBool>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
-            Self::run(socket, local_ips, state, registry, shutdown).await;
+            Self::run(socket, local_ips, state, registry).await;
         })
     }
 
@@ -38,7 +36,6 @@ impl PacketDispatcher {
         local_ips: Vec<IpAddr>,
         state: Arc<AppState>,
         registry: Arc<StreamRegistry<S, C, SR>>,
-        shutdown: Arc<AtomicBool>,
     ) {
         info!("Packet dispatcher started, local IPs: {:?}", local_ips);
 
@@ -49,7 +46,7 @@ impl PacketDispatcher {
         *state.connection_status.lock().unwrap() = ConnectionStatus::Connected;
 
         let mut buf = [0u8; 65536];
-        while !shutdown.load(Ordering::Relaxed) {
+        loop {
             match socket.recv_from(&mut buf).await {
                 Ok((size, source_addr)) => {
                     if local_ips.contains(&source_addr.ip()) {
@@ -59,12 +56,8 @@ impl PacketDispatcher {
                         error!("Packet handling error: {:?}", e);
                     }
                 }
-                Err(e) => {
-                    error!("Failed to receive UDP packet: {:?}", e);
-                }
+                Err(e) => error!("Failed to receive UDP packet: {:?}", e),
             }
         }
-
-        info!("Packet dispatcher shutting down");
     }
 }

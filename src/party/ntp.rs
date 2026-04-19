@@ -32,7 +32,6 @@
 //! - Party clock persists even if original host leaves
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -128,15 +127,13 @@ impl Default for NtpServiceInner {
 pub struct NtpService {
     inner: Mutex<NtpServiceInner>,
     sender: NetworkSender,
-    shutdown_flag: Arc<AtomicBool>,
 }
 
 impl NtpService {
-    pub fn new(sender: NetworkSender, shutdown_flag: Arc<AtomicBool>) -> Arc<Self> {
+    pub fn new(sender: NetworkSender) -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(NtpServiceInner::default()),
             sender,
-            shutdown_flag,
         })
     }
 
@@ -318,7 +315,7 @@ impl NtpService {
         let mut first_host_check = interval(Duration::from_millis(100));
         let mut response_poll = interval(Duration::from_millis(5));
 
-        while !self.shutdown_flag.load(Ordering::SeqCst) {
+        loop {
             tokio::select! {
                 _ = sync_interval.tick() => {
                     if let Some(req) = self.create_sync_request() {
@@ -371,7 +368,6 @@ impl NtpService {
             }
         }
 
-        info!("NTP service task shutting down");
     }
 }
 
@@ -393,19 +389,18 @@ mod tests {
     use super::*;
     use std::net::UdpSocket;
 
-    fn test_service() -> (Arc<NtpService>, Arc<AtomicBool>) {
+    fn test_service() -> Arc<NtpService> {
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         let addr = "127.0.0.1:9999".parse().unwrap();
         let sender = NetworkSender::new(socket, addr);
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let service = NtpService::new(sender, shutdown.clone());
+        let service = NtpService::new(sender);
         service.start();
-        (service, shutdown)
+        service
     }
 
     #[tokio::test]
     async fn test_first_host_sync() {
-        let (service, shutdown) = test_service();
+        let service = test_service();
         assert!(!service.is_synced());
 
         service.become_first_host();
@@ -414,13 +409,11 @@ mod tests {
         let party_time = service.party_now();
         let local_time = NtpService::local_now_micros();
         assert!((party_time as i64 - local_time as i64).abs() < 1000);
-
-        shutdown.store(true, Ordering::SeqCst);
     }
 
     #[tokio::test]
     async fn test_sync_request_creation() {
-        let (service, shutdown) = test_service();
+        let service = test_service();
 
         sleep(Duration::from_millis(150)).await;
 
@@ -429,13 +422,11 @@ mod tests {
             debug.pending_requests >= 1,
             "NTP service should have sent at least one sync request"
         );
-
-        shutdown.store(true, Ordering::SeqCst);
     }
 
     #[tokio::test]
     async fn test_offset_calculation() {
-        let (service, shutdown) = test_service();
+        let service = test_service();
 
         sleep(Duration::from_millis(150)).await;
 
@@ -456,7 +447,5 @@ mod tests {
         service.on_response_received(request_id, t1, t2, t3);
 
         assert!(service.is_synced());
-
-        shutdown.store(true, Ordering::SeqCst);
     }
 }

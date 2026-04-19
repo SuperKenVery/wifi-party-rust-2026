@@ -5,7 +5,6 @@
 
 use std::net::UdpSocket;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -42,7 +41,8 @@ pub struct Party<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     music_streams: Arc<MusicStreamRegistry>,
     mic_input: Option<Arc<AudioInput<Sample, CHANNELS, SAMPLE_RATE>>>,
     _audio_streams: Vec<cpal::Stream>,
-    shutdown: Arc<AtomicBool>,
+    dispatcher_abort: Option<tokio::task::AbortHandle>,
+    network_thread: Option<thread::JoinHandle<()>>,
     #[allow(dead_code)]
     multicast_lock: Option<MulticastLock>,
 }
@@ -61,7 +61,8 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             music_streams: Arc::new(MusicStreamRegistry::new()),
             mic_input: None,
             _audio_streams: Vec::new(),
-            shutdown: Arc::new(AtomicBool::new(false)),
+            dispatcher_abort: None,
+            network_thread: None,
             multicast_lock: None,
         }
     }
@@ -126,7 +127,7 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
             .context("Failed to clone socket for sender")?;
         let network_sender = NetworkSender::new(send_socket, multicast_addr);
 
-        let ntp_service = NtpService::new(network_sender.clone(), self.shutdown.clone());
+        let ntp_service = NtpService::new(network_sender.clone());
 
         let ntp_for_synced = ntp_service.clone();
         let synced_stream = Arc::new(SyncedAudioStreamManager::new(move || {
@@ -147,16 +148,15 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
         registry.register(self.music_streams.clone() as Arc<dyn NetworkStream<_, _, _>>);
         let registry = Arc::new(registry);
 
-        thread::spawn({
-            let socket = socket;
-            let local_ips = local_ips;
+        let (abort_tx, abort_rx) = std::sync::mpsc::sync_channel(1);
+
+        self.network_thread = Some(thread::spawn({
             let state = self.state.clone();
             let realtime_stream = realtime_stream.clone();
             let synced_stream = synced_stream.clone();
             let ntp_service = ntp_service.clone();
             let network_sender = network_sender.clone();
-            let registry = registry.clone();
-            let shutdown = self.shutdown.clone();
+            let registry = registry;
 
             move || {
                 let rt = tokio::runtime::Builder::new_multi_thread()
@@ -166,22 +166,19 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
 
                 rt.block_on(async {
                     ntp_service.start();
-                    realtime_stream.start_cleanup_task(shutdown.clone());
-                    synced_stream.start_cleanup_task(shutdown.clone());
-                    synced_stream.start_retransmit_task(network_sender, shutdown.clone());
+                    realtime_stream.start_cleanup_task();
+                    synced_stream.start_cleanup_task();
+                    synced_stream.start_retransmit_task(network_sender);
+                    Self::start_host_sync_task_async(state.clone(), realtime_stream);
 
-                    PacketDispatcher::start(
-                        socket,
-                        local_ips,
-                        state,
-                        registry,
-                        shutdown.clone(),
-                    )
-                    .await
-                    .ok();
+                    let handle = PacketDispatcher::start(socket, local_ips, state, registry);
+                    let _ = abort_tx.send(handle.abort_handle());
+                    handle.await.ok();
                 });
             }
-        });
+        }));
+
+        self.dispatcher_abort = Some(abort_rx.recv().expect("network thread failed to start"));
 
         let loopback_buffer = Arc::new(SimpleBuffer::<Sample, CHANNELS, SAMPLE_RATE>::new());
         let network_sink_arc: Arc<dyn Pushable<_>> = Arc::new(network_sender);
@@ -251,8 +248,6 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
         }
         self._audio_streams = streams;
 
-        self.start_host_sync_task();
-
         info!("Party pipelines configured successfully");
 
         Ok(())
@@ -261,7 +256,9 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
     pub fn restart_with_config(&mut self, config: PartyConfig) -> Result<()> {
         info!("Restarting Party with new config...");
 
-        self.shutdown.store(true, Ordering::Relaxed);
+        if let Some(abort) = self.dispatcher_abort.take() {
+            abort.abort();
+        }
 
         self._audio_streams.clear();
         self.mic_input = None;
@@ -271,9 +268,12 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
         self.synced_stream = None;
         self.multicast_lock = None;
 
+        if let Some(handle) = self.network_thread.take() {
+            let _ = handle.join();
+        }
+
         self.config = config;
         self.realtime_stream = Arc::new(RealtimeAudioStream::new());
-        self.shutdown = Arc::new(AtomicBool::new(false));
 
         self.run()
     }
@@ -316,14 +316,14 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
         Ok(())
     }
 
-    fn start_host_sync_task(&self) {
-        let state = self.state.clone();
-        let realtime_stream = self.realtime_stream.clone();
-        let shutdown = self.shutdown.clone();
-
-        thread::spawn(move || {
-            while !shutdown.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_millis(100));
+    fn start_host_sync_task_async(
+        state: Arc<AppState>,
+        realtime_stream: Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
+    ) {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(100));
+            loop {
+                interval.tick().await;
 
                 let mut active_host_ids = realtime_stream.active_hosts();
                 active_host_ids.sort_by_key(|h| h.to_string());

@@ -29,7 +29,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -649,11 +649,11 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     /// Starts the background cleanup task.
     ///
     /// Must be called from within a Tokio runtime context.
-    pub fn start_cleanup_task(self: &Arc<Self>, shutdown: Arc<AtomicBool>) {
+    pub fn start_cleanup_task(self: &Arc<Self>) {
         let stream = self.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
-            while !shutdown.load(Ordering::Relaxed) {
+            loop {
                 interval.tick().await;
                 stream.cleanup_stale();
             }
@@ -664,17 +664,13 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     ///
     /// Periodically checks for missing frames and sends retransmission requests.
     /// Must be called from within a Tokio runtime context.
-    pub fn start_retransmit_task(
-        self: &Arc<Self>,
-        sender: crate::io::NetworkSender,
-        shutdown: Arc<AtomicBool>,
-    ) {
+    pub fn start_retransmit_task(self: &Arc<Self>, sender: crate::io::NetworkSender) {
         use crate::pipeline::Pushable;
 
         let stream = self.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(200));
-            while !shutdown.load(Ordering::Relaxed) {
+            loop {
                 interval.tick().await;
                 for (_addr, stream_id, seqs) in stream.get_missing_frames() {
                     let payload =
