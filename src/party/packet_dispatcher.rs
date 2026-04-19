@@ -76,7 +76,7 @@ impl PacketDispatcher {
         while !shutdown.load(Ordering::Relaxed) {
             match socket.recv_from(&mut buf).await {
                 Ok((size, source_addr)) => {
-                    Self::handle_packet(
+                    if let Err(e) = Self::handle_packet(
                         &buf[..size],
                         source_addr,
                         &local_ips,
@@ -84,7 +84,9 @@ impl PacketDispatcher {
                         &realtime_stream,
                         &synced_stream,
                         &ntp_service,
-                    );
+                    ) {
+                        error!("Packet handling error: {:?}", e);
+                    }
                 }
                 Err(e) => {
                     error!("Failed to receive UDP packet: {:?}", e);
@@ -103,19 +105,13 @@ impl PacketDispatcher {
         realtime_stream: &Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
         synced_stream: &Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>,
         ntp_service: &Arc<NtpService>,
-    ) {
+    ) -> anyhow::Result<()> {
         if local_ips.contains(&source_addr.ip()) {
-            return;
+            return Ok(());
         }
 
-        let packet: NetworkPacket =
-            match rkyv::from_bytes::<NetworkPacket, rkyv::rancor::Error>(data) {
-                Ok(p) => p,
-                Err(e) => {
-                    warn!("Deserialization error: {:?}", e);
-                    return;
-                }
-            };
+        let packet: NetworkPacket = rkyv::from_bytes::<NetworkPacket, rkyv::rancor::Error>(data)
+            .map_err(|e| anyhow::anyhow!("Deserialization error: {:?}", e))?;
 
         match packet {
             NetworkPacket::Realtime(frame) => {
@@ -131,15 +127,17 @@ impl PacketDispatcher {
                 synced_stream.receive_control(source_addr, control);
             }
             NetworkPacket::RequestFrames { stream_id, seqs } => {
-                if let Ok(party) = state.party.lock()
-                    && let Some(party) = party.as_ref()
-                {
-                    party.handle_retransmission_request(stream_id, seqs);
-                }
+                let party = state.party.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+                let party = party
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Party not initialized"))?;
+                party.handle_retransmission_request(stream_id, seqs);
             }
             NetworkPacket::Ntp(ntp_packet) => {
                 ntp_service.handle_packet(ntp_packet);
             }
         }
+
+        Ok(())
     }
 }
