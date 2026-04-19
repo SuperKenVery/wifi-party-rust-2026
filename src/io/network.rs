@@ -24,7 +24,7 @@ use network_interface::NetworkInterfaceConfig;
 use socket2::{Domain, Protocol, Socket, Type};
 use tracing::{error, info, warn};
 
-use crate::party::realtime_stream::NetworkPacket;
+use crate::party::tagged_packet::TaggedPacket;
 use crate::pipeline::Pushable;
 
 pub const MULTICAST_ADDR_V4: &str = "239.255.43.2";
@@ -319,13 +319,13 @@ impl NetworkSender {
         }
     }
 
-    fn send_packet(&self, packet: &NetworkPacket) {
+    fn send_packet(&self, packet: &TaggedPacket) {
         if let Err(error) = self.send_inner(packet) {
             error!("{:?}", error);
         }
     }
 
-    fn send_inner(&self, packet: &NetworkPacket) -> Result<()> {
+    fn send_inner(&self, packet: &TaggedPacket) -> Result<()> {
         let serialized =
             rkyv::to_bytes::<rkyv::rancor::Error>(packet).context("Failed to serialize packet")?;
 
@@ -343,8 +343,8 @@ impl NetworkSender {
     }
 }
 
-impl Pushable<NetworkPacket> for NetworkSender {
-    fn push(&self, input: NetworkPacket) {
+impl Pushable<TaggedPacket> for NetworkSender {
+    fn push(&self, input: TaggedPacket) {
         self.send_packet(&input);
     }
 }

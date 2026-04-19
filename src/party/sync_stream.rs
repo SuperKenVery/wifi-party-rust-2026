@@ -42,6 +42,10 @@ use crate::audio::buffers::simple_buffer::SimpleBuffer;
 use crate::audio::decoders::{CompressedPacket, FftResampler, Interleaver, PacketCounter, SymphoniaDecoder};
 use crate::audio::frame::AudioBuffer;
 use crate::audio::symphonia_compat::WireCodecParams;
+use crate::party::network_stream::NetworkStream;
+use crate::party::tagged_packet::{
+    PacketTag, REQUEST_FRAMES_TAG, SYNCED_CONTROL_TAG, SYNCED_META_TAG, SYNCED_TAG, TaggedPacket,
+};
 use crate::pipeline::{GraphNode, Pullable, Pushable};
 
 const SYNCED_STREAM_TIMEOUT: Duration = Duration::from_secs(30);
@@ -161,6 +165,13 @@ struct FragmentSet {
     received_count: u16,
     dur: u32,
     parts: Vec<Option<Vec<u8>>>,
+}
+
+/// Wire payload for retransmission requests.
+#[derive(Archive, Serialize, Deserialize, Debug, Clone)]
+pub struct RequestFramesPayload {
+    pub stream_id: SyncedStreamId,
+    pub seqs: Vec<u64>,
 }
 
 /// Control commands for synced streams.
@@ -658,7 +669,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         sender: crate::io::NetworkSender,
         shutdown: Arc<AtomicBool>,
     ) {
-        use crate::party::realtime_stream::NetworkPacket;
         use crate::pipeline::Pushable;
 
         let stream = self.clone();
@@ -667,10 +677,47 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             while !shutdown.load(Ordering::Relaxed) {
                 interval.tick().await;
                 for (_addr, stream_id, seqs) in stream.get_missing_frames() {
-                    sender.push(NetworkPacket::RequestFrames { stream_id, seqs });
+                    let payload =
+                        rkyv::to_bytes::<rkyv::rancor::Error>(&RequestFramesPayload {
+                            stream_id,
+                            seqs,
+                        })
+                        .expect("RequestFramesPayload serialization")
+                        .into_vec();
+                    sender.push(TaggedPacket { tag: REQUEST_FRAMES_TAG, payload });
                 }
             }
         });
+    }
+}
+
+impl<S: AudioSample, const C: usize, const SR: u32> NetworkStream<S, C, SR>
+    for SyncedAudioStreamManager<S, C, SR>
+{
+    fn tags(&self) -> &'static [PacketTag] {
+        &[SYNCED_TAG, SYNCED_META_TAG, SYNCED_CONTROL_TAG]
+    }
+
+    fn handle(&self, source: SocketAddr, tag: PacketTag, bytes: &[u8]) -> anyhow::Result<()> {
+        match tag {
+            SYNCED_TAG => {
+                let frame = rkyv::from_bytes::<SyncedFrame, rkyv::rancor::Error>(bytes)
+                    .map_err(|e| anyhow::anyhow!("SyncedFrame deserialize: {:?}", e))?;
+                self.receive(source, frame);
+            }
+            SYNCED_META_TAG => {
+                let meta = rkyv::from_bytes::<SyncedStreamMeta, rkyv::rancor::Error>(bytes)
+                    .map_err(|e| anyhow::anyhow!("SyncedStreamMeta deserialize: {:?}", e))?;
+                self.receive_meta(source, meta);
+            }
+            SYNCED_CONTROL_TAG => {
+                let control = rkyv::from_bytes::<SyncedControl, rkyv::rancor::Error>(bytes)
+                    .map_err(|e| anyhow::anyhow!("SyncedControl deserialize: {:?}", e))?;
+                self.receive_control(source, control);
+            }
+            _ => unreachable!("SyncedAudioStreamManager received unexpected tag {tag}"),
+        }
+        Ok(())
     }
 }
 

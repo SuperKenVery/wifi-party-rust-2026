@@ -42,8 +42,11 @@ use rkyv::{Archive, Deserialize, Serialize};
 use tokio::time::{interval, sleep};
 use tracing::{debug, info, warn};
 
+use std::net::SocketAddr;
+
 use crate::io::NetworkSender;
-use crate::party::realtime_stream::NetworkPacket;
+use crate::party::network_stream::NetworkStream;
+use crate::party::tagged_packet::{NTP_TAG, PacketTag, TaggedPacket};
 use crate::pipeline::Pushable;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -89,12 +92,20 @@ struct SeenResponse {
     seen_at: Instant,
 }
 
+struct PendingNtpResponse {
+    request_id: u64,
+    t1: u64,
+    t2: u64,
+    respond_at: Instant,
+}
+
 struct NtpServiceInner {
     offset: i64,
     synced: bool,
     next_request_id: u64,
     pending_requests: HashMap<u64, PendingRequest>,
     seen_responses: Vec<SeenResponse>,
+    pending_responses: Vec<PendingNtpResponse>,
     last_sync_request: Option<Instant>,
     first_request_sent_at: Option<Instant>,
 }
@@ -107,6 +118,7 @@ impl Default for NtpServiceInner {
             next_request_id: 1,
             pending_requests: HashMap::new(),
             seen_responses: Vec::new(),
+            pending_responses: Vec::new(),
             last_sync_request: None,
             first_request_sent_at: None,
         }
@@ -222,64 +234,21 @@ impl NtpService {
         Some(NtpPacket::Request { request_id, t1 })
     }
 
-    pub fn on_request_received(self: &Arc<Self>, request_id: u64, t1: u64) {
-        let inner = self.inner.lock().unwrap();
+    pub fn on_request_received(&self, request_id: u64, t1: u64) {
+        let mut inner = self.inner.lock().unwrap();
         if !inner.synced {
             return;
         }
 
-        let offset = inner.offset;
         let local = Self::local_now_micros();
-        let t2 = if offset >= 0 {
-            local + offset as u64
-        } else {
-            local.saturating_sub((-offset) as u64)
-        };
-        drop(inner);
-
-        let delay_ms = rand::thread_rng().gen_range(RESPONSE_DELAY_MIN_MS..=RESPONSE_DELAY_MAX_MS);
-        let self_clone = self.clone();
-
-        tokio::spawn(async move {
-            sleep(Duration::from_millis(delay_ms)).await;
-
-            // Check if we still need to send (has someone else answered?)
-            let should_send = {
-                let mut inner = self_clone.inner.lock().unwrap();
-                let now = Instant::now();
-                let ttl = Duration::from_millis(SEEN_RESPONSE_TTL_MS);
-                inner
-                    .seen_responses
-                    .retain(|s| now.duration_since(s.seen_at) < ttl);
-                !inner
-                    .seen_responses
-                    .iter()
-                    .any(|s| s.request_id == request_id)
-            };
-
-            if should_send {
-                let local = Self::local_now_micros();
-                let inner = self_clone.inner.lock().unwrap();
-                let offset = inner.offset;
-                let t3 = if offset >= 0 {
-                    local + offset as u64
-                } else {
-                    local.saturating_sub((-offset) as u64)
-                };
-                let packet = NtpPacket::Response {
-                    request_id,
-                    t1,
-                    t2,
-                    t3,
-                };
-                debug!("Sending NTP response for request {}", request_id);
-                self_clone.sender.push(NetworkPacket::Ntp(packet));
-            } else {
-                debug!(
-                    "Cancelling NTP response for request {} (already answered)",
-                    request_id
-                );
-            }
+        let t2 = local.saturating_add_signed(inner.offset);
+        let delay_ms =
+            rand::thread_rng().gen_range(RESPONSE_DELAY_MIN_MS..=RESPONSE_DELAY_MAX_MS);
+        inner.pending_responses.push(PendingNtpResponse {
+            request_id,
+            t1,
+            t2,
+            respond_at: Instant::now() + Duration::from_millis(delay_ms),
         });
     }
 
@@ -316,7 +285,7 @@ impl NtpService {
         inner.synced = true;
     }
 
-    pub fn handle_packet(self: &Arc<Self>, packet: NtpPacket) {
+    pub fn handle_packet(&self, packet: NtpPacket) {
         match packet {
             NtpPacket::Request { request_id, t1 } => {
                 debug!("Received NTP request {} from peer", request_id);
@@ -334,18 +303,26 @@ impl NtpService {
         }
     }
 
+    fn ntp_push(&self, packet: &NtpPacket) {
+        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(packet)
+            .expect("NtpPacket serialization")
+            .into_vec();
+        self.sender.push(TaggedPacket { tag: NTP_TAG, payload });
+    }
+
     async fn run(&self) {
         info!("NTP service task started");
 
         let mut sync_interval = interval(Duration::from_millis(SYNC_INTERVAL_MS));
         let mut cleanup_interval = interval(Duration::from_secs(1));
         let mut first_host_check = interval(Duration::from_millis(100));
+        let mut response_poll = interval(Duration::from_millis(5));
 
         while !self.shutdown_flag.load(Ordering::SeqCst) {
             tokio::select! {
                 _ = sync_interval.tick() => {
                     if let Some(req) = self.create_sync_request() {
-                        self.sender.push(NetworkPacket::Ntp(req));
+                        self.ntp_push(&req);
                     }
                 }
                 _ = cleanup_interval.tick() => {
@@ -367,10 +344,47 @@ impl NtpService {
                                 inner.synced = true;
                             }
                 }
+                _ = response_poll.tick() => {
+                    let now = Instant::now();
+                    let to_send: Vec<_> = {
+                        let mut inner = self.inner.lock().unwrap();
+                        let ttl = Duration::from_millis(SEEN_RESPONSE_TTL_MS);
+                        inner.seen_responses.retain(|s| now.duration_since(s.seen_at) < ttl);
+                        let ready: Vec<_> = inner
+                            .pending_responses
+                            .iter()
+                            .filter(|r| now >= r.respond_at)
+                            .filter(|r| !inner.seen_responses.iter().any(|s| s.request_id == r.request_id))
+                            .map(|r| (r.request_id, r.t1, r.t2))
+                            .collect();
+                        inner.pending_responses.retain(|r| now < r.respond_at);
+                        ready
+                    };
+                    for (request_id, t1, t2) in to_send {
+                        let local = Self::local_now_micros();
+                        let offset = self.inner.lock().unwrap().offset;
+                        let t3 = local.saturating_add_signed(offset);
+                        debug!("Sending NTP response for request {}", request_id);
+                        self.ntp_push(&NtpPacket::Response { request_id, t1, t2, t3 });
+                    }
+                }
             }
         }
 
         info!("NTP service task shutting down");
+    }
+}
+
+impl<S: crate::audio::AudioSample, const C: usize, const SR: u32> NetworkStream<S, C, SR> for NtpService {
+    fn tags(&self) -> &'static [PacketTag] {
+        &[NTP_TAG]
+    }
+
+    fn handle(&self, _source: SocketAddr, _tag: PacketTag, bytes: &[u8]) -> anyhow::Result<()> {
+        let packet = rkyv::from_bytes::<NtpPacket, rkyv::rancor::Error>(bytes)
+            .map_err(|e| anyhow::anyhow!("NtpPacket deserialize: {:?}", e))?;
+        self.handle_packet(packet);
+        Ok(())
     }
 }
 

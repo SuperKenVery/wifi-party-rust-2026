@@ -28,11 +28,13 @@ use crate::audio::AudioSample;
 use crate::audio::symphonia_compat::WireCodecParams;
 use crate::io::NetworkSender;
 use crate::party::ntp::NtpService;
-use crate::party::realtime_stream::NetworkPacket;
 use crate::party::sync_stream::SyncedControl;
 use crate::party::sync_stream::{
     MAX_FRAGMENT_DATA, RawPacket, SyncedAudioStreamManager, SyncedFrame, SyncedStreamId,
     SyncedStreamMeta, new_stream_id,
+};
+use crate::party::tagged_packet::{
+    SYNCED_CONTROL_TAG, SYNCED_META_TAG, SYNCED_TAG, TaggedPacket,
 };
 use crate::pipeline::Pushable;
 use crate::state::MusicStreamProgress;
@@ -88,7 +90,10 @@ impl MusicStream {
             total_samples: 0,
             codec_params,
         };
-        network_sender.push(NetworkPacket::SyncedMeta(meta.clone()));
+        {
+            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&meta).expect("SyncedMeta ser").into_vec();
+            network_sender.push(TaggedPacket { tag: SYNCED_META_TAG, payload });
+        }
         synced_stream.receive_meta(LOCAL_ADDR, meta.clone());
 
         let start_at = ntp_service.party_now() + 500_000;
@@ -97,7 +102,10 @@ impl MusicStream {
             party_clock_time: start_at,
             seq: 1,
         };
-        network_sender.push(NetworkPacket::SyncedControl(control.clone()));
+        {
+            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&control).expect("SyncedControl ser").into_vec();
+            network_sender.push(TaggedPacket { tag: SYNCED_CONTROL_TAG, payload });
+        }
         synced_stream.receive_control(LOCAL_ADDR, control);
 
         let ctx = StreamContext {
@@ -339,8 +347,10 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
             .streaming_total
             .store(est_packets, Ordering::Relaxed);
 
-        self.network_sender
-            .push(NetworkPacket::SyncedMeta(self.meta.clone()));
+        {
+            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&self.meta).expect("SyncedMeta ser").into_vec();
+            self.network_sender.push(TaggedPacket { tag: SYNCED_META_TAG, payload });
+        }
         self.synced_stream
             .receive_meta(LOCAL_ADDR, self.meta.clone());
     }
@@ -377,8 +387,10 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
         let control = SyncedControl::Pause {
             stream_id: self.meta.stream_id,
         };
-        self.network_sender
-            .push(NetworkPacket::SyncedControl(control.clone()));
+        {
+            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&control).expect("SyncedControl ser").into_vec();
+            self.network_sender.push(TaggedPacket { tag: SYNCED_CONTROL_TAG, payload });
+        }
         self.synced_stream.receive_control(LOCAL_ADDR, control);
 
         let party_now = self.ntp_service.party_now();
@@ -398,8 +410,10 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
             party_clock_time: resume_at,
             seq: self.last_pause_seq,
         };
-        self.network_sender
-            .push(NetworkPacket::SyncedControl(control.clone()));
+        {
+            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&control).expect("SyncedControl ser").into_vec();
+            self.network_sender.push(TaggedPacket { tag: SYNCED_CONTROL_TAG, payload });
+        }
         self.synced_stream.receive_control(LOCAL_ADDR, control);
 
         self.last_start_party_time = resume_at;
@@ -427,8 +441,10 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
             party_clock_time: seek_at,
             seq,
         };
-        self.network_sender
-            .push(NetworkPacket::SyncedControl(control.clone()));
+        {
+            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&control).expect("SyncedControl ser").into_vec();
+            self.network_sender.push(TaggedPacket { tag: SYNCED_CONTROL_TAG, payload });
+        }
         self.synced_stream.receive_control(LOCAL_ADDR, control);
 
         self.last_start_party_time = seek_at;
@@ -471,8 +487,8 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
                     self.is_complete = true;
                     self.meta.total_frames = self.frames_read;
                     self.meta.total_samples = self.vault.iter().map(|r| r.dur as u64).sum();
-                    self.network_sender
-                        .push(NetworkPacket::SyncedMeta(self.meta.clone()));
+                    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&self.meta).expect("SyncedMeta ser").into_vec();
+                    self.network_sender.push(TaggedPacket { tag: SYNCED_META_TAG, payload });
                     break;
                 }
                 Err(_) => break,
@@ -487,7 +503,8 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
             };
             if let Some(packet) = self.vault.get(&seq) {
                 for frame in fragment_raw_packet(self.meta.stream_id, seq, &packet) {
-                    self.network_sender.push(NetworkPacket::Synced(frame));
+                    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&frame).expect("SyncedFrame ser").into_vec();
+                    self.network_sender.push(TaggedPacket { tag: SYNCED_TAG, payload });
                 }
             }
         }
@@ -511,8 +528,10 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
 
                 for _ in 0..REDUNDANCY_COUNT {
                     for frame in &fragments {
-                        self.network_sender
-                            .push(NetworkPacket::Synced(frame.clone()));
+                        {
+                            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(frame).expect("SyncedFrame ser").into_vec();
+                            self.network_sender.push(TaggedPacket { tag: SYNCED_TAG, payload });
+                        }
                     }
                 }
 

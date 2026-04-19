@@ -24,12 +24,46 @@ use crate::{pull_chain, push_chain};
 use super::combinator::{Mixer, Tee};
 use super::config::PartyConfig;
 use super::music::MusicStream;
+use super::network_stream::{NetworkStream, StreamRegistry};
 use super::ntp::NtpService;
 use super::packet_dispatcher::PacketDispatcher;
 use super::realtime_stream::{
     RealtimeAudioStream, RealtimeFramePacker, RealtimeStreamId, StreamSnapshot,
 };
-use super::sync_stream::{SyncedAudioStreamManager, SyncedStreamState};
+use super::sync_stream::{RequestFramesPayload, SyncedAudioStreamManager, SyncedStreamState};
+use super::tagged_packet::{PacketTag, REQUEST_FRAMES_TAG};
+
+/// Handles `RequestFrames` packets on behalf of active music streams.
+struct RetransmitHandler {
+    music_streams: Arc<Mutex<Vec<MusicStream>>>,
+}
+
+impl<S: crate::audio::AudioSample, const C: usize, const SR: u32> NetworkStream<S, C, SR>
+    for RetransmitHandler
+{
+    fn tags(&self) -> &'static [PacketTag] {
+        &[REQUEST_FRAMES_TAG]
+    }
+
+    fn handle(
+        &self,
+        _source: std::net::SocketAddr,
+        _tag: PacketTag,
+        bytes: &[u8],
+    ) -> anyhow::Result<()> {
+        let req =
+            rkyv::from_bytes::<RequestFramesPayload, rkyv::rancor::Error>(bytes)
+                .map_err(|e| anyhow::anyhow!("RequestFramesPayload deserialize: {:?}", e))?;
+        let streams = self.music_streams.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        for stream in streams.iter() {
+            if stream.stream_id() == req.stream_id {
+                stream.handle_retransmission_request(req.seqs);
+                break;
+            }
+        }
+        Ok(())
+    }
+}
 
 pub struct Party<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     state: Arc<AppState>,
@@ -38,7 +72,7 @@ pub struct Party<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     synced_stream: Option<Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>>,
     ntp_service: Option<Arc<NtpService>>,
     network_sender: Option<NetworkSender>,
-    music_streams: Mutex<Vec<MusicStream>>,
+    music_streams: Arc<Mutex<Vec<MusicStream>>>,
     mic_input: Option<Arc<AudioInput<Sample, CHANNELS, SAMPLE_RATE>>>,
     _audio_streams: Vec<cpal::Stream>,
     shutdown: Arc<AtomicBool>,
@@ -57,7 +91,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             synced_stream: None,
             ntp_service: None,
             network_sender: None,
-            music_streams: Mutex::new(Vec::new()),
+            music_streams: Arc::new(Mutex::new(Vec::new())),
             mic_input: None,
             _audio_streams: Vec::new(),
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -165,6 +199,16 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
 
         let realtime_stream = self.realtime_stream.clone();
 
+        // Build stream registry — each stream owns its packet-dispatch logic.
+        let mut registry = StreamRegistry::new();
+        registry.register(realtime_stream.clone() as Arc<dyn NetworkStream<_, _, _>>);
+        registry.register(synced_stream.clone() as Arc<dyn NetworkStream<_, _, _>>);
+        registry.register(ntp_service.clone() as Arc<dyn NetworkStream<_, _, _>>);
+        registry.register(Arc::new(RetransmitHandler {
+            music_streams: self.music_streams.clone(),
+        }) as Arc<dyn NetworkStream<_, _, _>>);
+        let registry = Arc::new(registry);
+
         thread::spawn({
             let socket = socket;
             let local_ips = local_ips;
@@ -173,6 +217,7 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
             let synced_stream = synced_stream.clone();
             let ntp_service = ntp_service.clone();
             let network_sender = network_sender.clone();
+            let registry = registry.clone();
             let shutdown = self.shutdown.clone();
 
             move || {
@@ -191,9 +236,7 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
                         socket,
                         local_ips,
                         state,
-                        realtime_stream,
-                        synced_stream,
-                        ntp_service,
+                        registry,
                         shutdown.clone(),
                     )
                     .await

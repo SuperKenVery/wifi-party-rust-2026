@@ -34,11 +34,13 @@
 pub mod combinator;
 pub mod config;
 pub mod music;
+pub mod network_stream;
 pub mod ntp;
 pub mod packet_dispatcher;
 pub mod party;
 pub mod realtime_stream;
 pub mod sync_stream;
+pub mod tagged_packet;
 
 mod tests;
 

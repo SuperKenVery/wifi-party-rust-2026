@@ -30,8 +30,8 @@ use crate::audio::{
     AudioSample, JitterBuffer, PullSnapshot, RealtimeFrameDecoder, RealtimeOpusFrame,
 };
 use crate::party::combinator::{InputId, Mixer};
-use crate::party::ntp::NtpPacket;
-use crate::party::sync_stream::{SyncedFrame, SyncedStreamMeta};
+use crate::party::network_stream::NetworkStream;
+use crate::party::tagged_packet::{PacketTag, REALTIME_TAG, TaggedPacket};
 use crate::pipeline::{GraphNode, Pullable, Pushable};
 use crate::state::HostId;
 
@@ -99,26 +99,6 @@ impl RealtimeFrame {
             frame_size: self.frame_size as usize,
         }
     }
-}
-
-/// Top-level network packet enum.
-#[derive(Archive, Serialize, Deserialize, Debug, Clone)]
-pub enum NetworkPacket {
-    /// Audio data for realtime stream
-    Realtime(RealtimeFrame),
-    /// Audio data for synced stream
-    Synced(SyncedFrame),
-    /// Metadata for synced stream (song name etc.)
-    SyncedMeta(SyncedStreamMeta),
-    /// Control data for synced stream (play pause etc.)
-    SyncedControl(super::sync_stream::SyncedControl),
-    /// Request for missed frames, for synced stream
-    RequestFrames {
-        stream_id: crate::party::sync_stream::SyncedStreamId,
-        seqs: Vec<u64>,
-    },
-    /// Network time synchronization
-    Ntp(NtpPacket),
 }
 
 /// Key for identifying a specific decode chain.
@@ -341,7 +321,22 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Default
     }
 }
 
-/// Packs OpusPacket into NetworkPacket::Realtime with the given stream ID.
+impl<S: AudioSample, const C: usize, const SR: u32> NetworkStream<S, C, SR>
+    for RealtimeAudioStream<S, C, SR>
+{
+    fn tags(&self) -> &'static [PacketTag] {
+        &[REALTIME_TAG]
+    }
+
+    fn handle(&self, source: SocketAddr, _tag: PacketTag, bytes: &[u8]) -> anyhow::Result<()> {
+        let frame = rkyv::from_bytes::<RealtimeFrame, rkyv::rancor::Error>(bytes)
+            .map_err(|e| anyhow::anyhow!("RealtimeFrame deserialize: {:?}", e))?;
+        self.receive(source, frame);
+        Ok(())
+    }
+}
+
+/// Packs OpusPacket into a tagged realtime frame packet.
 ///
 /// Each instance maintains its own sequence counter for independent
 /// packet ordering per stream.
@@ -361,12 +356,15 @@ impl RealtimeFramePacker {
 
 impl crate::pipeline::Node for RealtimeFramePacker {
     type Input = OpusPacket;
-    type Output = NetworkPacket;
+    type Output = TaggedPacket;
 
     fn process(&self, input: Self::Input) -> Option<Self::Output> {
         let seq = self.sequence_number.fetch_add(1, Ordering::Relaxed) + 1;
         let frame = RealtimeFrame::new(self.stream_id, seq, input);
-        Some(NetworkPacket::Realtime(frame))
+        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&frame)
+            .expect("RealtimeFrame serialization")
+            .into_vec();
+        Some(TaggedPacket { tag: REALTIME_TAG, payload })
     }
 }
 
@@ -391,21 +389,21 @@ mod tests {
     }
 
     #[test]
-    fn test_network_packet_realtime() {
+    fn test_realtime_frame_packer_tagged_packet() {
+        use crate::pipeline::Node;
+
+        let packer = RealtimeFramePacker::new(RealtimeStreamId::System);
         let opus_packet = OpusPacket {
             data: vec![0u8; 100],
             frame_size: 960 * 2,
         };
-        let frame = RealtimeFrame::new(RealtimeStreamId::System, 42, opus_packet);
-        let packet = NetworkPacket::Realtime(frame);
+        let tagged = packer.process(opus_packet).expect("packer produced None");
+        assert_eq!(tagged.tag, crate::party::tagged_packet::REALTIME_TAG);
 
-        match packet {
-            NetworkPacket::Realtime(f) => {
-                assert_eq!(f.stream_id, RealtimeStreamId::System);
-                assert_eq!(f.sequence_number, 42);
-            }
-            _ => panic!("Expected Realtime packet"),
-        }
+        let frame = rkyv::from_bytes::<RealtimeFrame, rkyv::rancor::Error>(&tagged.payload)
+            .expect("deserialization failed");
+        assert_eq!(frame.stream_id, RealtimeStreamId::System);
+        assert_eq!(frame.sequence_number, 1);
     }
 
     #[test]
