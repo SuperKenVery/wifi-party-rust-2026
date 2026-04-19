@@ -79,12 +79,15 @@ Files:
 
 - `traits.rs` - Core `Node` trait for data transformation
   - `Node` - Transforms input to output (has associated types `Input`/`Output`)
+  - Blanket impl: `Node for Arc<N>` — allows shared ownership for reset handles
 - `dyn_traits.rs` - Object-safe dynamic traits and pipeline macros
   - `Pullable<T>` - Can return data when pulled (object-safe)
   - `Pushable<T>` - Can receive pushed data (object-safe)
   - `push_chain!` macro - Build push-based pipelines declaratively
   - `pull_chain!` macro - Build pull-based pipelines declaratively
 - `graph_node.rs` - `GraphNode<N>` wrapper to make any Node implement `Pushable`/`Pullable`
+  - `add_output(Arc<dyn Pushable<N::Output>>)` - connect push destinations
+  - `set_input(Arc<dyn Pullable<N::Input>>)` - connect pull source
 
 ### `src/state/` - Application State
 
@@ -212,6 +215,12 @@ Manages per-host decode chains using the dynamic pipeline architecture:
 For synchronized music playback. Uses NTP time to schedule frame playback. Supports retransmission requests for missing frames.
 
 Key design: No re-encoding. Raw compressed packets from the original audio file are forwarded over the network. Receiver creates a symphonia decoder based on `WireCodecParams` from metadata.
+
+Architecture: Push-based decode pipeline. On packet arrival, data is pushed through:
+`CompressedPacket → GraphNode<SymphoniaDecoder> → GraphNode<FftResampler|Interleaver> → SimpleBuffer`
+The audio callback only reads from the pre-decoded SimpleBuffer, ensuring deterministic low-latency playback.
+
+Important: `receive()` releases the DashMap entry lock before pushing through the decode pipeline to avoid blocking `pull_and_mix()` (which uses `iter_mut`).
 
 Has `start_cleanup_task()` and `start_retransmit_task()` for background operations.
 

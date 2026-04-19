@@ -3,20 +3,17 @@
 //! Used in the synced stream pipeline when no resampling is needed
 //! (source sample rate == target sample rate).
 
-use std::collections::VecDeque;
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex, RwLock};
 
 use super::symphonia_decoder::DecodedAudio;
 use crate::audio::frame::AudioBuffer;
 use crate::audio::AudioSample;
-use crate::pipeline::Pullable;
+use crate::pipeline::Node;
 
-/// Pulls per-channel decoded PCM from upstream and interleaves it into
-/// `AudioBuffer<Sample>` at the source sample rate (no resampling).
+/// Interleaves per-channel decoded PCM into `AudioBuffer<Sample>`.
+///
+/// Pure stateless transform — no accumulation or buffering.
 pub struct Interleaver<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    source: RwLock<Option<Arc<dyn Pullable<DecodedAudio>>>>,
-    leftover: Mutex<VecDeque<f32>>,
     _sample: PhantomData<Sample>,
 }
 
@@ -25,63 +22,31 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 {
     pub fn new() -> Self {
         Self {
-            source: RwLock::new(None),
-            leftover: Mutex::new(VecDeque::new()),
             _sample: PhantomData,
         }
     }
-
-    pub fn set_source(&self, source: Arc<dyn Pullable<DecodedAudio>>) {
-        *self.source.write().unwrap() = Some(source);
-    }
-
-    pub fn reset(&self) {
-        self.leftover.lock().unwrap().clear();
-    }
 }
 
-impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
-    Pullable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Node
     for Interleaver<Sample, CHANNELS, SAMPLE_RATE>
 {
-    fn pull(&self, len: usize) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
-        let source = self.source.read().unwrap();
-        let source = source.as_ref()?;
+    type Input = DecodedAudio;
+    type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
 
-        let mut leftover = self.leftover.lock().unwrap();
+    /// Interleave all channels from the input into a single AudioBuffer.
+    fn process(&self, input: DecodedAudio) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
+        let num_frames = input.channels.first().map_or(0, |c| c.len());
+        if num_frames == 0 {
+            return None;
+        }
 
-        // Pull decoded audio and interleave until we have enough samples.
-        while leftover.len() < len {
-            // Request enough frames to fill the remaining need.
-            let needed_frames = (len - leftover.len()) / CHANNELS + 1;
-            let Some(decoded) = source.pull(needed_frames) else {
-                break;
-            };
-
-            let num_frames = decoded.channels.first().map_or(0, |c| c.len());
-            for f in 0..num_frames {
-                for ch in 0..CHANNELS {
-                    leftover.push_back(decoded.channels[ch][f]);
-                }
+        let mut interleaved = Vec::with_capacity(num_frames * CHANNELS);
+        for f in 0..num_frames {
+            for ch in 0..CHANNELS {
+                interleaved.push(Sample::from_f64_normalized(input.channels[ch][f] as f64));
             }
         }
 
-        if leftover.is_empty() {
-            return None;
-        }
-
-        let take = len.min(leftover.len());
-        let take = take - (take % CHANNELS);
-        if take == 0 {
-            return None;
-        }
-
-        let interleaved_f32: Vec<f32> = leftover.drain(..take).collect();
-        let samples: Vec<Sample> = interleaved_f32
-            .iter()
-            .map(|&s| Sample::from_f64_normalized(s as f64))
-            .collect();
-
-        AudioBuffer::new(samples).ok()
+        AudioBuffer::new(interleaved).ok()
     }
 }

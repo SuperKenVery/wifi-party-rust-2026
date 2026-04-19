@@ -1,8 +1,4 @@
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
-
-use crate::pipeline::Pullable;
 
 /// A compressed audio packet.
 pub struct CompressedPacket {
@@ -10,34 +6,30 @@ pub struct CompressedPacket {
     pub data: Vec<u8>,
 }
 
-/// Thread-safe queue of compressed audio packets.
+/// Tracks packet progress counters for a synced music stream.
 ///
-/// Packets are pushed in by the network receive path and pulled by the decoder.
-/// Uses interior mutability for thread safety.
-pub struct CompressedPacketQueue {
-    queue: Mutex<VecDeque<CompressedPacket>>,
+/// Packets are pushed directly into the pipeline; this struct only
+/// records sequence numbers and counts for progress tracking.
+pub struct PacketCounter {
     packets_pushed: AtomicU64,
     highest_seq: AtomicU64,
 }
 
-impl CompressedPacketQueue {
+impl PacketCounter {
     pub fn new() -> Self {
         Self {
-            queue: Mutex::new(VecDeque::new()),
             packets_pushed: AtomicU64::new(0),
             highest_seq: AtomicU64::new(0),
         }
     }
 
-    /// Enqueue a compressed packet and update counters.
-    pub fn push_packet(&self, seq: u64, dur: u32, data: Vec<u8>) {
-        let mut queue = self.queue.lock().unwrap();
-        queue.push_back(CompressedPacket { dur, data });
+    /// Record that a packet with the given sequence number was dispatched.
+    pub fn record_packet(&self, seq: u64) {
         self.packets_pushed.fetch_add(1, Ordering::Relaxed);
         self.highest_seq.fetch_max(seq, Ordering::Relaxed);
     }
 
-    /// Total number of packets pushed since creation or last reset.
+    /// Total number of packets recorded since creation.
     pub fn packets_pushed(&self) -> u64 {
         self.packets_pushed.load(Ordering::Relaxed)
     }
@@ -45,19 +37,5 @@ impl CompressedPacketQueue {
     /// Highest sequence number seen.
     pub fn highest_seq(&self) -> u64 {
         self.highest_seq.load(Ordering::Relaxed)
-    }
-
-    /// Clear the queue (for seek).
-    pub fn reset(&self) {
-        let mut queue = self.queue.lock().unwrap();
-        queue.clear();
-    }
-}
-
-impl Pullable<CompressedPacket> for CompressedPacketQueue {
-    /// Pop the front packet. `len` is ignored since packets have variable size.
-    fn pull(&self, _len: usize) -> Option<CompressedPacket> {
-        let mut queue = self.queue.lock().unwrap();
-        queue.pop_front()
     }
 }

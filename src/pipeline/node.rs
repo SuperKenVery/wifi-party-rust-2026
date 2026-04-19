@@ -23,3 +23,14 @@ pub trait Node: Send + Sync {
     /// Returns `None` if the node is buffering data and not ready to emit output yet.
     fn process(&self, input: Self::Input) -> Option<Self::Output>;
 }
+
+/// Blanket impl so `Arc<N>` can be used as a `Node` — useful when you need
+/// a shared handle for reset/control while passing a clone into `GraphNode`.
+impl<N: Node> Node for std::sync::Arc<N> {
+    type Input = N::Input;
+    type Output = N::Output;
+
+    fn process(&self, input: Self::Input) -> Option<Self::Output> {
+        (**self).process(input)
+    }
+}

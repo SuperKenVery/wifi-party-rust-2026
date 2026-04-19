@@ -238,6 +238,10 @@ impl<Sample: AudioSample + cpal::SizedSample, const CHANNELS: usize, const SAMPL
                     let src = frame.data();
                     let len = src.len().min(data.len());
                     data[..len].copy_from_slice(&src[..len]);
+                    // Zero any remaining samples the source couldn't fill.
+                    for sample in &mut data[len..] {
+                        *sample = Sample::silence();
+                    }
                 } else {
                     for sample in data {
                         *sample = Sample::silence();

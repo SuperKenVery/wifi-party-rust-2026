@@ -1,17 +1,17 @@
 //! Audio decoders and resamplers for synced stream playback.
 //!
-//! Provides pull-based pipeline nodes:
-//! - [`CompressedPacketQueue`] — receives compressed packets, serves them on pull
-//! - [`SymphoniaDecoder`] — pulls compressed packets, decodes to per-channel f32 PCM
-//! - [`Interleaver`] — pulls decoded PCM, interleaves to AudioBuffer (no resampling)
-//! - [`FftResampler`] — pulls decoded PCM, resamples to target sample rate
+//! Provides push-based pipeline nodes (implementing `Node` trait):
+//! - [`PacketCounter`] — tracks packet progress counters
+//! - [`SymphoniaDecoder`] — decodes compressed packets to per-channel f32 PCM
+//! - [`Interleaver`] — interleaves decoded PCM to AudioBuffer (no resampling)
+//! - [`FftResampler`] — resamples decoded PCM to target sample rate
 
 pub mod compressed_packet_queue;
 pub mod fft_resampler;
 pub mod interleaver;
 pub mod symphonia_decoder;
 
-pub use compressed_packet_queue::CompressedPacketQueue;
+pub use compressed_packet_queue::{CompressedPacket, PacketCounter};
 pub use fft_resampler::FftResampler;
 pub use interleaver::Interleaver;
 pub use symphonia_decoder::{DecodedAudio, SymphoniaDecoder};

@@ -11,10 +11,11 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
-use crate::audio::decoders::{CompressedPacketQueue, FftResampler, Interleaver, SymphoniaDecoder};
+use crate::audio::buffers::simple_buffer::SimpleBuffer;
+use crate::audio::decoders::{CompressedPacket, FftResampler, Interleaver, SymphoniaDecoder};
 use crate::audio::symphonia_compat::WireCodecParams;
 use crate::party::sync_stream::*;
-use crate::pipeline::Pullable;
+use crate::pipeline::{GraphNode, Pullable, Pushable};
 
 const SR: u32 = 48000;
 const CH: usize = 2;
@@ -124,25 +125,17 @@ fn pull_all(mgr: &SyncedAudioStreamManager<f32, CH, SR>, clock: &Arc<AtomicU64>)
 }
 
 /// Decode packets through our pipeline nodes (SymphoniaDecoder + Resampler/Interleaver)
-/// to get a reference signal. This isolates our decode pipeline from the
-/// SyncedAudioStreamManager orchestration.
+/// using the push-based pipeline, to get a reference signal.
 fn decode_reference(codec_params: &WireCodecParams, packets: &[(u32, Vec<u8>)]) -> Vec<f32> {
     let params = codec_params.to_symphonia();
     let decoder = symphonia::default::get_codecs()
         .make(&params, &DecoderOptions::default())
         .unwrap();
 
-    let packet_queue = Arc::new(CompressedPacketQueue::new());
+    let output_buffer = Arc::new(SimpleBuffer::<f32, CH, SR>::new());
     let decoder_node = Arc::new(SymphoniaDecoder::<CH>::new(decoder));
-    decoder_node.set_source(packet_queue.clone());
 
-    for (seq, (dur, data)) in packets.iter().enumerate() {
-        packet_queue.push_packet(seq as u64 + 1, *dur, data.clone());
-    }
-
-    let mut all = Vec::new();
-
-    if codec_params.sample_rate != SR {
+    let pipeline_head: Arc<dyn Pushable<CompressedPacket>> = if codec_params.sample_rate != SR {
         let resampler = FftFixedIn::new(
             codec_params.sample_rate as usize,
             SR as usize,
@@ -152,26 +145,37 @@ fn decode_reference(codec_params: &WireCodecParams, packets: &[(u32, Vec<u8>)]) 
         )
         .unwrap();
         let resampler_node = Arc::new(FftResampler::<f32, CH, SR>::new(resampler));
-        resampler_node.set_source(decoder_node.clone());
-
-        loop {
-            match resampler_node.pull(960) {
-                Some(buf) => all.extend_from_slice(buf.data()),
-                None => break,
-            }
-        }
+        let resampler_graph = Arc::new(GraphNode::new(resampler_node));
+        resampler_graph.add_output(output_buffer.clone());
+        let decoder_graph = Arc::new(GraphNode::new(decoder_node));
+        decoder_graph.add_output(resampler_graph);
+        decoder_graph
     } else {
-        let interleaver = Arc::new(Interleaver::<f32, CH, SR>::new());
-        interleaver.set_source(decoder_node.clone());
+        let interleaver_node = Arc::new(Interleaver::<f32, CH, SR>::new());
+        let interleaver_graph = Arc::new(GraphNode::new(interleaver_node));
+        interleaver_graph.add_output(output_buffer.clone());
+        let decoder_graph = Arc::new(GraphNode::new(decoder_node));
+        decoder_graph.add_output(interleaver_graph);
+        decoder_graph
+    };
 
-        loop {
-            match interleaver.pull(960) {
-                Some(buf) => all.extend_from_slice(buf.data()),
-                None => break,
-            }
-        }
+    // Push all packets through the pipeline
+    for (seq, (dur, data)) in packets.iter().enumerate() {
+        let _ = seq;
+        pipeline_head.push(CompressedPacket {
+            dur: *dur,
+            data: data.clone(),
+        });
     }
 
+    // Pull all decoded audio from the output buffer
+    let mut all = Vec::new();
+    loop {
+        match output_buffer.pull(960) {
+            Some(buf) => all.extend_from_slice(buf.data()),
+            None => break,
+        }
+    }
     all
 }
 
@@ -317,18 +321,24 @@ fn test_pipeline_vs_container_decode() {
     let decoder = symphonia::default::get_codecs()
         .make(&params, &DecoderOptions::default())
         .unwrap();
-    let packet_queue = Arc::new(CompressedPacketQueue::new());
+    let output_buffer = Arc::new(SimpleBuffer::<f32, CH, SR>::new());
     let decoder_node = Arc::new(SymphoniaDecoder::<CH>::new(decoder));
-    decoder_node.set_source(packet_queue.clone());
-    for (seq, (dur, data)) in packets.iter().enumerate() {
-        packet_queue.push_packet(seq as u64 + 1, *dur, data.clone());
+    let interleaver_node = Arc::new(Interleaver::<f32, CH, SR>::new());
+    let interleaver_graph = Arc::new(GraphNode::new(interleaver_node));
+    interleaver_graph.add_output(output_buffer.clone());
+    let decoder_graph = Arc::new(GraphNode::new(decoder_node));
+    decoder_graph.add_output(interleaver_graph);
+
+    for (_seq, (dur, data)) in packets.iter().enumerate() {
+        decoder_graph.push(CompressedPacket {
+            dur: *dur,
+            data: data.clone(),
+        });
     }
-    // Pull raw decoded PCM (no resampling) via Interleaver
-    let interleaver = Arc::new(Interleaver::<f32, CH, { SR }>::new());
-    interleaver.set_source(decoder_node.clone());
+
     let mut pipeline_raw = Vec::new();
     loop {
-        match interleaver.pull(4096) {
+        match output_buffer.pull(4096) {
             Some(buf) => pipeline_raw.extend_from_slice(buf.data()),
             None => break,
         }
@@ -665,21 +675,26 @@ fn test_resampled_sample_count() {
         .make(&params, &DecoderOptions::default())
         .unwrap();
 
-    let packet_queue = Arc::new(CompressedPacketQueue::new());
+    let output_buffer = Arc::new(SimpleBuffer::<f32, CH, SR>::new());
     let decoder_node = Arc::new(SymphoniaDecoder::<CH>::new(decoder));
-    decoder_node.set_source(packet_queue.clone());
 
     let resampler = FftFixedIn::<f32>::new(src_rate as usize, SR as usize, 1024, 1, CH).unwrap();
     let resampler_node = Arc::new(FftResampler::<f32, CH, SR>::new(resampler));
-    resampler_node.set_source(decoder_node.clone());
+    let resampler_graph = Arc::new(GraphNode::new(resampler_node));
+    resampler_graph.add_output(output_buffer.clone());
+    let decoder_graph = Arc::new(GraphNode::new(decoder_node));
+    decoder_graph.add_output(resampler_graph);
 
-    for (seq, (dur, data)) in packets.iter().enumerate() {
-        packet_queue.push_packet(seq as u64 + 1, *dur, data.clone());
+    for (_seq, (dur, data)) in packets.iter().enumerate() {
+        decoder_graph.push(CompressedPacket {
+            dur: *dur,
+            data: data.clone(),
+        });
     }
 
     let mut total_resampled = 0usize;
     loop {
-        match resampler_node.pull(960) {
+        match output_buffer.pull(960) {
             Some(buf) => total_resampled += buf.data().len() / CH,
             None => break,
         }
@@ -796,17 +811,10 @@ fn decode_with_pull_size(
         .make(&params, &DecoderOptions::default())
         .unwrap();
 
-    let packet_queue = Arc::new(CompressedPacketQueue::new());
+    let output_buffer = Arc::new(SimpleBuffer::<f32, CH, SR>::new());
     let decoder_node = Arc::new(SymphoniaDecoder::<CH>::new(decoder));
-    decoder_node.set_source(packet_queue.clone());
 
-    for (seq, (dur, data)) in packets.iter().enumerate() {
-        packet_queue.push_packet(seq as u64 + 1, *dur, data.clone());
-    }
-
-    let mut all = Vec::new();
-
-    if codec_params.sample_rate != SR {
+    let pipeline_head: Arc<dyn Pushable<CompressedPacket>> = if codec_params.sample_rate != SR {
         let resampler = FftFixedIn::new(
             codec_params.sample_rate as usize,
             SR as usize,
@@ -816,26 +824,36 @@ fn decode_with_pull_size(
         )
         .unwrap();
         let resampler_node = Arc::new(FftResampler::<f32, CH, SR>::new(resampler));
-        resampler_node.set_source(decoder_node.clone());
-
-        loop {
-            match resampler_node.pull(pull_size) {
-                Some(buf) => all.extend_from_slice(buf.data()),
-                None => break,
-            }
-        }
+        let resampler_graph = Arc::new(GraphNode::new(resampler_node));
+        resampler_graph.add_output(output_buffer.clone());
+        let decoder_graph = Arc::new(GraphNode::new(decoder_node));
+        decoder_graph.add_output(resampler_graph);
+        decoder_graph
     } else {
-        let interleaver = Arc::new(Interleaver::<f32, CH, SR>::new());
-        interleaver.set_source(decoder_node.clone());
+        let interleaver_node = Arc::new(Interleaver::<f32, CH, SR>::new());
+        let interleaver_graph = Arc::new(GraphNode::new(interleaver_node));
+        interleaver_graph.add_output(output_buffer.clone());
+        let decoder_graph = Arc::new(GraphNode::new(decoder_node));
+        decoder_graph.add_output(interleaver_graph);
+        decoder_graph
+    };
 
-        loop {
-            match interleaver.pull(pull_size) {
-                Some(buf) => all.extend_from_slice(buf.data()),
-                None => break,
-            }
-        }
+    // Push all packets eagerly
+    for (_seq, (dur, data)) in packets.iter().enumerate() {
+        pipeline_head.push(CompressedPacket {
+            dur: *dur,
+            data: data.clone(),
+        });
     }
 
+    // Pull with the specified pull_size from the output buffer
+    let mut all = Vec::new();
+    loop {
+        match output_buffer.pull(pull_size) {
+            Some(buf) => all.extend_from_slice(buf.data()),
+            None => break,
+        }
+    }
     all
 }
 

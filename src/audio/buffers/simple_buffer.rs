@@ -34,6 +34,10 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             queue: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
+
+    pub fn reset(&self) {
+        self.queue.lock().unwrap().clear();
+    }
 }
 
 impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Default

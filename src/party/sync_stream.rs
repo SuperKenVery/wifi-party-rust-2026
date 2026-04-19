@@ -4,24 +4,25 @@
 //! and play at a specified party clock time, ensuring all participants hear
 //! the same audio at the same moment.
 //!
-//! # Architecture (pull-based pipeline)
+//! # Architecture (push-based pipeline)
 //!
 //! ```text
-//! Network packets → BufferEntry (stores compressed packets, reassembles fragments)
-//!                     ↓ push_packet()
-//!                   CompressedPacketQueue
-//!                     ↑ pull()
+//! Network packets → BufferEntry (reassembles fragments, sequences)
+//!                     ↓ push(CompressedPacket)
 //!                   SymphoniaDecoder (per-channel f32 PCM)
-//!                     ↑ pull()
+//!                     ↓ push(DecodedAudio)
 //!                   FftResampler or Interleaver (interleaved AudioBuffer)
+//!                     ↓ push(AudioBuffer)
+//!                   SimpleBuffer (pre-decoded audio ring)
 //!                     ↑ pull()
 //!                   SyncedAudioStreamManager::pull_and_mix() (NTP-timed playback)
 //!                     ↑ pull()
 //!                   Output Mixer → Speaker
 //! ```
 //!
-//! Each pipeline node is an `Arc` implementing `Pullable`. Decoding and
-//! resampling happen lazily on pull, not eagerly on receive.
+//! Decoding and resampling happen eagerly on packet arrival (in the network
+//! receive path). The audio callback only reads from the pre-decoded
+//! SimpleBuffer, ensuring deterministic low-latency playback.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -36,10 +37,11 @@ use symphonia::core::codecs::DecoderOptions;
 use tracing::{error, info, warn};
 
 use crate::audio::AudioSample;
-use crate::audio::decoders::{CompressedPacketQueue, FftResampler, Interleaver, SymphoniaDecoder};
+use crate::audio::buffers::simple_buffer::SimpleBuffer;
+use crate::audio::decoders::{CompressedPacket, FftResampler, Interleaver, PacketCounter, SymphoniaDecoder};
 use crate::audio::frame::AudioBuffer;
 use crate::audio::symphonia_compat::WireCodecParams;
-use crate::pipeline::Pullable;
+use crate::pipeline::{GraphNode, Pullable, Pushable};
 
 const SYNCED_STREAM_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -175,32 +177,31 @@ pub enum SyncedControl {
 }
 
 // ---------------------------------------------------------------------------
-//  BufferEntry — per-source/stream state using pipeline nodes
+//  BufferEntry — per-source/stream state using push-based pipeline
 // ---------------------------------------------------------------------------
 
 /// A buffer for a single stream from a single source.
 ///
-/// Stores compressed packets, reassembles fragments, and owns the decode
-/// pipeline nodes. Packets are pushed into the `packet_queue` in sequence
-/// order (out-of-order packets wait in `pending_raw`). Decoding happens
-/// lazily when audio is pulled from `output`.
+/// Compressed packets are pushed through the decode pipeline eagerly on
+/// arrival (in `receive()`). Decoded PCM accumulates in `output_buffer`,
+/// which the audio callback reads from via `pull_and_mix()`.
 struct BufferEntry<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    // -- Pipeline nodes (all Arc for thread safety) --
-    packet_queue: Arc<CompressedPacketQueue>,
-    decoder: Arc<SymphoniaDecoder<CHANNELS>>,
-    /// The tail of the decode pipeline. Either FftResampler (if resampling)
-    /// or Interleaver (if same sample rate). Pull from this to get audio.
-    output: Arc<dyn Pullable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>>,
-    /// Resets the output node's internal buffers on seek.
-    /// Captures the concrete Arc so we can call `.reset()` through `dyn Pullable`.
-    output_reset: Box<dyn Fn() + Send + Sync>,
+    // -- Push pipeline --
+    /// Head of the push pipeline. Push CompressedPacket here to decode eagerly.
+    pipeline_head: Arc<dyn Pushable<CompressedPacket>>,
+    /// Pre-decoded audio buffer. Pull from here in the audio callback.
+    output_buffer: SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE>,
+    /// Resets decoder, resampler internal state, and output buffer on seek.
+    pipeline_reset: Box<dyn Fn() + Send + Sync>,
+    /// Packet progress counters (for UI).
+    packet_counter: PacketCounter,
 
     meta: SyncedStreamMeta,
     /// Out of order compressed frames waiting for predecessors.
     pending_raw: HashMap<u64, SyncedFrame>,
     /// Long frames segmented to fit MTU, here we store segments.
     pending_fragments: HashMap<u64, FragmentSet>,
-    /// Next expected sequence number for feeding into packet_queue.
+    /// Next expected sequence number for feeding into the pipeline.
     next_feed_seq: u64,
     last_seen: Instant,
 
@@ -281,18 +282,21 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             return;
         }
 
-        // New stream — create decoder and wire up pipeline nodes.
+        // New stream — create decoder and wire up push pipeline.
         let Some(decoder) = create_decoder(&meta.codec_params) else {
             return;
         };
 
-        let packet_queue = Arc::new(CompressedPacketQueue::new());
-        let decoder_node = Arc::new(SymphoniaDecoder::<CHANNELS>::new(decoder));
-        decoder_node.set_source(packet_queue.clone());
+        let output_buffer = SimpleBuffer::<Sample, CHANNELS, SAMPLE_RATE>::new();
+        let output_buffer_sink: Arc<SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE>> =
+            Arc::new(output_buffer);
 
-        // Build output stage: resampler if sample rates differ, otherwise interleaver.
-        let (output, output_reset): (
-            Arc<dyn Pullable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>>,
+        let decoder_node = Arc::new(SymphoniaDecoder::<CHANNELS>::new(decoder));
+
+        // Build push pipeline: decoder → resampler/interleaver → output_buffer.
+        // The head of the chain is what we push CompressedPackets into.
+        let (pipeline_head, pipeline_reset): (
+            Arc<dyn Pushable<CompressedPacket>>,
             Box<dyn Fn() + Send + Sync>,
         ) = if meta.codec_params.sample_rate != SAMPLE_RATE {
             // Resampling path
@@ -310,35 +314,61 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                     );
                     let resampler_node =
                         Arc::new(FftResampler::<Sample, CHANNELS, SAMPLE_RATE>::new(r));
-                    resampler_node.set_source(decoder_node.clone());
-                    let reset_handle = resampler_node.clone();
+                    // Wire: decoder_graph → resampler_graph → output_buffer_sink
+                    let resampler_graph = Arc::new(GraphNode::new(resampler_node.clone()));
+                    resampler_graph.add_output(output_buffer_sink.clone());
+                    let decoder_graph = Arc::new(GraphNode::new(decoder_node.clone()));
+                    decoder_graph.add_output(resampler_graph);
+
+                    let reset_dec = decoder_node.clone();
+                    let reset_res = resampler_node.clone();
+                    let reset_buf = output_buffer_sink.clone();
                     (
-                        resampler_node as Arc<dyn Pullable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>>,
-                        Box::new(move || reset_handle.reset()) as Box<dyn Fn() + Send + Sync>,
+                        decoder_graph as Arc<dyn Pushable<CompressedPacket>>,
+                        Box::new(move || {
+                            reset_dec.reset();
+                            reset_res.reset();
+                            reset_buf.reset();
+                        }) as Box<dyn Fn() + Send + Sync>,
                     )
                 }
                 Err(e) => {
                     error!("Failed to create resampler: {}", e);
-                    // Fall back to interleaver (will produce wrong sample rate, but won't crash)
+                    // Fall back to interleaver (wrong sample rate, but won't crash)
                     let interleaver_node =
-                        Arc::new(Interleaver::<Sample, CHANNELS, SAMPLE_RATE>::new());
-                    interleaver_node.set_source(decoder_node.clone());
-                    let reset_handle = interleaver_node.clone();
+                        Interleaver::<Sample, CHANNELS, SAMPLE_RATE>::new();
+                    let interleaver_graph = Arc::new(GraphNode::new(Arc::new(interleaver_node)));
+                    interleaver_graph.add_output(output_buffer_sink.clone());
+                    let decoder_graph = Arc::new(GraphNode::new(decoder_node.clone()));
+                    decoder_graph.add_output(interleaver_graph);
+
+                    let reset_dec = decoder_node.clone();
+                    let reset_buf = output_buffer_sink.clone();
                     (
-                        interleaver_node
-                            as Arc<dyn Pullable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>>,
-                        Box::new(move || reset_handle.reset()) as Box<dyn Fn() + Send + Sync>,
+                        decoder_graph as Arc<dyn Pushable<CompressedPacket>>,
+                        Box::new(move || {
+                            reset_dec.reset();
+                            reset_buf.reset();
+                        }) as Box<dyn Fn() + Send + Sync>,
                     )
                 }
             }
         } else {
-            // No resampling needed — use interleaver directly
-            let interleaver_node = Arc::new(Interleaver::<Sample, CHANNELS, SAMPLE_RATE>::new());
-            interleaver_node.set_source(decoder_node.clone());
-            let reset_handle = interleaver_node.clone();
+            // No resampling — interleave directly
+            let interleaver_node = Interleaver::<Sample, CHANNELS, SAMPLE_RATE>::new();
+            let interleaver_graph = Arc::new(GraphNode::new(Arc::new(interleaver_node)));
+            interleaver_graph.add_output(output_buffer_sink.clone());
+            let decoder_graph = Arc::new(GraphNode::new(decoder_node.clone()));
+            decoder_graph.add_output(interleaver_graph);
+
+            let reset_dec = decoder_node.clone();
+            let reset_buf = output_buffer_sink.clone();
             (
-                interleaver_node as Arc<dyn Pullable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>>,
-                Box::new(move || reset_handle.reset()) as Box<dyn Fn() + Send + Sync>,
+                decoder_graph as Arc<dyn Pushable<CompressedPacket>>,
+                Box::new(move || {
+                    reset_dec.reset();
+                    reset_buf.reset();
+                }) as Box<dyn Fn() + Send + Sync>,
             )
         };
 
@@ -347,13 +377,17 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             source_addr, meta.stream_id
         );
 
+        // Deref the Arc to get a SimpleBuffer clone for pulling.
+        // SimpleBuffer uses Arc<Mutex<...>> internally so clones share state.
+        let output_for_pull = (*output_buffer_sink).clone();
+
         self.buffers.insert(
             key,
             BufferEntry {
-                packet_queue,
-                decoder: decoder_node,
-                output,
-                output_reset,
+                pipeline_head,
+                output_buffer: output_for_pull,
+                pipeline_reset,
+                packet_counter: PacketCounter::new(),
                 meta,
                 pending_raw: HashMap::new(),
                 pending_fragments: HashMap::new(),
@@ -398,9 +432,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 // starts fresh from the new seq. For resume (seq == next_feed_seq),
                 // reset is harmless since no packets are queued ahead.
                 if seq != entry.next_feed_seq {
-                    entry.packet_queue.reset();
-                    entry.decoder.reset();
-                    (entry.output_reset)();
+                    (entry.pipeline_reset)();
                     entry.next_feed_seq = seq;
                     entry.pending_raw.clear();
                     entry.pending_fragments.clear();
@@ -421,53 +453,67 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
     /// Receives audio frame. Only stores if entry exists.
     ///
-    /// Compressed packets are fed into the packet queue in sequence order.
-    /// Out-of-order packets wait in `pending_raw` until predecessors arrive.
-    /// Fragmented frames are reassembled before feeding.
+    /// Compressed packets are pushed through the decode pipeline in sequence
+    /// order. Out-of-order packets wait in `pending_raw` until predecessors
+    /// arrive. Fragmented frames are reassembled before pushing.
     pub fn receive(&self, source_addr: SocketAddr, frame: SyncedFrame) {
         let key = BufferKey {
             source_addr,
             stream_id: frame.stream_id,
         };
 
-        let Some(mut entry) = self.buffers.get_mut(&key) else {
-            return;
-        };
-        let entry = &mut *entry;
+        // Collect packets to push, then release the DashMap lock before
+        // pushing through the decode pipeline. Decode + resample is expensive
+        // and must not block pull_and_mix (which needs iter_mut over the map).
+        let (pipeline_head, packets_to_push) = {
+            let Some(mut entry) = self.buffers.get_mut(&key) else {
+                return;
+            };
+            let entry = &mut *entry;
 
-        entry.last_seen = Instant::now();
+            entry.last_seen = Instant::now();
 
-        let seq = frame.sequence_number;
+            let seq = frame.sequence_number;
 
-        // Duplicate or old frame.
-        if seq < entry.next_feed_seq || entry.pending_raw.contains_key(&seq) {
-            return;
-        }
-
-        // Reassemble fragments if needed.
-        let frame = if frame.fragment_total <= 1 {
-            frame
-        } else {
-            match Self::insert_fragment(entry, frame) {
-                Some(assembled) => assembled,
-                None => return,
+            // Duplicate or old frame.
+            if seq < entry.next_feed_seq || entry.pending_raw.contains_key(&seq) {
+                return;
             }
-        };
 
-        // Feed into packet queue in order.
-        if seq == entry.next_feed_seq {
-            entry.packet_queue.push_packet(seq, frame.dur, frame.data);
-            entry.next_feed_seq += 1;
+            // Reassemble fragments if needed.
+            let frame = if frame.fragment_total <= 1 {
+                frame
+            } else {
+                match Self::insert_fragment(entry, frame) {
+                    Some(assembled) => assembled,
+                    None => return,
+                }
+            };
 
-            // Drain any consecutive pending packets.
-            while let Some(pending) = entry.pending_raw.remove(&entry.next_feed_seq) {
-                entry
-                    .packet_queue
-                    .push_packet(entry.next_feed_seq, pending.dur, pending.data);
+            let mut packets = Vec::new();
+
+            // Collect ready packets in sequence order.
+            if seq == entry.next_feed_seq {
+                entry.packet_counter.record_packet(seq);
+                packets.push(CompressedPacket { dur: frame.dur, data: frame.data });
                 entry.next_feed_seq += 1;
+
+                // Drain any consecutive pending packets.
+                while let Some(pending) = entry.pending_raw.remove(&entry.next_feed_seq) {
+                    entry.packet_counter.record_packet(entry.next_feed_seq);
+                    packets.push(CompressedPacket { dur: pending.dur, data: pending.data });
+                    entry.next_feed_seq += 1;
+                }
+            } else {
+                entry.pending_raw.insert(seq, frame);
+                return;
             }
-        } else {
-            entry.pending_raw.insert(seq, frame);
+
+            (entry.pipeline_head.clone(), packets)
+        };
+        // Lock released — push packets through decode pipeline without contention.
+        for packet in packets_to_push {
+            pipeline_head.push(packet);
         }
     }
 
@@ -526,7 +572,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     /// Pulls samples from all streams and mixes them together.
     ///
     /// For each playing stream whose start_party_time has arrived, pulls
-    /// PCM samples from its output pipeline node. Multiple streams are mixed.
+    /// pre-decoded PCM from its output buffer. Multiple streams are mixed.
     pub fn pull_and_mix(
         &self,
         num_frames: usize,
@@ -542,7 +588,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 continue;
             }
 
-            let Some(buf) = entry.output.pull(num_samples) else {
+            let Some(buf) = entry.output_buffer.pull(num_samples) else {
                 continue;
             };
 
@@ -594,9 +640,9 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 progress: SyncedStreamProgress {
                     samples_played: entry.samples_played,
                     total_samples: entry.meta.total_samples,
-                    buffered_frames: entry.packet_queue.packets_pushed(),
+                    buffered_frames: entry.packet_counter.packets_pushed(),
                     is_playing: entry.playing,
-                    highest_seq_received: entry.packet_queue.highest_seq(),
+                    highest_seq_received: entry.packet_counter.highest_seq(),
                 },
                 is_local_sender,
             });

@@ -1,107 +1,62 @@
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Mutex;
 
 use symphonia::core::audio::{AudioBufferRef, Signal};
 
 use super::compressed_packet_queue::CompressedPacket;
-use crate::pipeline::Pullable;
+use crate::pipeline::Node;
 
 /// Per-channel f32 PCM at the source sample rate.
+#[derive(Clone)]
 pub struct DecodedAudio {
     pub channels: Vec<Vec<f32>>,
 }
 
-/// Pulls compressed packets from upstream, decodes them using symphonia,
-/// outputs per-channel f32 PCM.
+/// Decodes a single compressed packet into per-channel f32 PCM using symphonia.
 ///
-/// Uses interior mutability (Mutex/RwLock) for thread safety.
+/// Uses interior mutability (Mutex) for thread safety.
 /// The `CHANNELS` const generic specifies the number of output channels.
 pub struct SymphoniaDecoder<const CHANNELS: usize> {
     decoder: Mutex<Box<dyn symphonia::core::codecs::Decoder>>,
-    source: RwLock<Option<Arc<dyn Pullable<CompressedPacket>>>>,
-    /// Leftover per-channel samples from the last decode that weren't consumed.
-    leftover: Mutex<Vec<Vec<f32>>>,
 }
 
 impl<const CHANNELS: usize> SymphoniaDecoder<CHANNELS> {
     pub fn new(decoder: Box<dyn symphonia::core::codecs::Decoder>) -> Self {
         Self {
             decoder: Mutex::new(decoder),
-            source: RwLock::new(None),
-            leftover: Mutex::new(vec![Vec::new(); CHANNELS]),
         }
     }
 
-    /// Set the upstream compressed packet source.
-    pub fn set_source(&self, source: Arc<dyn Pullable<CompressedPacket>>) {
-        *self.source.write().unwrap() = Some(source);
-    }
-
-    /// Reset decoder state and clear leftover buffer (for seek).
+    /// Reset decoder state (for seek).
     pub fn reset(&self) {
         self.decoder.lock().unwrap().reset();
-        let mut leftover = self.leftover.lock().unwrap();
-        for ch in leftover.iter_mut() {
-            ch.clear();
-        }
     }
 }
 
-impl<const CHANNELS: usize> Pullable<DecodedAudio> for SymphoniaDecoder<CHANNELS> {
-    /// Pull decoded PCM frames.
-    ///
-    /// `len` is the number of frames (samples per channel) requested.
-    /// Pulls compressed packets from source until enough frames are accumulated.
-    /// Returns partial data if source runs out. Returns `None` if nothing available.
-    fn pull(&self, len: usize) -> Option<DecodedAudio> {
-        let source = self.source.read().unwrap();
-        let source = source.as_ref()?;
+impl<const CHANNELS: usize> Node for SymphoniaDecoder<CHANNELS> {
+    type Input = CompressedPacket;
+    type Output = DecodedAudio;
 
+    /// Decode one compressed packet into per-channel f32 PCM.
+    fn process(&self, input: CompressedPacket) -> Option<DecodedAudio> {
         let mut decoder = self.decoder.lock().unwrap();
-        let mut leftover = self.leftover.lock().unwrap();
 
-        // Pull and decode packets until we have enough frames
-        while leftover[0].len() < len {
-            let Some(packet) = source.pull(1) else {
-                break;
-            };
+        let symphonia_packet = symphonia::core::formats::Packet::new_from_slice(
+            0,
+            0,
+            input.dur as u64,
+            &input.data,
+        );
 
-            let symphonia_packet = symphonia::core::formats::Packet::new_from_slice(
-                0,
-                0,
-                packet.dur as u64,
-                &packet.data,
-            );
-
-            match decoder.decode(&symphonia_packet) {
-                Ok(decoded) => {
-                    let channels = extract_f32_channels::<CHANNELS>(&decoded);
-                    for (ch, samples) in channels.into_iter().enumerate() {
-                        if ch < CHANNELS {
-                            leftover[ch].extend(samples);
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Log and skip this packet, try next one
-                    tracing::error!("Failed to decode compressed packet: {}", e);
-                    continue;
-                }
+        match decoder.decode(&symphonia_packet) {
+            Ok(decoded) => {
+                let channels = extract_f32_channels::<CHANNELS>(&decoded);
+                Some(DecodedAudio { channels })
+            }
+            Err(e) => {
+                tracing::error!("Failed to decode compressed packet: {}", e);
+                None
             }
         }
-
-        // Nothing decoded at all
-        if leftover[0].is_empty() {
-            return None;
-        }
-
-        // Drain up to `len` frames from each channel
-        let take = len.min(leftover[0].len());
-        let channels: Vec<Vec<f32>> = leftover
-            .iter_mut()
-            .map(|ch| ch.drain(..take).collect())
-            .collect();
-
-        Some(DecodedAudio { channels })
     }
 }
 
