@@ -57,9 +57,8 @@ impl<S: AudioSample, const C: usize, const SR: u32> StreamRegistry<S, C, SR> {
 
     /// Deserialize the envelope and dispatch to the matching stream.
     pub fn dispatch(&self, source: SocketAddr, data: &[u8]) -> anyhow::Result<()> {
-        let envelope =
-            rkyv::from_bytes::<TaggedPacket, rkyv::rancor::Error>(data)
-                .map_err(|e| anyhow::anyhow!("envelope deserialize: {:?}", e))?;
+        let envelope = rkyv::from_bytes::<TaggedPacket, rkyv::rancor::Error>(data)
+            .map_err(|e| anyhow::anyhow!("envelope deserialize: {:?}", e))?;
 
         match self.by_tag.get(&envelope.tag) {
             Some(stream) => stream.handle(source, envelope.tag, &envelope.payload),

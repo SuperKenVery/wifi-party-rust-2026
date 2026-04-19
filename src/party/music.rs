@@ -10,8 +10,8 @@
 use std::collections::VecDeque;
 use std::io::Cursor;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -92,8 +92,13 @@ impl MusicStream {
             codec_params,
         };
         {
-            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&meta).expect("SyncedMeta ser").into_vec();
-            network_sender.push(TaggedPacket { tag: SYNCED_META_TAG, payload });
+            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&meta)
+                .expect("SyncedMeta ser")
+                .into_vec();
+            network_sender.push(TaggedPacket {
+                tag: SYNCED_META_TAG,
+                payload,
+            });
         }
         synced_stream.receive_meta(LOCAL_ADDR, meta.clone());
 
@@ -104,8 +109,13 @@ impl MusicStream {
             seq: 1,
         };
         {
-            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&control).expect("SyncedControl ser").into_vec();
-            network_sender.push(TaggedPacket { tag: SYNCED_CONTROL_TAG, payload });
+            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&control)
+                .expect("SyncedControl ser")
+                .into_vec();
+            network_sender.push(TaggedPacket {
+                tag: SYNCED_CONTROL_TAG,
+                payload,
+            });
         }
         synced_stream.receive_control(LOCAL_ADDR, control);
 
@@ -251,17 +261,14 @@ impl Default for MusicStreamRegistry {
     }
 }
 
-impl<S: AudioSample, const C: usize, const SR: u32> NetworkStream<S, C, SR> for MusicStreamRegistry {
+impl<S: AudioSample, const C: usize, const SR: u32> NetworkStream<S, C, SR>
+    for MusicStreamRegistry
+{
     fn tags(&self) -> &'static [PacketTag] {
         &[REQUEST_FRAMES_TAG]
     }
 
-    fn handle(
-        &self,
-        _source: SocketAddr,
-        _tag: PacketTag,
-        bytes: &[u8],
-    ) -> anyhow::Result<()> {
+    fn handle(&self, _source: SocketAddr, _tag: PacketTag, bytes: &[u8]) -> anyhow::Result<()> {
         let req = rkyv::from_bytes::<RequestFramesPayload, rkyv::rancor::Error>(bytes)
             .map_err(|e| anyhow::anyhow!("RequestFramesPayload deserialize: {:?}", e))?;
         self.handle_retransmission(req.stream_id, req.seqs);
@@ -424,11 +431,7 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
 
         let total_samples = (duration * self.sample_rate() as f64) as u64;
         // Estimate total packets from first packet's dur, or fall back to 1024
-        let samples_per_frame = self
-            .vault
-            .get(&1)
-            .map(|p| p.dur as u64)
-            .unwrap_or(1024);
+        let samples_per_frame = self.vault.get(&1).map(|p| p.dur as u64).unwrap_or(1024);
         let est_packets = total_samples / samples_per_frame;
         self.meta.total_frames = est_packets;
         self.meta.total_samples = total_samples;
@@ -437,8 +440,13 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
             .store(est_packets, Ordering::Relaxed);
 
         {
-            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&self.meta).expect("SyncedMeta ser").into_vec();
-            self.network_sender.push(TaggedPacket { tag: SYNCED_META_TAG, payload });
+            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&self.meta)
+                .expect("SyncedMeta ser")
+                .into_vec();
+            self.network_sender.push(TaggedPacket {
+                tag: SYNCED_META_TAG,
+                payload,
+            });
         }
         self.synced_stream
             .receive_meta(LOCAL_ADDR, self.meta.clone());
@@ -477,8 +485,13 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
             stream_id: self.meta.stream_id,
         };
         {
-            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&control).expect("SyncedControl ser").into_vec();
-            self.network_sender.push(TaggedPacket { tag: SYNCED_CONTROL_TAG, payload });
+            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&control)
+                .expect("SyncedControl ser")
+                .into_vec();
+            self.network_sender.push(TaggedPacket {
+                tag: SYNCED_CONTROL_TAG,
+                payload,
+            });
         }
         self.synced_stream.receive_control(LOCAL_ADDR, control);
 
@@ -500,8 +513,13 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
             seq: self.last_pause_seq,
         };
         {
-            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&control).expect("SyncedControl ser").into_vec();
-            self.network_sender.push(TaggedPacket { tag: SYNCED_CONTROL_TAG, payload });
+            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&control)
+                .expect("SyncedControl ser")
+                .into_vec();
+            self.network_sender.push(TaggedPacket {
+                tag: SYNCED_CONTROL_TAG,
+                payload,
+            });
         }
         self.synced_stream.receive_control(LOCAL_ADDR, control);
 
@@ -531,8 +549,13 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
             seq,
         };
         {
-            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&control).expect("SyncedControl ser").into_vec();
-            self.network_sender.push(TaggedPacket { tag: SYNCED_CONTROL_TAG, payload });
+            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&control)
+                .expect("SyncedControl ser")
+                .into_vec();
+            self.network_sender.push(TaggedPacket {
+                tag: SYNCED_CONTROL_TAG,
+                payload,
+            });
         }
         self.synced_stream.receive_control(LOCAL_ADDR, control);
 
@@ -576,8 +599,13 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
                     self.is_complete = true;
                     self.meta.total_frames = self.frames_read;
                     self.meta.total_samples = self.vault.iter().map(|r| r.dur as u64).sum();
-                    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&self.meta).expect("SyncedMeta ser").into_vec();
-                    self.network_sender.push(TaggedPacket { tag: SYNCED_META_TAG, payload });
+                    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&self.meta)
+                        .expect("SyncedMeta ser")
+                        .into_vec();
+                    self.network_sender.push(TaggedPacket {
+                        tag: SYNCED_META_TAG,
+                        payload,
+                    });
                     break;
                 }
                 Err(_) => break,
@@ -592,8 +620,13 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
             };
             if let Some(packet) = self.vault.get(&seq) {
                 for frame in fragment_raw_packet(self.meta.stream_id, seq, &packet) {
-                    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&frame).expect("SyncedFrame ser").into_vec();
-                    self.network_sender.push(TaggedPacket { tag: SYNCED_TAG, payload });
+                    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&frame)
+                        .expect("SyncedFrame ser")
+                        .into_vec();
+                    self.network_sender.push(TaggedPacket {
+                        tag: SYNCED_TAG,
+                        payload,
+                    });
                 }
             }
         }
@@ -618,22 +651,25 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
                 for _ in 0..REDUNDANCY_COUNT {
                     for frame in &fragments {
                         {
-                            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(frame).expect("SyncedFrame ser").into_vec();
-                            self.network_sender.push(TaggedPacket { tag: SYNCED_TAG, payload });
+                            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(frame)
+                                .expect("SyncedFrame ser")
+                                .into_vec();
+                            self.network_sender.push(TaggedPacket {
+                                tag: SYNCED_TAG,
+                                payload,
+                            });
                         }
                     }
                 }
 
                 // Local loopback skips the wire, so hand it the unfragmented frame.
-                let local = SyncedFrame::whole(
-                    self.meta.stream_id,
-                    seq,
-                    packet.dur,
-                    packet.data.clone(),
-                );
+                let local =
+                    SyncedFrame::whole(self.meta.stream_id, seq, packet.dur, packet.data.clone());
                 self.synced_stream.receive(LOCAL_ADDR, local);
 
-                self.progress.streaming_current.store(seq, Ordering::Relaxed);
+                self.progress
+                    .streaming_current
+                    .store(seq, Ordering::Relaxed);
                 self.next_seq_to_send += 1;
             } else if self.is_complete && self.next_seq_to_send > self.meta.total_frames {
                 break;

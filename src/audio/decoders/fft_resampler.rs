@@ -87,6 +87,8 @@ impl<const CHANNELS: usize, const SAMPLE_RATE: u32> Node for FftResampler<CHANNE
             return None;
         }
 
-        Some(DecodedAudio { channels: all_resampled })
+        Some(DecodedAudio {
+            channels: all_resampled,
+        })
     }
 }

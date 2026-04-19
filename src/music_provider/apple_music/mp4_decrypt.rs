@@ -392,8 +392,7 @@ fn collect_fragment_runs(moof: &Mp4Box, moof_size_before: usize) -> Result<Fragm
             if tfhd.header_data.len() < tfhd_off + 4 {
                 bail!("tfhd truncated at default_sample_size");
             }
-            default_sample_size =
-                read_u32(&tfhd.header_data, tfhd_off);
+            default_sample_size = read_u32(&tfhd.header_data, tfhd_off);
             tfhd_off += 4;
         }
         let _ = tfhd_off;
@@ -730,7 +729,11 @@ pub fn decrypt_fmp4(
             if active_key_uri.is_some() {
                 wrapper.switch_keys()?;
             }
-            let adam_arg = if key_uri == PREFETCH_KEY { "0" } else { adam_id };
+            let adam_arg = if key_uri == PREFETCH_KEY {
+                "0"
+            } else {
+                adam_id
+            };
             if std::env::var("AM_DEBUG").is_ok() {
                 eprintln!(
                     "AM[frag {}] SWITCH adam={:?} key_uri={:?} runs={} samples_total={}",
@@ -738,7 +741,10 @@ pub fn decrypt_fmp4(
                     adam_arg,
                     key_uri,
                     info.runs.len(),
-                    info.runs.iter().map(|r| r.sample_sizes.len()).sum::<usize>()
+                    info.runs
+                        .iter()
+                        .map(|r| r.sample_sizes.len())
+                        .sum::<usize>()
                 );
             }
             wrapper.send_string(adam_arg)?;
@@ -750,7 +756,10 @@ pub fn decrypt_fmp4(
                 fragment_index,
                 key_uri,
                 info.runs.len(),
-                info.runs.iter().map(|r| r.sample_sizes.len()).sum::<usize>()
+                info.runs
+                    .iter()
+                    .map(|r| r.sample_sizes.len())
+                    .sum::<usize>()
             );
         }
 

@@ -1,7 +1,7 @@
 use std::io::Cursor;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rubato::{FftFixedIn, Resampler};
 use symphonia::core::audio::{AudioBufferRef, Signal};
@@ -136,14 +136,8 @@ fn decode_reference(codec_params: &WireCodecParams, packets: &[(u32, Vec<u8>)]) 
     let decoder_node = Arc::new(SymphoniaDecoder::<CH>::new(decoder));
 
     let pipeline_head: Arc<dyn Pushable<CompressedPacket>> = if codec_params.sample_rate != SR {
-        let resampler = FftFixedIn::new(
-            codec_params.sample_rate as usize,
-            SR as usize,
-            1024,
-            1,
-            CH,
-        )
-        .unwrap();
+        let resampler =
+            FftFixedIn::new(codec_params.sample_rate as usize, SR as usize, 1024, 1, CH).unwrap();
         let resampler_node = Arc::new(FftResampler::<f32, CH, SR>::new(resampler));
         let resampler_graph = Arc::new(GraphNode::new(resampler_node));
         resampler_graph.add_output(output_buffer.clone());
@@ -228,9 +222,7 @@ fn decode_ground_truth() -> (WireCodecParams, Vec<f32>, u32) {
                             let src_ch = ch % num_src_channels;
                             let sample: f32 = match &decoded {
                                 AudioBufferRef::F32(buf) => buf.chan(src_ch)[f],
-                                AudioBufferRef::S16(buf) => {
-                                    buf.chan(src_ch)[f] as f32 / 32768.0
-                                }
+                                AudioBufferRef::S16(buf) => buf.chan(src_ch)[f] as f32 / 32768.0,
                                 AudioBufferRef::S32(buf) => {
                                     buf.chan(src_ch)[f] as f32 / 2147483648.0
                                 }
@@ -263,7 +255,10 @@ fn test_output_matches_reference_decode() {
     let sid = new_stream_id();
     let (codec_params, packets) = load_packets(100);
     let reference = decode_reference(&codec_params, &packets);
-    assert!(!reference.is_empty(), "Reference decode produced no samples");
+    assert!(
+        !reference.is_empty(),
+        "Reference decode produced no samples"
+    );
 
     let clock = Arc::new(AtomicU64::new(0));
     let mgr = make_manager(clock.clone());
@@ -388,16 +383,21 @@ fn test_pipeline_vs_container_decode() {
     }
 
     // Cross-correlate to find offset, skipping leading silence
-    let pipe_first_nonzero = pipeline_raw.iter().position(|&s| s.abs() > 1e-4).unwrap_or(0);
-    let gt_first_nonzero = ground_truth.iter().position(|&s| s.abs() > 1e-4).unwrap_or(0);
+    let pipe_first_nonzero = pipeline_raw
+        .iter()
+        .position(|&s| s.abs() > 1e-4)
+        .unwrap_or(0);
+    let gt_first_nonzero = ground_truth
+        .iter()
+        .position(|&s| s.abs() > 1e-4)
+        .unwrap_or(0);
     let skip = pipe_first_nonzero.min(gt_first_nonzero);
-    let offset = find_best_offset(
-        &pipeline_raw[skip..],
-        &ground_truth[skip..],
-        CH,
-    );
+    let offset = find_best_offset(&pipeline_raw[skip..], &ground_truth[skip..], CH);
     let offset_frames = offset / CH as i64;
-    eprintln!("Best alignment offset (after skipping {} silent samples): {} frames", skip, offset_frames);
+    eprintln!(
+        "Best alignment offset (after skipping {} silent samples): {} frames",
+        skip, offset_frames
+    );
 
     // Compare aligned audio
     let (a, b) = if offset >= 0 {
@@ -412,10 +412,14 @@ fn test_pipeline_vs_container_decode() {
 
     let num_frames = a.len() / CH;
     let total_rms = {
-        let sum_sq: f64 = a.iter().zip(b.iter()).map(|(x, y)| {
-            let d = (*x - *y) as f64;
-            d * d
-        }).sum();
+        let sum_sq: f64 = a
+            .iter()
+            .zip(b.iter())
+            .map(|(x, y)| {
+                let d = (*x - *y) as f64;
+                d * d
+            })
+            .sum();
         (sum_sq / a.len() as f64).sqrt()
     };
     eprintln!("Overall RMS error (aligned): {:.2e}", total_rms);
@@ -435,7 +439,9 @@ fn test_pipeline_vs_container_decode() {
             if glitch_count < 10 {
                 eprintln!(
                     "  High error at frame {}: RMS {:.4} (time {:.3}s)",
-                    f, rms, f as f64 / _src_rate as f64
+                    f,
+                    rms,
+                    f as f64 / _src_rate as f64
                 );
             }
             glitch_count += 1;
@@ -443,7 +449,9 @@ fn test_pipeline_vs_container_decode() {
     }
     eprintln!(
         "Frames with error > {}: {} / {} ({:.2}%)",
-        glitch_threshold, glitch_count, num_frames,
+        glitch_threshold,
+        glitch_count,
+        num_frames,
         glitch_count as f64 / num_frames as f64 * 100.0,
     );
 
@@ -499,7 +507,10 @@ fn test_no_discontinuities() {
             jump_count += 1;
         }
     }
-    eprintln!("Max sample jump: {:.4}, discontinuities > {}: {}", max_jump, jump_threshold, jump_count);
+    eprintln!(
+        "Max sample jump: {:.4}, discontinuities > {}: {}",
+        max_jump, jump_threshold, jump_count
+    );
 
     // Some jumps are normal in music (drums, transients), but many indicate glitches.
     // For a typical music file, we allow a small percentage.
@@ -528,8 +539,8 @@ fn test_output_not_silent() {
     let output = pull_all(&mgr, &clock);
 
     assert!(!output.is_empty(), "No audio output produced");
-    let rms = (output.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / output.len() as f64)
-        .sqrt();
+    let rms =
+        (output.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / output.len() as f64).sqrt();
     assert!(rms > 1e-4, "Output is silent (RMS = {:.2e})", rms);
 }
 
@@ -815,14 +826,8 @@ fn decode_with_pull_size(
     let decoder_node = Arc::new(SymphoniaDecoder::<CH>::new(decoder));
 
     let pipeline_head: Arc<dyn Pushable<CompressedPacket>> = if codec_params.sample_rate != SR {
-        let resampler = FftFixedIn::new(
-            codec_params.sample_rate as usize,
-            SR as usize,
-            1024,
-            1,
-            CH,
-        )
-        .unwrap();
+        let resampler =
+            FftFixedIn::new(codec_params.sample_rate as usize, SR as usize, 1024, 1, CH).unwrap();
         let resampler_node = Arc::new(FftResampler::<f32, CH, SR>::new(resampler));
         let resampler_graph = Arc::new(GraphNode::new(resampler_node));
         resampler_graph.add_output(output_buffer.clone());
@@ -868,7 +873,10 @@ fn test_resampler_no_chunk_boundary_glitches() {
     let (codec_params, packets) = load_packets(50);
     let src_rate = codec_params.sample_rate;
     if src_rate == SR {
-        eprintln!("Skipping: source is already at {} Hz, no resampling needed", SR);
+        eprintln!(
+            "Skipping: source is already at {} Hz, no resampling needed",
+            SR
+        );
         return;
     }
 
@@ -882,13 +890,17 @@ fn test_resampler_no_chunk_boundary_glitches() {
 
     // Sample counts should match — pull size shouldn't affect total output
     assert_eq!(
-        small_output.len(), large_output.len(),
+        small_output.len(),
+        large_output.len(),
         "Pull size 256 ({} samples) vs 4096 ({} samples) differ!",
-        small_output.len(), large_output.len()
+        small_output.len(),
+        large_output.len()
     );
 
     // Content should be bit-exact
-    let max_diff: f64 = small_output.iter().zip(&large_output)
+    let max_diff: f64 = small_output
+        .iter()
+        .zip(&large_output)
         .map(|(a, b)| (a - b).abs() as f64)
         .fold(0.0, f64::max);
 
@@ -915,7 +927,10 @@ fn test_resampler_no_chunk_boundary_glitches() {
                 let frame = i / CH;
                 eprintln!(
                     "  Resampler discontinuity at frame {}: {:.4} -> {:.4} (jump {:.4})",
-                    frame, small_output[i - CH], small_output[i], diff
+                    frame,
+                    small_output[i - CH],
+                    small_output[i],
+                    diff
                 );
             }
             jump_count += 1;
@@ -997,7 +1012,9 @@ fn test_incremental_feeding_matches_bulk() {
 
     eprintln!(
         "Bulk: {} samples, Incremental: {} samples, Max diff: {:.2e}",
-        bulk_output.len(), inc_output.len(), max_diff
+        bulk_output.len(),
+        inc_output.len(),
+        max_diff
     );
 
     assert!(
@@ -1021,7 +1038,9 @@ fn resample_vec(input: &[f32], from_rate: u32, to_rate: u32, channels: usize) ->
 
     let num_frames = input.len() / channels;
     // De-interleave
-    let mut channel_bufs: Vec<Vec<f32>> = (0..channels).map(|_| Vec::with_capacity(num_frames)).collect();
+    let mut channel_bufs: Vec<Vec<f32>> = (0..channels)
+        .map(|_| Vec::with_capacity(num_frames))
+        .collect();
     for f in 0..num_frames {
         for ch in 0..channels {
             channel_bufs[ch].push(input[f * channels + ch]);
@@ -1035,7 +1054,10 @@ fn resample_vec(input: &[f32], from_rate: u32, to_rate: u32, channels: usize) ->
         let available = num_frames - offset;
 
         if available >= needed {
-            let chunks: Vec<&[f32]> = channel_bufs.iter().map(|c| &c[offset..offset + needed]).collect();
+            let chunks: Vec<&[f32]> = channel_bufs
+                .iter()
+                .map(|c| &c[offset..offset + needed])
+                .collect();
             let resampled = resampler.process(&chunks, None).unwrap();
             for (ch, data) in output.iter_mut().enumerate() {
                 data.extend_from_slice(&resampled[ch]);

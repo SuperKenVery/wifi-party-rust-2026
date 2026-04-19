@@ -239,8 +239,7 @@ impl NtpService {
 
         let local = Self::local_now_micros();
         let t2 = local.saturating_add_signed(inner.offset);
-        let delay_ms =
-            rand::thread_rng().gen_range(RESPONSE_DELAY_MIN_MS..=RESPONSE_DELAY_MAX_MS);
+        let delay_ms = rand::thread_rng().gen_range(RESPONSE_DELAY_MIN_MS..=RESPONSE_DELAY_MAX_MS);
         inner.pending_responses.push(PendingNtpResponse {
             request_id,
             t1,
@@ -304,7 +303,10 @@ impl NtpService {
         let payload = rkyv::to_bytes::<rkyv::rancor::Error>(packet)
             .expect("NtpPacket serialization")
             .into_vec();
-        self.sender.push(TaggedPacket { tag: NTP_TAG, payload });
+        self.sender.push(TaggedPacket {
+            tag: NTP_TAG,
+            payload,
+        });
     }
 
     async fn run(&self) {
@@ -367,11 +369,12 @@ impl NtpService {
                 }
             }
         }
-
     }
 }
 
-impl<S: crate::audio::AudioSample, const C: usize, const SR: u32> NetworkStream<S, C, SR> for NtpService {
+impl<S: crate::audio::AudioSample, const C: usize, const SR: u32> NetworkStream<S, C, SR>
+    for NtpService
+{
     fn tags(&self) -> &'static [PacketTag] {
         &[NTP_TAG]
     }

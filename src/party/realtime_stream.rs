@@ -364,7 +364,10 @@ impl crate::pipeline::Node for RealtimeFramePacker {
         let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&frame)
             .expect("RealtimeFrame serialization")
             .into_vec();
-        Some(TaggedPacket { tag: REALTIME_TAG, payload })
+        Some(TaggedPacket {
+            tag: REALTIME_TAG,
+            payload,
+        })
     }
 }
 

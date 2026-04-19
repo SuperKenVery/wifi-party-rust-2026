@@ -200,10 +200,7 @@ pub struct MediaSegment {
 /// Parse an Apple Music media playlist. All segments typically share a single
 /// file URI and differ only by `BYTERANGE`; we collapse them into a list in
 /// document order so fragment index `i` lines up with media segment `i`.
-pub async fn fetch_media_playlist(
-    client: &Client,
-    media_url: &str,
-) -> Result<Vec<MediaSegment>> {
+pub async fn fetch_media_playlist(client: &Client, media_url: &str) -> Result<Vec<MediaSegment>> {
     let text = client
         .get(media_url)
         .send()
@@ -248,10 +245,7 @@ fn parse_media_playlist(text: &str, media_url: &str) -> Result<Vec<MediaSegment>
         } else if line.starts_with("#EXTINF:") {
             has_extinf = true;
         } else if !line.starts_with('#') && !line.is_empty() {
-            let uri = base
-                .join(line)
-                .context("resolve segment URI")?
-                .to_string();
+            let uri = base.join(line).context("resolve segment URI")?.to_string();
             segments.push(MediaSegment {
                 uri,
                 key_uri: current_key_uri.clone(),

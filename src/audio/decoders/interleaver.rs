@@ -6,8 +6,8 @@
 use std::marker::PhantomData;
 
 use super::symphonia_decoder::DecodedAudio;
-use crate::audio::frame::AudioBuffer;
 use crate::audio::AudioSample;
+use crate::audio::frame::AudioBuffer;
 use crate::pipeline::Node;
 
 /// Interleaves per-channel decoded PCM into `AudioBuffer<Sample>`.

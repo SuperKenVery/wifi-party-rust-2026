@@ -72,15 +72,16 @@ fn apple_music_content(state: Arc<AppState>) -> Element {
                 }
             };
             status.set("Downloading + decrypting…".to_string());
-            let song = match download::download_song(&client, &token, &u, DEFAULT_WRAPPER_ADDR).await {
-                Ok(s) => s,
-                Err(e) => {
-                    error!("apple music download failed: {e:#}");
-                    status.set(format!("failed: {e}"));
-                    busy.set(false);
-                    return;
-                }
-            };
+            let song =
+                match download::download_song(&client, &token, &u, DEFAULT_WRAPPER_ADDR).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error!("apple music download failed: {e:#}");
+                        status.set(format!("failed: {e}"));
+                        busy.set(false);
+                        return;
+                    }
+                };
             info!(
                 "apple music: got {} bytes ({})",
                 song.bytes.len(),

@@ -39,7 +39,9 @@ use tracing::{error, info, warn};
 
 use crate::audio::AudioSample;
 use crate::audio::buffers::simple_buffer::SimpleBuffer;
-use crate::audio::decoders::{CompressedPacket, FftResampler, Interleaver, PacketCounter, SymphoniaDecoder};
+use crate::audio::decoders::{
+    CompressedPacket, FftResampler, Interleaver, PacketCounter, SymphoniaDecoder,
+};
 use crate::audio::frame::AudioBuffer;
 use crate::audio::symphonia_compat::WireCodecParams;
 use crate::party::network_stream::NetworkStream;
@@ -307,13 +309,17 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
         // Build push pipeline: decoder → resampler → interleaver → output_buffer.
         // FftResampler passes through unchanged when src rate == SAMPLE_RATE.
-        let resampler_node = match FftResampler::<CHANNELS, SAMPLE_RATE>::new(meta.codec_params.sample_rate) {
-            Ok(r) => Arc::new(r),
-            Err(e) => {
-                error!("Failed to create resampler for stream {}: {}", meta.stream_id, e);
-                return;
-            }
-        };
+        let resampler_node =
+            match FftResampler::<CHANNELS, SAMPLE_RATE>::new(meta.codec_params.sample_rate) {
+                Ok(r) => Arc::new(r),
+                Err(e) => {
+                    error!(
+                        "Failed to create resampler for stream {}: {}",
+                        meta.stream_id, e
+                    );
+                    return;
+                }
+            };
 
         let interleaver_node = Arc::new(Interleaver::<Sample, CHANNELS, SAMPLE_RATE>::new());
 
@@ -461,13 +467,19 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             // Collect ready packets in sequence order.
             if seq == entry.next_feed_seq {
                 entry.packet_counter.record_packet(seq);
-                packets.push(CompressedPacket { dur: frame.dur, data: frame.data });
+                packets.push(CompressedPacket {
+                    dur: frame.dur,
+                    data: frame.data,
+                });
                 entry.next_feed_seq += 1;
 
                 // Drain any consecutive pending packets.
                 while let Some(pending) = entry.pending_raw.remove(&entry.next_feed_seq) {
                     entry.packet_counter.record_packet(entry.next_feed_seq);
-                    packets.push(CompressedPacket { dur: pending.dur, data: pending.data });
+                    packets.push(CompressedPacket {
+                        dur: pending.dur,
+                        data: pending.data,
+                    });
                     entry.next_feed_seq += 1;
                 }
             } else {
@@ -477,7 +489,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
             (entry.pipeline_head.clone(), packets)
         };
-        
+
         // DashMap lock released — push packets through decode pipeline without contention.
         for packet in packets_to_push {
             pipeline_head.push(packet);
@@ -705,14 +717,16 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             loop {
                 interval.tick().await;
                 for (_addr, stream_id, seqs) in stream.get_missing_frames() {
-                    let payload =
-                        rkyv::to_bytes::<rkyv::rancor::Error>(&RequestFramesPayload {
-                            stream_id,
-                            seqs,
-                        })
-                        .expect("RequestFramesPayload serialization")
-                        .into_vec();
-                    sender.push(TaggedPacket { tag: REQUEST_FRAMES_TAG, payload });
+                    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&RequestFramesPayload {
+                        stream_id,
+                        seqs,
+                    })
+                    .expect("RequestFramesPayload serialization")
+                    .into_vec();
+                    sender.push(TaggedPacket {
+                        tag: REQUEST_FRAMES_TAG,
+                        payload,
+                    });
                 }
             }
         });
