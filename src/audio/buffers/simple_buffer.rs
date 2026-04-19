@@ -38,6 +38,15 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     pub fn reset(&self) {
         self.queue.lock().unwrap().clear();
     }
+
+    /// Discards up to `n` samples from the front of the buffer.
+    /// Returns the number of samples actually discarded.
+    pub fn discard(&self, n: usize) -> usize {
+        let mut queue = self.queue.lock().unwrap();
+        let actual = n.min(queue.len());
+        queue.drain(..actual).for_each(drop);
+        actual
+    }
 }
 
 impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Default

@@ -389,6 +389,9 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 entry.playing = true;
                 entry.start_party_time = party_clock_time;
                 entry.last_seen = Instant::now();
+                // Reset samples_played so drift correction is relative to
+                // the new start_party_time, not accumulated from a prior session.
+                entry.samples_played = 0;
 
                 // Reset pipeline and pending queues on seek.
                 // Sender handles seeking in the source file — receiver just
@@ -474,7 +477,8 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
             (entry.pipeline_head.clone(), packets)
         };
-        // Lock released — push packets through decode pipeline without contention.
+        
+        // DashMap lock released — push packets through decode pipeline without contention.
         for packet in packets_to_push {
             pipeline_head.push(packet);
         }
@@ -546,8 +550,36 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         let mut source_count = 0usize;
         let mut actual_len = 0usize;
 
+        // 10ms lag threshold before we attempt drift correction.
+        let drift_threshold = SAMPLE_RATE as u64 * 10 / 1000;
+
         for mut entry in self.buffers.iter_mut() {
             if !entry.playing || entry.start_party_time > party_now {
+                continue;
+            }
+
+            // Drift correction relative to party clock.
+            let elapsed_us = party_now.saturating_sub(entry.start_party_time);
+            let expected_samples = elapsed_us * SAMPLE_RATE as u64 / 1_000_000;
+
+            if entry.samples_played + drift_threshold < expected_samples {
+                // Lagging: discard old audio from the buffer to skip ahead.
+                let lag_samples = expected_samples - entry.samples_played;
+                let to_discard = (lag_samples as usize).saturating_mul(CHANNELS);
+                entry.output_buffer.discard(to_discard);
+                warn!(
+                    "Synced stream lagging: discarding {:.1}ms of audio",
+                    lag_samples as f64 * 1000.0 / SAMPLE_RATE as f64
+                );
+                entry.samples_played = expected_samples;
+            } else if expected_samples + drift_threshold < entry.samples_played {
+                // Ahead: hold back by contributing silence this callback.
+                // Don't pull and don't advance samples_played — let the party
+                // clock catch up before resuming normal output.
+                warn!(
+                    "Synced stream ahead by {:.1}ms, inserting silence",
+                    (entry.samples_played - expected_samples) as f64 * 1000.0 / SAMPLE_RATE as f64
+                );
                 continue;
             }
 
