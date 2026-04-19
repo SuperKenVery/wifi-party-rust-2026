@@ -11,7 +11,9 @@
 //!                     ↓ push(CompressedPacket)
 //!                   SymphoniaDecoder (per-channel f32 PCM)
 //!                     ↓ push(DecodedAudio)
-//!                   FftResampler or Interleaver (interleaved AudioBuffer)
+//!                   FftResampler (resamples or passes through; per-channel f32 PCM)
+//!                     ↓ push(DecodedAudio)
+//!                   Interleaver (interleaved AudioBuffer)
 //!                     ↓ push(AudioBuffer)
 //!                   SimpleBuffer (pre-decoded audio ring)
 //!                     ↑ pull()
@@ -32,7 +34,6 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use rkyv::{Archive, Deserialize, Serialize};
-use rubato::FftFixedIn;
 use symphonia::core::codecs::DecoderOptions;
 use tracing::{error, info, warn};
 
@@ -293,84 +294,35 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
         let decoder_node = Arc::new(SymphoniaDecoder::<CHANNELS>::new(decoder));
 
-        // Build push pipeline: decoder → resampler/interleaver → output_buffer.
-        // The head of the chain is what we push CompressedPackets into.
-        let (pipeline_head, pipeline_reset): (
-            Arc<dyn Pushable<CompressedPacket>>,
-            Box<dyn Fn() + Send + Sync>,
-        ) = if meta.codec_params.sample_rate != SAMPLE_RATE {
-            // Resampling path
-            match FftFixedIn::<f32>::new(
-                meta.codec_params.sample_rate as usize,
-                SAMPLE_RATE as usize,
-                1024,
-                1,
-                CHANNELS,
-            ) {
-                Ok(r) => {
-                    info!(
-                        "Created resampler {}Hz -> {}Hz for stream {}",
-                        meta.codec_params.sample_rate, SAMPLE_RATE, meta.stream_id
-                    );
-                    let resampler_node =
-                        Arc::new(FftResampler::<Sample, CHANNELS, SAMPLE_RATE>::new(r));
-                    // Wire: decoder_graph → resampler_graph → output_buffer_sink
-                    let resampler_graph = Arc::new(GraphNode::new(resampler_node.clone()));
-                    resampler_graph.add_output(output_buffer_sink.clone());
-                    let decoder_graph = Arc::new(GraphNode::new(decoder_node.clone()));
-                    decoder_graph.add_output(resampler_graph);
-
-                    let reset_dec = decoder_node.clone();
-                    let reset_res = resampler_node.clone();
-                    let reset_buf = output_buffer_sink.clone();
-                    (
-                        decoder_graph as Arc<dyn Pushable<CompressedPacket>>,
-                        Box::new(move || {
-                            reset_dec.reset();
-                            reset_res.reset();
-                            reset_buf.reset();
-                        }) as Box<dyn Fn() + Send + Sync>,
-                    )
-                }
-                Err(e) => {
-                    error!("Failed to create resampler: {}", e);
-                    // Fall back to interleaver (wrong sample rate, but won't crash)
-                    let interleaver_node =
-                        Interleaver::<Sample, CHANNELS, SAMPLE_RATE>::new();
-                    let interleaver_graph = Arc::new(GraphNode::new(Arc::new(interleaver_node)));
-                    interleaver_graph.add_output(output_buffer_sink.clone());
-                    let decoder_graph = Arc::new(GraphNode::new(decoder_node.clone()));
-                    decoder_graph.add_output(interleaver_graph);
-
-                    let reset_dec = decoder_node.clone();
-                    let reset_buf = output_buffer_sink.clone();
-                    (
-                        decoder_graph as Arc<dyn Pushable<CompressedPacket>>,
-                        Box::new(move || {
-                            reset_dec.reset();
-                            reset_buf.reset();
-                        }) as Box<dyn Fn() + Send + Sync>,
-                    )
-                }
+        // Build push pipeline: decoder → resampler → interleaver → output_buffer.
+        // FftResampler passes through unchanged when src rate == SAMPLE_RATE.
+        let resampler_node = match FftResampler::<CHANNELS, SAMPLE_RATE>::new(meta.codec_params.sample_rate) {
+            Ok(r) => Arc::new(r),
+            Err(e) => {
+                error!("Failed to create resampler for stream {}: {}", meta.stream_id, e);
+                return;
             }
-        } else {
-            // No resampling — interleave directly
-            let interleaver_node = Interleaver::<Sample, CHANNELS, SAMPLE_RATE>::new();
-            let interleaver_graph = Arc::new(GraphNode::new(Arc::new(interleaver_node)));
-            interleaver_graph.add_output(output_buffer_sink.clone());
-            let decoder_graph = Arc::new(GraphNode::new(decoder_node.clone()));
-            decoder_graph.add_output(interleaver_graph);
-
-            let reset_dec = decoder_node.clone();
-            let reset_buf = output_buffer_sink.clone();
-            (
-                decoder_graph as Arc<dyn Pushable<CompressedPacket>>,
-                Box::new(move || {
-                    reset_dec.reset();
-                    reset_buf.reset();
-                }) as Box<dyn Fn() + Send + Sync>,
-            )
         };
+
+        let interleaver_node = Arc::new(Interleaver::<Sample, CHANNELS, SAMPLE_RATE>::new());
+
+        // Wire: decoder_graph → resampler_graph → interleaver_graph → output_buffer_sink
+        let interleaver_graph = Arc::new(GraphNode::new(interleaver_node));
+        interleaver_graph.add_output(output_buffer_sink.clone());
+        let resampler_graph = Arc::new(GraphNode::new(resampler_node.clone()));
+        resampler_graph.add_output(interleaver_graph);
+        let decoder_graph = Arc::new(GraphNode::new(decoder_node.clone()));
+        decoder_graph.add_output(resampler_graph);
+
+        let reset_dec = decoder_node.clone();
+        let reset_res = resampler_node.clone();
+        let reset_buf = output_buffer_sink.clone();
+        let pipeline_head: Arc<dyn Pushable<CompressedPacket>> = decoder_graph;
+        let pipeline_reset: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+            reset_dec.reset();
+            reset_res.reset();
+            reset_buf.reset();
+        });
 
         info!(
             "Creating synced buffer for source {} stream {}",

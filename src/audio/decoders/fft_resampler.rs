@@ -1,43 +1,46 @@
-use std::marker::PhantomData;
 use std::sync::Mutex;
 
-use rubato::{FftFixedIn, Resampler};
+use rubato::{FftFixedIn, Resampler, ResamplerConstructionError};
 
 use super::symphonia_decoder::DecodedAudio;
-use crate::audio::frame::AudioBuffer;
-use crate::audio::AudioSample;
 use crate::pipeline::Node;
 
-/// Resamples per-channel decoded PCM to target sample rate,
-/// outputs interleaved `AudioBuffer<Sample>`.
+/// Resamples per-channel decoded PCM to the target sample rate, or passes
+/// through unchanged when source rate already matches the target.
 ///
 /// Uses `FftFixedIn` from rubato for high-quality FFT-based resampling.
 ///
 /// Decoded frames are accumulated in `pre_resample` until there are enough for a
 /// full resampler chunk (`input_frames_next()`). This avoids zero-padding partial
 /// chunks which would corrupt the FFT overlap-add state with discontinuities.
-pub struct FftResampler<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    resampler: Mutex<FftFixedIn<f32>>,
+///
+/// Interleaving is NOT performed here — use `Interleaver` as the next pipeline node.
+pub struct FftResampler<const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    /// None when src_sample_rate == SAMPLE_RATE (pass-through mode).
+    resampler: Option<Mutex<FftFixedIn<f32>>>,
     /// Per-channel decoded frames waiting to be resampled.
-    /// Accumulated until we have enough for a full resampler chunk.
     pre_resample: Mutex<Vec<Vec<f32>>>,
-    _sample: PhantomData<Sample>,
 }
 
-impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
-    FftResampler<Sample, CHANNELS, SAMPLE_RATE>
-{
-    pub fn new(resampler: FftFixedIn<f32>) -> Self {
-        Self {
-            resampler: Mutex::new(resampler),
+impl<const CHANNELS: usize, const SAMPLE_RATE: u32> FftResampler<CHANNELS, SAMPLE_RATE> {
+    pub fn new(src_sample_rate: u32) -> Result<Self, ResamplerConstructionError> {
+        let resampler = if src_sample_rate != SAMPLE_RATE {
+            Some(Mutex::new(FftFixedIn::<f32>::new(
+                src_sample_rate as usize,
+                SAMPLE_RATE as usize,
+                1024,
+                1,
+                CHANNELS,
+            )?))
+        } else {
+            None
+        };
+        Ok(Self {
+            resampler,
             pre_resample: Mutex::new(vec![Vec::new(); CHANNELS]),
-            _sample: PhantomData,
-        }
+        })
     }
 
-    /// Clear internal buffers (for seek).
-    /// Resampler state is preserved as it's not resettable,
-    /// but clearing the buffers ensures clean start.
     pub fn reset(&self) {
         for ch in self.pre_resample.lock().unwrap().iter_mut() {
             ch.clear();
@@ -45,27 +48,24 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     }
 }
 
-impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Node
-    for FftResampler<Sample, CHANNELS, SAMPLE_RATE>
-{
+impl<const CHANNELS: usize, const SAMPLE_RATE: u32> Node for FftResampler<CHANNELS, SAMPLE_RATE> {
     type Input = DecodedAudio;
-    type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
+    type Output = DecodedAudio;
 
-    /// Accumulate input into pre_resample buffer, process all complete resampler chunks,
-    /// and return interleaved output. Returns `None` when still accumulating
-    /// (not enough frames for a full resampler chunk yet).
-    fn process(&self, input: DecodedAudio) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
-        let mut resampler = self.resampler.lock().unwrap();
+    fn process(&self, input: DecodedAudio) -> Option<DecodedAudio> {
+        let Some(resampler_lock) = &self.resampler else {
+            return Some(input);
+        };
+
+        let mut resampler = resampler_lock.lock().unwrap();
         let mut pre = self.pre_resample.lock().unwrap();
 
-        // Append input to pre-resample buffer
         for (ch, samples) in input.channels.iter().enumerate() {
             if ch < CHANNELS {
                 pre[ch].extend_from_slice(samples);
             }
         }
 
-        // Process all complete chunks
         let mut all_resampled: Vec<Vec<f32>> = (0..CHANNELS).map(|_| Vec::new()).collect();
 
         loop {
@@ -83,19 +83,10 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Node
             }
         }
 
-        let num_frames = all_resampled[0].len();
-        if num_frames == 0 {
+        if all_resampled[0].is_empty() {
             return None;
         }
 
-        // Interleave into output
-        let mut interleaved = Vec::with_capacity(num_frames * CHANNELS);
-        for f in 0..num_frames {
-            for ch in 0..CHANNELS {
-                interleaved.push(Sample::from_f64_normalized(all_resampled[ch][f] as f64));
-            }
-        }
-
-        AudioBuffer::new(interleaved).ok()
+        Some(DecodedAudio { channels: all_resampled })
     }
 }

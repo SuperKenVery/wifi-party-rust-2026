@@ -4,7 +4,7 @@
 //! - [`PacketCounter`] — tracks packet progress counters
 //! - [`SymphoniaDecoder`] — decodes compressed packets to per-channel f32 PCM
 //! - [`Interleaver`] — interleaves decoded PCM to AudioBuffer (no resampling)
-//! - [`FftResampler`] — resamples decoded PCM to target sample rate
+//! - [`FftResampler`] — resamples decoded PCM to target sample rate, or passes through when rates match
 
 pub mod compressed_packet_queue;
 pub mod fft_resampler;

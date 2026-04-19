@@ -6,6 +6,8 @@
 //!
 //! Reference implementation: https://github.com/zhaarey/apple-music-downloader
 //! Wrapper protocol documented in `mp4_decrypt.rs`.
+//!
+//! This module's implementation was fully written by AI, no human review involved.
 
 pub mod api;
 pub mod download;

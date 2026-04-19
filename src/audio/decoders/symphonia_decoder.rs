@@ -6,6 +6,8 @@ use super::compressed_packet_queue::CompressedPacket;
 use crate::pipeline::Node;
 
 /// Per-channel f32 PCM at the source sample rate.
+///
+/// We don't encode sample rate in type because it's dynamic (unknown, from network)
 #[derive(Clone)]
 pub struct DecodedAudio {
     pub channels: Vec<Vec<f32>>,
@@ -40,12 +42,8 @@ impl<const CHANNELS: usize> Node for SymphoniaDecoder<CHANNELS> {
     fn process(&self, input: CompressedPacket) -> Option<DecodedAudio> {
         let mut decoder = self.decoder.lock().unwrap();
 
-        let symphonia_packet = symphonia::core::formats::Packet::new_from_slice(
-            0,
-            0,
-            input.dur as u64,
-            &input.data,
-        );
+        let symphonia_packet =
+            symphonia::core::formats::Packet::new_from_slice(0, 0, input.dur as u64, &input.data);
 
         match decoder.decode(&symphonia_packet) {
             Ok(decoded) => {
@@ -102,8 +100,7 @@ fn extract_f32_channels<const CHANNELS: usize>(decoded: &AudioBufferRef) -> Vec<
         AudioBufferRef::U8(buf) => {
             for f in 0..num_frames {
                 for ch in 0..CHANNELS {
-                    channels[ch]
-                        .push((buf.chan(ch % num_src_channels)[f] as f32 - 128.0) / 128.0);
+                    channels[ch].push((buf.chan(ch % num_src_channels)[f] as f32 - 128.0) / 128.0);
                 }
             }
         }
