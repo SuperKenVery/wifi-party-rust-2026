@@ -669,11 +669,14 @@ const PREFETCH_KEY: &str = "skd://itunes.apple.com/P000000000/s1/e1";
 /// `adam_id` is the song's Apple Music adam id (numeric string).
 ///
 /// `wrapper_addr` is the TCP address of the decryption service.
+///
+/// `progress` is called with a value in `[0, 1]` after each fragment is decrypted.
 pub fn decrypt_fmp4(
     data: &[u8],
     key_uris: &[String],
     adam_id: &str,
     wrapper_addr: &str,
+    progress: Option<&dyn Fn(f32)>,
 ) -> Result<Vec<u8>> {
     let mut boxes = parse_all(data).context("parse fMP4")?;
 
@@ -683,6 +686,8 @@ pub fn decrypt_fmp4(
             decrypt_moov(bx)?;
         }
     }
+
+    let total_fragments = boxes.iter().filter(|b| &b.btype == b"moof").count().max(1);
 
     // Collect and decrypt every moof/mdat pair.
     let mut wrapper = WrapperConn::connect(wrapper_addr)?;
@@ -787,6 +792,9 @@ pub fn decrypt_fmp4(
         force_sample_desc_index_1(&mut boxes[i]);
 
         fragment_index += 1;
+        if let Some(cb) = progress {
+            cb(fragment_index as f32 / total_fragments as f32);
+        }
         i = mdat_pos + 1;
     }
 

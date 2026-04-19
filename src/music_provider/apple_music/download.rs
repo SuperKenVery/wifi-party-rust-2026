@@ -3,6 +3,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use regex::Regex;
 use reqwest::Client;
+use std::sync::Arc;
 
 use super::api;
 use super::m3u8;
@@ -55,6 +56,17 @@ pub struct DownloadedSong {
     pub info: api::SongData,
 }
 
+/// Progress event reported to the UI during download + decrypt.
+#[derive(Clone, Copy)]
+pub enum DownloadProgress {
+    /// HTTP download; value is `[0, 1]`.
+    Download(f32),
+    /// Decryption; value is `[0, 1]`.
+    Decrypt(f32),
+}
+
+pub type ProgressFn = Arc<dyn Fn(DownloadProgress) + Send + Sync>;
+
 /// Download and decrypt one song from a user-supplied Apple Music URL.
 pub async fn download_song(
     client: &Client,
@@ -63,16 +75,20 @@ pub async fn download_song(
     wrapper_addr: &str,
 ) -> Result<DownloadedSong> {
     let (storefront, song_id) = parse_song_url(url)?;
-    download_song_by_id(client, token, &storefront, &song_id, wrapper_addr).await
+    download_song_by_id(client, token, &storefront, &song_id, wrapper_addr, None).await
 }
 
 /// Same as [`download_song`] but taking an explicit storefront + song id.
+///
+/// Pass `progress` to receive normalized `[0, 1]` progress updates:
+/// `0..0.6` = HTTP download, `0.6..1.0` = decrypt.
 pub async fn download_song_by_id(
     client: &Client,
     token: &str,
     storefront: &str,
     song_id: &str,
     wrapper_addr: &str,
+    progress: Option<ProgressFn>,
 ) -> Result<DownloadedSong> {
     let info = api::get_song(client, token, storefront, song_id)
         .await
@@ -117,15 +133,22 @@ pub async fn download_song_by_id(
     // All Apple Music media playlists point all segments at the same file
     // with different byterange. We just download the whole file in one shot.
     let file_uri = &segments[0].uri;
-    let raw = client
+    let mut resp = client
         .get(file_uri)
         .send()
         .await
         .context("download fMP4 payload")?
-        .error_for_status()?
-        .bytes()
-        .await?;
-    let raw_vec = raw.to_vec();
+        .error_for_status()?;
+    let content_length = resp.content_length();
+    let capacity = content_length.unwrap_or(0) as usize;
+    let mut raw_vec = Vec::with_capacity(capacity);
+    while let Some(chunk) = resp.chunk().await.context("download fMP4 chunk")? {
+        raw_vec.extend_from_slice(&chunk);
+        if let (Some(cb), Some(total)) = (&progress, content_length) {
+            let frac = (raw_vec.len() as f32 / total as f32).min(1.0);
+            cb(DownloadProgress::Download(frac));
+        }
+    }
     tracing::info!(
         "Apple Music: downloaded {} bytes of encrypted fMP4",
         raw_vec.len()
@@ -150,7 +173,15 @@ pub async fn download_song_by_id(
         let key_uris = key_uris;
         let song_id = song_id.to_string();
         let wrapper_addr = wrapper_addr.to_string();
-        move || mp4_decrypt::decrypt_fmp4(&raw, &key_uris, &song_id, &wrapper_addr)
+        let progress = progress.clone();
+        move || {
+            let decrypt_cb = |frac: f32| {
+                if let Some(cb) = &progress {
+                    cb(DownloadProgress::Decrypt(frac));
+                }
+            };
+            mp4_decrypt::decrypt_fmp4(&raw, &key_uris, &song_id, &wrapper_addr, Some(&decrypt_cb))
+        }
     })
     .await
     .context("decrypt worker panicked")??;

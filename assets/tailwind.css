@@ -1,2 +1,3 @@
 @import "tailwindcss";
 @source "../src/ui/**/*.rs";
+@source "../src/music_provider/**/*.rs";
