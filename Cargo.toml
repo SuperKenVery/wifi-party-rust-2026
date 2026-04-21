@@ -37,16 +37,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
 mp4-atom = { package = "media-mp4-atom", version = "0.10.1" }
-burn = { version = "0.21.0-pre.3", features = ["wgpu"] }
+ort = "2.0.0-rc.12"
+ndarray = "0.17"
 gpu-fft = { version = "1.1.1", features = ["wgpu"] }
-burn-store = "0.21.0-pre.3"
 
 [target.'cfg(target_os = "android")'.dependencies]
 ndk-context = "0.1"
 jni = "0.21"
 
 [build-dependencies]
-burn-onnx = "0.21.0-pre.3"
 
 [dev-dependencies]
 hound = "3.5"

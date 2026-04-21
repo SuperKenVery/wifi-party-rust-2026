@@ -1,10 +1,10 @@
-//! Vocal remover effect using the RT-DTT model via burn + gpu-fft.
+//! Vocal remover effect using the RT-DTT model via ONNX Runtime (ort) + gpu-fft.
 //!
 //! ## How it works
 //!
-//! At **build time** `build.rs` converts `all_rt.onnx` into burn-native Rust code
+//! At **build time** `build.rs` embeds `all_rt.onnx` into the binary
 //! (sets `cfg(has_vocal_model)`).  At **run time** `gpu-fft` (CubeCL / wgpu) does
-//! the STFT/iSTFT on the GPU, and burn-wgpu runs the separation network on the GPU.
+//! the STFT/iSTFT on the GPU, and ONNX Runtime runs the separation network.
 //!
 //! When the model is not available at build time (no ONNX file found) the node
 //! compiles as a pass-through and emits a tracing warning on first use.
@@ -16,26 +16,13 @@
 //! 1. Zero-pad OVERLAP=512 on each side → `INF_CHUNK = 32 256` samples.
 //! 2. GPU STFT: batch all frames × channels with `gpu_fft::fft_batch`.
 //!    Periodic Hann window, `n_fft=1024`, `hop=512`, `center=True`.
-//! 3. Pack first `DIM_F=384` bins into a burn `Tensor<_, 4>` shape `[1,4,384,64]`.
-//! 4. GPU inference with the burn model → `Tensor<_, 5>` shape `[1,4,4,384,64]`.
+//! 3. Pack first `DIM_F=384` bins into an ONNX input `[1,4,384,64]`.
+//! 4. Inference with ONNX Runtime → output `[1,4,4,384,64]`.
 //! 5. GPU iSTFT: reconstruct the vocal waveform with `gpu_fft::ifft_batch` + OLA.
 //! 6. `instrumental = mix − vocals` (source index 3), trim overlap.
 
-// ── Conditional model include ─────────────────────────────────────────────────
-
 #[cfg(has_vocal_model)]
-mod generated {
-    // burn-import generates this file from all_rt.onnx at build time.
-    include!(concat!(env!("OUT_DIR"), "/vocal_model/all_rt.rs"));
-}
-
-// ── Imports ───────────────────────────────────────────────────────────────────
-
-#[cfg(has_vocal_model)]
-use burn::{
-    backend::wgpu::WgpuDevice,
-    tensor::{Tensor, TensorData},
-};
+use ort::session::Session;
 
 use std::sync::Mutex;
 
@@ -56,11 +43,6 @@ const INF_CHUNK: usize = HOP_LENGTH * (DIM_T - 1); // 32 256
 const GEN_SIZE: usize = INF_CHUNK - 2 * OVERLAP; // 31 232
 const N_SOURCES: usize = 4; // bass / drums / other / vocals
 const VOCALS_IDX: usize = 3;
-
-// ── Backend alias ─────────────────────────────────────────────────────────────
-
-#[cfg(has_vocal_model)]
-type Backend = burn::backend::Wgpu;
 
 // ── Hann window ───────────────────────────────────────────────────────────────
 
@@ -185,11 +167,7 @@ fn istft_gpu(spectrograms: &[(Vec<f32>, Vec<f32>)]) -> Vec<Vec<f32>> {
 ///
 /// Returns `GEN_SIZE * 2` interleaved stereo f32 samples (vocal-removed).
 #[cfg(has_vocal_model)]
-fn infer_chunk(
-    model: &generated::Model<Backend>,
-    device: &WgpuDevice,
-    chunk: &[f32],
-) -> Vec<f32> {
+fn infer_chunk(session: &mut Session, chunk: &[f32]) -> Vec<f32> {
     debug_assert_eq!(chunk.len(), INF_CHUNK * 2);
 
     // 1. De-interleave.
@@ -216,21 +194,24 @@ fn infer_chunk(
         }
     }
 
-    // 4. Create burn tensor and run the model.
+    // 4. Run ONNX inference.
     //    Input:  [1, 4, DIM_F, DIM_T]
     //    Output: [1, 4, 4, DIM_F, DIM_T]  (batch, source, cri, freq, time)
-    let input_tensor = Tensor::<Backend, 4>::from_data(
-        TensorData::new(onnx_in, [1, 4, DIM_F, DIM_T]),
-        device,
-    );
-    let output_tensor = model.forward(input_tensor);
-    let out_data: Vec<f32> = output_tensor.into_data().to_vec().unwrap();
-    // Flat strides: [src × 4×DIM_F×DIM_T | cri × DIM_F×DIM_T | freq × DIM_T | t]
+    let input_array =
+        ndarray::Array4::from_shape_vec((1, 4, DIM_F, DIM_T), onnx_in).expect("input shape");
+    let input_tensor = ort::value::Tensor::from_array(input_array).expect("create tensor");
+    let outputs = session
+        .run(ort::inputs!["input" => input_tensor])
+        .expect("session run");
+    let (_shape, output_slice) = outputs[0]
+        .try_extract_tensor::<f32>()
+        .expect("extract tensor");
+    let out_data: Vec<f32> = output_slice.to_vec();
 
     // 5. Unpack the vocal source spectrogram.
     //    out_data[src * src_stride + cri * cri_stride + freq * DIM_T + t]
     let src_stride = 4 * DIM_F * DIM_T; // 4 * 384 * 64 = 98 304
-    let cri_stride = DIM_F * DIM_T;     //     384 * 64 = 24 576
+    let cri_stride = DIM_F * DIM_T; //     384 * 64 = 24 576
 
     let vocal_stride = VOCALS_IDX * src_stride;
     let mut vocal_specs: Vec<(Vec<f32>, Vec<f32>)> = Vec::with_capacity(2);
@@ -271,9 +252,7 @@ fn infer_chunk(
 
 struct State {
     #[cfg(has_vocal_model)]
-    model: generated::Model<Backend>,
-    #[cfg(has_vocal_model)]
-    device: WgpuDevice,
+    session: Session,
     input_buffer: Vec<f32>,
     output_buffer: Vec<f32>,
 }
@@ -282,8 +261,8 @@ struct State {
 
 /// Removes vocals from stereo 44 100 Hz f32 audio using RT-DTT + GPU acceleration.
 ///
-/// - **Inference**: burn-wgpu (Metal on macOS, Vulkan/CUDA elsewhere).
-/// - **STFT / iSTFT**: gpu-fft (CubeCL / wgpu — same GPU context).
+/// - **Inference**: ONNX Runtime (CoreML on macOS, CPU/GPU elsewhere).
+/// - **STFT / iSTFT**: gpu-fft (CubeCL / wgpu — GPU accelerated).
 /// - **Latency**: ≈ 0.71 s (one `GEN_SIZE = 31 232` sample chunk at 44 100 Hz).
 ///
 /// # Example
@@ -300,12 +279,14 @@ impl VocalRemover {
     pub fn new() -> Self {
         #[cfg(has_vocal_model)]
         {
-            let device = WgpuDevice::default();
-            let model = generated::Model::<Backend>::default();
+            let onnx_bytes = include_bytes!(concat!(env!("OUT_DIR"), "/all_rt.onnx"));
+            let session = Session::builder()
+                .expect("ort builder")
+                .commit_from_memory(onnx_bytes)
+                .expect("load onnx model");
             return Self {
                 state: Mutex::new(State {
-                    model,
-                    device,
+                    session,
                     input_buffer: Vec::new(),
                     output_buffer: Vec::new(),
                 }),
@@ -342,7 +323,7 @@ impl Node for VocalRemover {
 
             #[cfg(has_vocal_model)]
             {
-                let processed = infer_chunk(&st.model, &st.device, &chunk);
+                let processed = infer_chunk(&mut st.session, &chunk);
                 st.output_buffer.extend_from_slice(&processed);
             }
             #[cfg(not(has_vocal_model))]
@@ -477,40 +458,32 @@ mod tests {
         (out_l, out_r)
     }
 
-    /// Diagnose which part of the pipeline is slow, and confirm GPU is in use.
+    /// Diagnose inference speed with ort.
     #[cfg(has_vocal_model)]
     #[test]
     fn infer_chunk_timing() {
-        use std::time::Instant;
-        use burn::backend::wgpu::{Wgpu, WgpuDevice};
+        let onnx_bytes = include_bytes!(concat!(env!("OUT_DIR"), "/all_rt.onnx"));
+        let mut session = Session::builder()
+            .expect("ort builder")
+            .commit_from_memory(onnx_bytes)
+            .expect("load onnx model");
 
-        // Print which GPU adapter wgpu selected.
-        let info = pollster::block_on(async {
-            let instance = wgpu::Instance::default();
-            let adapter = instance
-                .request_adapter(&wgpu::RequestAdapterOptions::default())
-                .await
-                .expect("no wgpu adapter");
-            adapter.get_info()
-        });
-        println!("wgpu adapter: {} ({:?})", info.name, info.backend);
-
-        let device = WgpuDevice::default();
-        let model = super::generated::Model::<Wgpu>::default();
         let dummy_chunk = vec![0.0f32; super::INF_CHUNK * 2];
 
-        println!("Warming up (GPU JIT / auto-tune)...");
+        println!("Warming up (ORT session)...");
         let t_warmup = Instant::now();
-        let _ = super::infer_chunk(&model, &device, &dummy_chunk);
+        let _ = super::infer_chunk(&mut session, &dummy_chunk);
         println!("Warmup: {:.1}ms", t_warmup.elapsed().as_secs_f64() * 1000.0);
 
         for i in 0..3 {
             let t0 = Instant::now();
-            let _ = super::infer_chunk(&model, &device, &dummy_chunk);
+            let _ = super::infer_chunk(&mut session, &dummy_chunk);
             let ms = t0.elapsed().as_secs_f64() * 1000.0;
-            println!("Run {i}: {ms:.1}ms / chunk ({:.1}s audio / {:.2}x RT)",
+            println!(
+                "Run {i}: {ms:.1}ms / chunk ({:.1}s audio / {:.2}x RT)",
                 super::GEN_SIZE as f64 / 44100.0,
-                (super::GEN_SIZE as f64 / 44100.0) / t0.elapsed().as_secs_f64());
+                (super::GEN_SIZE as f64 / 44100.0) / t0.elapsed().as_secs_f64()
+            );
         }
     }
 
@@ -546,7 +519,7 @@ mod tests {
         // Feed in chunks matching GEN_SIZE so the node emits output promptly.
         let feed_chunk = GEN_SIZE * 2; // interleaved stereo frames
 
-        // Warmup: trigger GPU shader compilation / auto-tuning before timing.
+        // Warmup: trigger any first-run overhead before timing.
         {
             let warmup_buf = AudioBuffer::new(interleaved[..feed_chunk].to_vec())
                 .expect("AudioBuffer creation failed");
@@ -554,8 +527,6 @@ mod tests {
         }
 
         let start = Instant::now();
-        let mut i = feed_chunk; // skip the warmup chunk
-
         let mut i = 0;
         while i + feed_chunk <= interleaved.len() {
             let buf = AudioBuffer::new(interleaved[i..i + feed_chunk].to_vec())
