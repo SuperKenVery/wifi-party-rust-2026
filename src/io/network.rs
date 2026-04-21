@@ -148,6 +148,8 @@ pub fn create_multicast_socket_v4(
     socket
         .set_reuse_address(true)
         .context("Failed to set reuse_address")?;
+    #[cfg(not(windows))]
+    let _ = socket.set_reuse_port(true);
     socket
         .set_nonblocking(true)
         .context("Failed to set nonblocking")?;
@@ -160,7 +162,12 @@ pub fn create_multicast_socket_v4(
     set_socket_dscp(&socket, false);
     let _ = allow_awdl(&socket, true);
 
-    let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), MULTICAST_PORT);
+    #[cfg(target_os = "android")]
+    let bind_ip = IpAddr::V4(multicast_ip);
+    #[cfg(not(target_os = "android"))]
+    let bind_ip = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+
+    let bind_addr = SocketAddr::new(bind_ip, MULTICAST_PORT);
     socket
         .bind(&bind_addr.into())
         .context(format!("Failed to bind to {:?}", bind_addr))?;
@@ -224,6 +231,8 @@ pub fn create_multicast_socket_v6(
     socket
         .set_reuse_address(true)
         .context("Failed to set reuse_address")?;
+    #[cfg(not(windows))]
+    let _ = socket.set_reuse_port(true);
     socket
         .set_nonblocking(true)
         .context("Failed to set nonblocking")?;

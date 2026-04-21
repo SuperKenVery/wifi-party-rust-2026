@@ -136,11 +136,13 @@ fn decode_reference(codec_params: &WireCodecParams, packets: &[(u32, Vec<u8>)]) 
     let decoder_node = Arc::new(SymphoniaDecoder::<CH>::new(decoder));
 
     let pipeline_head: Arc<dyn Pushable<CompressedPacket>> = if codec_params.sample_rate != SR {
-        let resampler =
-            FftFixedIn::new(codec_params.sample_rate as usize, SR as usize, 1024, 1, CH).unwrap();
-        let resampler_node = Arc::new(FftResampler::<f32, CH, SR>::new(resampler));
+        let resampler_node =
+            Arc::new(FftResampler::<CH, SR>::new(codec_params.sample_rate).unwrap());
+        let interleaver_node = Arc::new(Interleaver::<f32, CH, SR>::new());
         let resampler_graph = Arc::new(GraphNode::new(resampler_node));
-        resampler_graph.add_output(output_buffer.clone());
+        let interleaver_graph = Arc::new(GraphNode::new(interleaver_node));
+        resampler_graph.add_output(interleaver_graph.clone());
+        interleaver_graph.add_output(output_buffer.clone());
         let decoder_graph = Arc::new(GraphNode::new(decoder_node));
         decoder_graph.add_output(resampler_graph);
         decoder_graph
@@ -689,10 +691,12 @@ fn test_resampled_sample_count() {
     let output_buffer = Arc::new(SimpleBuffer::<f32, CH, SR>::new());
     let decoder_node = Arc::new(SymphoniaDecoder::<CH>::new(decoder));
 
-    let resampler = FftFixedIn::<f32>::new(src_rate as usize, SR as usize, 1024, 1, CH).unwrap();
-    let resampler_node = Arc::new(FftResampler::<f32, CH, SR>::new(resampler));
+    let resampler_node = Arc::new(FftResampler::<CH, SR>::new(src_rate).unwrap());
+    let interleaver_node = Arc::new(Interleaver::<f32, CH, SR>::new());
     let resampler_graph = Arc::new(GraphNode::new(resampler_node));
-    resampler_graph.add_output(output_buffer.clone());
+    let interleaver_graph = Arc::new(GraphNode::new(interleaver_node));
+    resampler_graph.add_output(interleaver_graph.clone());
+    interleaver_graph.add_output(output_buffer.clone());
     let decoder_graph = Arc::new(GraphNode::new(decoder_node));
     decoder_graph.add_output(resampler_graph);
 
@@ -826,11 +830,13 @@ fn decode_with_pull_size(
     let decoder_node = Arc::new(SymphoniaDecoder::<CH>::new(decoder));
 
     let pipeline_head: Arc<dyn Pushable<CompressedPacket>> = if codec_params.sample_rate != SR {
-        let resampler =
-            FftFixedIn::new(codec_params.sample_rate as usize, SR as usize, 1024, 1, CH).unwrap();
-        let resampler_node = Arc::new(FftResampler::<f32, CH, SR>::new(resampler));
+        let resampler_node =
+            Arc::new(FftResampler::<CH, SR>::new(codec_params.sample_rate).unwrap());
+        let interleaver_node = Arc::new(Interleaver::<f32, CH, SR>::new());
         let resampler_graph = Arc::new(GraphNode::new(resampler_node));
-        resampler_graph.add_output(output_buffer.clone());
+        let interleaver_graph = Arc::new(GraphNode::new(interleaver_node));
+        resampler_graph.add_output(interleaver_graph.clone());
+        interleaver_graph.add_output(output_buffer.clone());
         let decoder_graph = Arc::new(GraphNode::new(decoder_node));
         decoder_graph.add_output(resampler_graph);
         decoder_graph
