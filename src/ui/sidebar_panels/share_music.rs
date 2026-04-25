@@ -71,6 +71,32 @@ pub fn ShareMusicPanel(
                         }
 
                         div {
+                            class: "flex items-center gap-3",
+                            label {
+                                class: "relative inline-flex items-center cursor-pointer",
+                                input {
+                                    r#type: "checkbox",
+                                    class: "sr-only peer",
+                                    checked: state_arc.vocal_removal_enabled.load(std::sync::atomic::Ordering::Relaxed),
+                                    onchange: {
+                                        let state = state_arc.clone();
+                                        move |evt: Event<FormData>| {
+                                            let checked = evt.checked();
+                                            state.vocal_removal_enabled.store(checked, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                    },
+                                }
+                                div {
+                                    class: "w-9 h-5 bg-slate-700 rounded-full peer peer-checked:bg-pink-500 after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full",
+                                }
+                            }
+                            span {
+                                class: "text-sm text-slate-400 font-medium",
+                                "Remove vocal"
+                            }
+                        }
+
+                        div {
                             class: "space-y-2",
                             label {
                                 class: "text-sm text-slate-400 font-medium",

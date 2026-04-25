@@ -13,4 +13,4 @@ pub mod vocal_remover;
 pub use gain::Gain;
 pub use level_meter::{LevelMeter, calculate_rms_level};
 pub use switch::Switch;
-pub use vocal_remover::VocalRemover;
+pub use vocal_remover::DecodedVocalRemover;

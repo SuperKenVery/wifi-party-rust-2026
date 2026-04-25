@@ -29,7 +29,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -42,6 +42,7 @@ use crate::audio::buffers::simple_buffer::SimpleBuffer;
 use crate::audio::decoders::{
     CompressedPacket, FftResampler, Interleaver, PacketCounter, SymphoniaDecoder,
 };
+use crate::audio::effects::DecodedVocalRemover;
 use crate::audio::frame::AudioBuffer;
 use crate::audio::symphonia_compat::WireCodecParams;
 use crate::party::network_stream::NetworkStream;
@@ -51,6 +52,7 @@ use crate::party::tagged_packet::{
 use crate::pipeline::{GraphNode, Pullable, Pushable};
 
 const SYNCED_STREAM_TIMEOUT: Duration = Duration::from_secs(30);
+const VOCAL_REMOVER_SAMPLE_RATE: u32 = 44_100;
 
 static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -250,18 +252,20 @@ fn create_decoder(
 pub struct SyncedAudioStreamManager<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     buffers: DashMap<BufferKey, BufferEntry<Sample, CHANNELS, SAMPLE_RATE>>,
     party_now_fn: Arc<dyn Fn() -> u64 + Send + Sync>,
+    vocal_removal_enabled: Arc<AtomicBool>,
 }
 
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>
 {
-    pub fn new<F>(party_now_fn: F) -> Self
+    pub fn new<F>(party_now_fn: F, vocal_removal_enabled: Arc<AtomicBool>) -> Self
     where
         F: Fn() -> u64 + Send + Sync + 'static,
     {
         Self {
             buffers: DashMap::new(),
             party_now_fn: Arc::new(party_now_fn),
+            vocal_removal_enabled,
         }
     }
 
@@ -307,14 +311,35 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
         let decoder_node = Arc::new(SymphoniaDecoder::<CHANNELS>::new(decoder));
 
-        // Build push pipeline: decoder → resampler → interleaver → output_buffer.
-        // FftResampler passes through unchanged when src rate == SAMPLE_RATE.
-        let resampler_node =
-            match FftResampler::<CHANNELS, SAMPLE_RATE>::new(meta.codec_params.sample_rate) {
+        // Build push pipeline:
+        // decoder → source rate to 44.1 kHz → vocal remover → output rate
+        // → interleaver → output_buffer.
+        //
+        // The vocal-removal model expects 44.1 kHz stereo, while the app's
+        // output mixer can remain at SAMPLE_RATE.
+        let to_model_rate_node = match FftResampler::<CHANNELS, VOCAL_REMOVER_SAMPLE_RATE>::new(
+            meta.codec_params.sample_rate,
+        ) {
+            Ok(r) => Arc::new(r),
+            Err(e) => {
+                error!(
+                    "Failed to create 44.1 kHz resampler for stream {}: {}",
+                    meta.stream_id, e
+                );
+                return;
+            }
+        };
+        let vocal_remover_node = Arc::new(
+            DecodedVocalRemover::<CHANNELS, VOCAL_REMOVER_SAMPLE_RATE>::new(
+                self.vocal_removal_enabled.clone(),
+            ),
+        );
+        let to_output_rate_node =
+            match FftResampler::<CHANNELS, SAMPLE_RATE>::new(VOCAL_REMOVER_SAMPLE_RATE) {
                 Ok(r) => Arc::new(r),
                 Err(e) => {
                     error!(
-                        "Failed to create resampler for stream {}: {}",
+                        "Failed to create output-rate resampler for stream {}: {}",
                         meta.stream_id, e
                     );
                     return;
@@ -323,21 +348,30 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
         let interleaver_node = Arc::new(Interleaver::<Sample, CHANNELS, SAMPLE_RATE>::new());
 
-        // Wire: decoder_graph → resampler_graph → interleaver_graph → output_buffer_sink
+        // Wire: decoder_graph → to_model_rate_graph → vocal_remover_graph
+        // → to_output_rate_graph → interleaver_graph → output_buffer_sink
         let interleaver_graph = Arc::new(GraphNode::new(interleaver_node));
         interleaver_graph.add_output(output_buffer_sink.clone());
-        let resampler_graph = Arc::new(GraphNode::new(resampler_node.clone()));
-        resampler_graph.add_output(interleaver_graph);
+        let to_output_rate_graph = Arc::new(GraphNode::new(to_output_rate_node.clone()));
+        to_output_rate_graph.add_output(interleaver_graph);
+        let vocal_remover_graph = Arc::new(GraphNode::new(vocal_remover_node.clone()));
+        vocal_remover_graph.add_output(to_output_rate_graph);
+        let to_model_rate_graph = Arc::new(GraphNode::new(to_model_rate_node.clone()));
+        to_model_rate_graph.add_output(vocal_remover_graph);
         let decoder_graph = Arc::new(GraphNode::new(decoder_node.clone()));
-        decoder_graph.add_output(resampler_graph);
+        decoder_graph.add_output(to_model_rate_graph);
 
         let reset_dec = decoder_node.clone();
-        let reset_res = resampler_node.clone();
+        let reset_to_model_rate = to_model_rate_node.clone();
+        let reset_vocal_remover = vocal_remover_node.clone();
+        let reset_to_output_rate = to_output_rate_node.clone();
         let reset_buf = output_buffer_sink.clone();
         let pipeline_head: Arc<dyn Pushable<CompressedPacket>> = decoder_graph;
         let pipeline_reset: Box<dyn Fn() + Send + Sync> = Box::new(move || {
             reset_dec.reset();
-            reset_res.reset();
+            reset_to_model_rate.reset();
+            reset_vocal_remover.reset();
+            reset_to_output_rate.reset();
             reset_buf.reset();
         });
 

@@ -24,8 +24,11 @@
 #[cfg(has_vocal_model)]
 use ort::session::Session;
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
+use crate::audio::AudioSample;
+use crate::audio::decoders::DecodedAudio;
 use crate::audio::frame::AudioBuffer;
 use crate::pipeline::Node;
 
@@ -43,6 +46,8 @@ const INF_CHUNK: usize = HOP_LENGTH * (DIM_T - 1); // 32 256
 const GEN_SIZE: usize = INF_CHUNK - 2 * OVERLAP; // 31 232
 const N_SOURCES: usize = 4; // bass / drums / other / vocals
 const VOCALS_IDX: usize = 3;
+const MODEL_SAMPLE_RATE: u32 = 44_100;
+const MODEL_CHANNELS: usize = 2;
 
 // ── Hann window ───────────────────────────────────────────────────────────────
 
@@ -106,8 +111,16 @@ fn istft_gpu(spectrograms: &[(Vec<f32>, Vec<f32>)]) -> Vec<Vec<f32>> {
 
             // One-sided bins (DIM_F = 384 used, DIM_F..N_FREQS zero-padded, N_FREQS..N_FFT mirrored).
             for freq in 0..N_FREQS {
-                let r = if freq < DIM_F { re_bins[freq * DIM_T + frame_idx] } else { 0.0 };
-                let m = if freq < DIM_F { im_bins[freq * DIM_T + frame_idx] } else { 0.0 };
+                let r = if freq < DIM_F {
+                    re_bins[freq * DIM_T + frame_idx]
+                } else {
+                    0.0
+                };
+                let m = if freq < DIM_F {
+                    im_bins[freq * DIM_T + frame_idx]
+                } else {
+                    0.0
+                };
                 re[freq] = r;
                 im[freq] = m;
             }
@@ -257,6 +270,69 @@ struct State {
     output_buffer: Vec<f32>,
 }
 
+impl State {
+    fn reset(&mut self) {
+        self.input_buffer.clear();
+        self.output_buffer.clear();
+    }
+
+    fn process_interleaved(&mut self, f32_samples: &[f32]) {
+        self.input_buffer.extend_from_slice(f32_samples);
+
+        let chunk_samples = GEN_SIZE * MODEL_CHANNELS; // interleaved stereo
+        while self.input_buffer.len() >= chunk_samples {
+            let chunk_data: Vec<f32> = self.input_buffer.drain(..chunk_samples).collect();
+
+            // Build INF_CHUNK chunk: [ OVERLAP zeros | GEN_SIZE samples | OVERLAP zeros ]
+            let mut chunk = vec![0.0f32; INF_CHUNK * MODEL_CHANNELS];
+            let off = OVERLAP * MODEL_CHANNELS;
+            chunk[off..off + chunk_samples].copy_from_slice(&chunk_data);
+
+            #[cfg(has_vocal_model)]
+            {
+                let processed = infer_chunk(&mut self.session, &chunk);
+                self.output_buffer.extend_from_slice(&processed);
+            }
+            #[cfg(not(has_vocal_model))]
+            {
+                // Pass-through: model not compiled in.
+                self.output_buffer.extend_from_slice(&chunk_data);
+            }
+        }
+    }
+
+    fn drain_interleaved(&mut self, out_len: usize) -> Option<Vec<f32>> {
+        if self.output_buffer.len() < out_len {
+            return None;
+        }
+
+        Some(self.output_buffer.drain(..out_len).collect())
+    }
+}
+
+fn should_process<const CHANNELS: usize, const SAMPLE_RATE: u32>(
+    enabled: &AtomicBool,
+    invalid_config_warned: &AtomicBool,
+) -> bool {
+    if !enabled.load(Ordering::Relaxed) {
+        return false;
+    }
+
+    if CHANNELS != MODEL_CHANNELS || SAMPLE_RATE != MODEL_SAMPLE_RATE {
+        if !invalid_config_warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                "Vocal removal requires {} Hz stereo audio; got {} Hz with {} channels. Passing through.",
+                MODEL_SAMPLE_RATE,
+                SAMPLE_RATE,
+                CHANNELS
+            );
+        }
+        return false;
+    }
+
+    true
+}
+
 // ── Public struct ─────────────────────────────────────────────────────────────
 
 /// Removes vocals from stereo 44 100 Hz f32 audio using RT-DTT + GPU acceleration.
@@ -271,12 +347,17 @@ struct State {
 /// let remover = VocalRemover::new();
 /// let pipeline = source.pipe(remover);
 /// ```
-pub struct VocalRemover {
+pub struct VocalRemover<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    enabled: Arc<AtomicBool>,
+    invalid_config_warned: AtomicBool,
     state: Mutex<State>,
+    _marker: std::marker::PhantomData<Sample>,
 }
 
-impl VocalRemover {
-    pub fn new() -> Self {
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    VocalRemover<Sample, CHANNELS, SAMPLE_RATE>
+{
+    pub fn new(enabled: Arc<AtomicBool>) -> Self {
         #[cfg(has_vocal_model)]
         {
             let onnx_bytes = include_bytes!(concat!(env!("OUT_DIR"), "/all_rt.onnx"));
@@ -285,6 +366,86 @@ impl VocalRemover {
                 .commit_from_memory(onnx_bytes)
                 .expect("load onnx model");
             return Self {
+                enabled,
+                invalid_config_warned: AtomicBool::new(false),
+                state: Mutex::new(State {
+                    session,
+                    input_buffer: Vec::new(),
+                    output_buffer: Vec::new(),
+                }),
+                _marker: std::marker::PhantomData,
+            };
+        }
+        #[cfg(not(has_vocal_model))]
+        Self {
+            enabled,
+            invalid_config_warned: AtomicBool::new(false),
+            state: Mutex::new(State {
+                input_buffer: Vec::new(),
+                output_buffer: Vec::new(),
+            }),
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+// ── Node impl ─────────────────────────────────────────────────────────────────
+
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Node
+    for VocalRemover<Sample, CHANNELS, SAMPLE_RATE>
+{
+    type Input = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
+    type Output = AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>;
+
+    fn process(&self, input: Self::Input) -> Option<Self::Output> {
+        if !should_process::<CHANNELS, SAMPLE_RATE>(&self.enabled, &self.invalid_config_warned) {
+            self.state.lock().unwrap().reset();
+            return Some(input);
+        }
+
+        let mut st = self.state.lock().unwrap();
+
+        // Convert input samples to f32 for processing.
+        let f32_samples: Vec<f32> = input
+            .data()
+            .iter()
+            .map(|s| s.to_f64_normalized() as f32)
+            .collect();
+        st.process_interleaved(&f32_samples);
+
+        let out_len = input.data().len();
+        let data: Vec<Sample> = st
+            .drain_interleaved(out_len)?
+            .into_iter()
+            .map(|s| Sample::from_f64_normalized(s as f64))
+            .collect();
+        AudioBuffer::new(data).ok()
+    }
+}
+
+/// Removes vocals from channel-separated 44 100 Hz stereo audio.
+///
+/// The RT-DTT model was trained and validated for 44.1 kHz stereo. The synced
+/// music pipeline is responsible for resampling to this exact rate before this
+/// node and resampling back to the app output rate afterwards.
+pub struct DecodedVocalRemover<const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    enabled: Arc<AtomicBool>,
+    invalid_config_warned: AtomicBool,
+    state: Mutex<State>,
+}
+
+impl<const CHANNELS: usize, const SAMPLE_RATE: u32> DecodedVocalRemover<CHANNELS, SAMPLE_RATE> {
+    pub fn new(enabled: Arc<AtomicBool>) -> Self {
+        #[cfg(has_vocal_model)]
+        {
+            let onnx_bytes = include_bytes!(concat!(env!("OUT_DIR"), "/all_rt.onnx"));
+            let session = Session::builder()
+                .expect("ort builder")
+                .commit_from_memory(onnx_bytes)
+                .expect("load onnx model");
+            return Self {
+                enabled,
+                invalid_config_warned: AtomicBool::new(false),
                 state: Mutex::new(State {
                     session,
                     input_buffer: Vec::new(),
@@ -294,52 +455,58 @@ impl VocalRemover {
         }
         #[cfg(not(has_vocal_model))]
         Self {
+            enabled,
+            invalid_config_warned: AtomicBool::new(false),
             state: Mutex::new(State {
                 input_buffer: Vec::new(),
                 output_buffer: Vec::new(),
             }),
         }
     }
+
+    pub fn reset(&self) {
+        self.state.lock().unwrap().reset();
+    }
 }
 
-// ── Node impl ─────────────────────────────────────────────────────────────────
-
-impl Node for VocalRemover {
-    type Input = AudioBuffer<f32, 2, 44100>;
-    type Output = AudioBuffer<f32, 2, 44100>;
+impl<const CHANNELS: usize, const SAMPLE_RATE: u32> Node
+    for DecodedVocalRemover<CHANNELS, SAMPLE_RATE>
+{
+    type Input = DecodedAudio;
+    type Output = DecodedAudio;
 
     fn process(&self, input: Self::Input) -> Option<Self::Output> {
-        let mut st = self.state.lock().unwrap();
-        st.input_buffer.extend_from_slice(input.data());
+        if !should_process::<CHANNELS, SAMPLE_RATE>(&self.enabled, &self.invalid_config_warned) {
+            self.reset();
+            return Some(input);
+        }
 
-        let chunk_samples = GEN_SIZE * 2; // interleaved stereo
-        while st.input_buffer.len() >= chunk_samples {
-            let chunk_data: Vec<f32> = st.input_buffer.drain(..chunk_samples).collect();
+        let num_frames = input.channels.first().map_or(0, |channel| channel.len());
+        if num_frames == 0 {
+            return None;
+        }
 
-            // Build INF_CHUNK chunk: [ OVERLAP zeros | GEN_SIZE samples | OVERLAP zeros ]
-            let mut chunk = vec![0.0f32; INF_CHUNK * 2];
-            let off = OVERLAP * 2;
-            chunk[off..off + chunk_samples].copy_from_slice(&chunk_data);
-
-            #[cfg(has_vocal_model)]
-            {
-                let processed = infer_chunk(&mut st.session, &chunk);
-                st.output_buffer.extend_from_slice(&processed);
-            }
-            #[cfg(not(has_vocal_model))]
-            {
-                // Pass-through: model not compiled in.
-                st.output_buffer.extend_from_slice(&chunk_data);
+        let mut interleaved = Vec::with_capacity(num_frames * CHANNELS);
+        for frame in 0..num_frames {
+            for channel in 0..CHANNELS {
+                interleaved.push(input.channels[channel][frame]);
             }
         }
 
-        let out_len = input.data().len();
-        if st.output_buffer.len() >= out_len {
-            let data: Vec<f32> = st.output_buffer.drain(..out_len).collect();
-            AudioBuffer::new(data).ok()
-        } else {
-            None
+        let mut state = self.state.lock().unwrap();
+        state.process_interleaved(&interleaved);
+        let output = state.drain_interleaved(num_frames * CHANNELS)?;
+
+        let mut channels = (0..CHANNELS)
+            .map(|_| Vec::with_capacity(num_frames))
+            .collect::<Vec<_>>();
+        for frame in output.chunks_exact(CHANNELS) {
+            for channel in 0..CHANNELS {
+                channels[channel].push(frame[channel]);
+            }
         }
+
+        Some(DecodedAudio { channels })
     }
 }
 
@@ -372,7 +539,12 @@ mod tests {
         hint.with_extension("m4a");
 
         let probed = symphonia::default::get_probe()
-            .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+            .format(
+                &hint,
+                mss,
+                &FormatOptions::default(),
+                &MetadataOptions::default(),
+            )
             .expect("probe failed");
         let mut format = probed.format;
 
@@ -513,7 +685,7 @@ mod tests {
             interleaved.push(right[i]);
         }
 
-        let remover = VocalRemover::new();
+        let remover = VocalRemover::<f32, 2, 44100>::new(Arc::new(AtomicBool::new(true)));
         let mut output_samples: Vec<f32> = Vec::new();
 
         // Feed in chunks matching GEN_SIZE so the node emits output promptly.

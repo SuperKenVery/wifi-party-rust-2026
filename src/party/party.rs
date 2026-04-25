@@ -130,9 +130,10 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
         let ntp_service = NtpService::new(network_sender.clone());
 
         let ntp_for_synced = ntp_service.clone();
-        let synced_stream = Arc::new(SyncedAudioStreamManager::new(move || {
-            ntp_for_synced.party_now()
-        }));
+        let synced_stream = Arc::new(SyncedAudioStreamManager::new(
+            move || ntp_for_synced.party_now(),
+            self.state.vocal_removal_enabled.clone(),
+        ));
 
         self.ntp_service = Some(ntp_service.clone());
         self.synced_stream = Some(synced_stream.clone());
