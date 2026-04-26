@@ -191,19 +191,60 @@ impl Drop for MusicStream {
     }
 }
 
+#[derive(Clone)]
+struct MusicStreamDeps<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    ntp_service: Arc<NtpService>,
+    network_sender: NetworkSender,
+    synced_stream: Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>,
+}
+
 /// Owns outgoing music streams and routes retransmit/control operations by stream id.
 ///
 /// Implements [`NetworkStream`] so inbound `RequestFrames` packets are dispatched
 /// to the corresponding outgoing stream without `Party` having to wire it up.
-pub struct MusicStreamRegistry {
+pub struct MusicStreamRegistry<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     streams: Mutex<Vec<MusicStream>>,
+    deps: MusicStreamDeps<Sample, CHANNELS, SAMPLE_RATE>,
 }
 
-impl MusicStreamRegistry {
-    pub fn new() -> Self {
+impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    MusicStreamRegistry<Sample, CHANNELS, SAMPLE_RATE>
+{
+    pub fn new(
+        ntp_service: Arc<NtpService>,
+        network_sender: NetworkSender,
+        synced_stream: Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>,
+    ) -> Self {
         Self {
             streams: Mutex::new(Vec::new()),
+            deps: MusicStreamDeps {
+                ntp_service,
+                network_sender,
+                synced_stream,
+            },
         }
+    }
+
+    pub fn start_stream(
+        &self,
+        data: Vec<u8>,
+        file_name: String,
+        progress: Arc<MusicStreamProgress>,
+    ) -> Result<()> {
+        let deps = self.deps.clone();
+
+        let music_stream = MusicStream::start::<Sample, CHANNELS, SAMPLE_RATE>(
+            data,
+            file_name,
+            deps.ntp_service,
+            deps.network_sender,
+            deps.synced_stream,
+            progress,
+        )?;
+
+        self.push(music_stream);
+
+        Ok(())
     }
 
     pub fn push(&self, stream: MusicStream) {
@@ -255,14 +296,8 @@ impl MusicStreamRegistry {
     }
 }
 
-impl Default for MusicStreamRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<S: AudioSample, const C: usize, const SR: u32> NetworkStream<S, C, SR>
-    for MusicStreamRegistry
+impl<S: AudioSample + 'static, const C: usize, const SR: u32> NetworkStream<S, C, SR>
+    for MusicStreamRegistry<S, C, SR>
 {
     fn tags(&self) -> &'static [PacketTag] {
         &[REQUEST_FRAMES_TAG]

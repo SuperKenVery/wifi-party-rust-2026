@@ -1,7 +1,7 @@
 use std::io::Cursor;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use rubato::{FftFixedIn, Resampler};
 use symphonia::core::audio::{AudioBufferRef, Signal};
@@ -68,7 +68,10 @@ fn load_packets(limit: usize) -> (WireCodecParams, Vec<(u32, Vec<u8>)>) {
 
 fn make_manager(clock: Arc<AtomicU64>) -> SyncedAudioStreamManager<f32, CH, SR> {
     let c = clock.clone();
-    SyncedAudioStreamManager::<f32, CH, SR>::new(move || c.load(Ordering::Relaxed))
+    SyncedAudioStreamManager::<f32, CH, SR>::new(
+        move || c.load(Ordering::Relaxed),
+        Arc::new(AtomicBool::new(false)),
+    )
 }
 
 /// Sets up and starts a synced stream: meta → start → feed packets.

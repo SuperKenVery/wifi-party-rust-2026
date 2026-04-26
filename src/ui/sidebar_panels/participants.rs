@@ -1,7 +1,7 @@
 //! Participant display components showing connected hosts.
 
 use crate::party::StreamSnapshot;
-use crate::state::{AppState, HostId, HostInfo};
+use crate::state::{AppState, HostInfo, StreamViewKey};
 use dioxus::prelude::*;
 use std::sync::Arc;
 
@@ -82,8 +82,8 @@ fn HostCard(host: HostInfo) -> Element {
             class: "space-y-2",
             for stream in &host.streams {
                 StreamIndicator {
-                    host_id: host.id,
-                    stream_id: stream.stream_id.clone(),
+                    stream_key: stream.key.clone(),
+                    display_name: stream.display_name.clone(),
                     packet_loss: stream.packet_loss,
                     target_latency: stream.target_latency,
                     audio_level: stream.audio_level,
@@ -103,8 +103,8 @@ fn HostCard(host: HostInfo) -> Element {
 #[allow(non_snake_case)]
 #[component]
 fn StreamIndicator(
-    host_id: HostId,
-    stream_id: String,
+    stream_key: StreamViewKey,
+    display_name: String,
     packet_loss: f32,
     target_latency: f32,
     audio_level: u32,
@@ -113,7 +113,7 @@ fn StreamIndicator(
     let mut snapshots = use_signal(Vec::<StreamSnapshot>::new);
     let mut show_graph = use_signal(|| false);
 
-    let icon = if stream_id == "Mic" {
+    let icon = if display_name.starts_with("Mic") {
         "🎙️"
     } else {
         "🔊"
@@ -137,12 +137,12 @@ fn StreamIndicator(
         "bg-red-500"
     };
 
-    let stream_id_clone = stream_id.clone();
+    let stream_key_clone = stream_key.clone();
     let on_debug_click = move |_| {
         let new_show = !show_graph();
         show_graph.set(new_show);
         if new_show {
-            let fetched = state_arc.stream_snapshots(host_id, &stream_id_clone);
+            let fetched = state_arc.view_state.realtime_graph(&stream_key_clone);
             snapshots.set(fetched);
         }
     };
@@ -154,7 +154,7 @@ fn StreamIndicator(
             div {
                 class: "flex items-center gap-3 w-full",
                 span { class: "text-sm flex-shrink-0", "{icon}" }
-                span { class: "text-xs text-slate-400 w-16 flex-shrink-0", "{stream_id}" }
+                span { class: "text-xs text-slate-400 w-16 flex-shrink-0", "{display_name}" }
 
                 div {
                     class: "flex-1 h-1.5 bg-slate-700 rounded-full overflow-hidden",

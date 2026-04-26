@@ -124,9 +124,7 @@ fn AppLayout() -> Element {
         let state = state_arc.clone();
         spawn(async move {
             loop {
-                if let Ok(infos) = state.host_infos.lock() {
-                    ui.active_hosts.set(infos.clone());
-                }
+                ui.active_hosts.set(state.view_state.realtime_hosts());
 
                 if let Ok(vol) = state.mic_volume.lock() {
                     ui.mic_volume.set(*vol);
@@ -160,9 +158,9 @@ fn AppLayout() -> Element {
                         .load(std::sync::atomic::Ordering::Relaxed),
                 );
 
-                ui.ntp_info.set(state.ntp_debug_info());
+                ui.ntp_info.set(state.view_state.ntp_debug());
 
-                ui.synced_streams.set(state.synced_stream_states());
+                ui.synced_streams.set(state.view_state.synced_streams());
 
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }

@@ -38,13 +38,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use chrono::{DateTime, Local, TimeZone};
 use rand::Rng;
 use rkyv::{Archive, Deserialize, Serialize};
-use tokio::time::{interval, sleep};
+use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use std::net::SocketAddr;
 
 use crate::io::NetworkSender;
-use crate::party::network_stream::NetworkStream;
+use crate::party::network_stream::{NetworkStream, NetworkStreamContext};
 use crate::party::tagged_packet::{NTP_TAG, PacketTag, TaggedPacket};
 use crate::pipeline::Pushable;
 
@@ -139,10 +139,21 @@ impl NtpService {
 
     /// Start the NTP service background task.
     /// Must be called from within a Tokio runtime context.
-    pub fn start(self: &Arc<Self>) {
+    pub fn start_task(self: &Arc<Self>) {
         let service_clone = self.clone();
         tokio::spawn(async move {
             service_clone.run().await;
+        });
+    }
+
+    pub fn start_view_task(self: &Arc<Self>, ctx: NetworkStreamContext) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(100));
+            loop {
+                interval.tick().await;
+                ctx.view_state.update_ntp(service.debug_info());
+            }
         });
     }
 
@@ -385,19 +396,25 @@ impl<S: crate::audio::AudioSample, const C: usize, const SR: u32> NetworkStream<
         self.handle_packet(packet);
         Ok(())
     }
+
+    fn start(self: Arc<Self>, ctx: NetworkStreamContext) {
+        NtpService::start_task(&self);
+        self.start_view_task(ctx);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::UdpSocket;
+    use tokio::time::sleep;
 
     fn test_service() -> Arc<NtpService> {
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         let addr = "127.0.0.1:9999".parse().unwrap();
         let sender = NetworkSender::new(socket, addr);
         let service = NtpService::new(sender);
-        service.start();
+        service.start_task();
         service
     }
 

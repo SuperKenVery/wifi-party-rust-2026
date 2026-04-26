@@ -6,7 +6,6 @@
 use std::net::UdpSocket;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tracing::{error, info};
@@ -17,19 +16,23 @@ use crate::io::{
     AudioInput, AudioOutput, LoopbackInput, MulticastLock, NetworkSender, create_multicast_socket,
 };
 use crate::pipeline::Pushable;
-use crate::state::{AppState, HostId, HostInfo, MusicStreamProgress, StreamInfo};
+use crate::state::{AppState, MusicStreamProgress};
 use crate::{pull_chain, push_chain};
 
 use super::combinator::{Mixer, Tee};
 use super::config::PartyConfig;
-use super::music::{MusicStream, MusicStreamRegistry};
-use super::network_stream::{NetworkStream, StreamRegistry};
+use super::music::MusicStreamRegistry;
+use super::network_stream::{NetworkStream, NetworkStreamContext, StreamRegistry};
 use super::ntp::NtpService;
 use super::packet_dispatcher::PacketDispatcher;
-use super::realtime_stream::{
-    RealtimeAudioStream, RealtimeFramePacker, RealtimeStreamId, StreamSnapshot,
-};
-use super::sync_stream::{SyncedAudioStreamManager, SyncedStreamState};
+use super::realtime_stream::{RealtimeAudioStream, RealtimeFramePacker, RealtimeStreamId};
+use super::sync_stream::SyncedAudioStreamManager;
+
+struct NetworkStreamBundle<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    ntp_service: Arc<NtpService>,
+    synced_stream: Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>,
+    registry: Arc<StreamRegistry<Sample, CHANNELS, SAMPLE_RATE>>,
+}
 
 pub struct Party<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     state: Arc<AppState>,
@@ -37,8 +40,7 @@ pub struct Party<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     realtime_stream: Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
     synced_stream: Option<Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>>,
     ntp_service: Option<Arc<NtpService>>,
-    network_sender: Option<NetworkSender>,
-    music_streams: Arc<MusicStreamRegistry>,
+    music_streams: Option<Arc<MusicStreamRegistry<Sample, CHANNELS, SAMPLE_RATE>>>,
     mic_input: Option<Arc<AudioInput<Sample, CHANNELS, SAMPLE_RATE>>>,
     _audio_streams: Vec<cpal::Stream>,
     dispatcher_abort: Option<tokio::task::AbortHandle>,
@@ -47,7 +49,7 @@ pub struct Party<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     multicast_lock: Option<MulticastLock>,
 }
 
-impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u32>
     Party<Sample, CHANNELS, SAMPLE_RATE>
 {
     pub fn new(state: Arc<AppState>, config: PartyConfig) -> Self {
@@ -57,8 +59,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             realtime_stream: Arc::new(RealtimeAudioStream::new()),
             synced_stream: None,
             ntp_service: None,
-            network_sender: None,
-            music_streams: Arc::new(MusicStreamRegistry::new()),
+            music_streams: None,
             mic_input: None,
             _audio_streams: Vec::new(),
             dispatcher_abort: None,
@@ -71,35 +72,12 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         self.mic_input.as_ref()
     }
 
-    pub fn stream_snapshots(&self, host_id: HostId, stream_id: &str) -> Vec<StreamSnapshot> {
-        self.realtime_stream.stream_snapshots(host_id, stream_id)
-    }
-
-    pub fn synced_stream_states(&self) -> Vec<SyncedStreamState> {
-        self.synced_stream
-            .as_ref()
-            .map(|s| s.active_streams())
-            .unwrap_or_default()
-    }
-
-    pub fn ntp_service(&self) -> Option<&Arc<NtpService>> {
-        self.ntp_service.as_ref()
-    }
-
-    pub fn handle_retransmission_request(
-        &self,
-        stream_id: super::sync_stream::SyncedStreamId,
-        seqs: Vec<u64>,
-    ) {
-        self.music_streams.handle_retransmission(stream_id, seqs);
-    }
-
     pub fn pause_music(&self, stream_id: super::sync_stream::SyncedStreamId) -> Result<()> {
-        self.music_streams.pause(stream_id)
+        self.music_streams()?.pause(stream_id)
     }
 
     pub fn resume_music(&self, stream_id: super::sync_stream::SyncedStreamId) -> Result<()> {
-        self.music_streams.resume(stream_id)
+        self.music_streams()?.resume(stream_id)
     }
 
     pub fn seek_music(
@@ -107,12 +85,21 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         stream_id: super::sync_stream::SyncedStreamId,
         position_ms: u64,
     ) -> Result<()> {
-        self.music_streams.seek(stream_id, position_ms)
+        self.music_streams()?.seek(stream_id, position_ms)
+    }
+
+    fn music_streams(&self) -> Result<&Arc<MusicStreamRegistry<Sample, CHANNELS, SAMPLE_RATE>>> {
+        self.music_streams
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Music stream registry not started"))
     }
 }
 
-impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
-    Party<Sample, CHANNELS, SAMPLE_RATE>
+impl<
+    Sample: AudioSample + Clone + cpal::SizedSample + 'static,
+    const CHANNELS: usize,
+    const SAMPLE_RATE: u32,
+> Party<Sample, CHANNELS, SAMPLE_RATE>
 {
     pub fn run(&mut self) -> Result<()> {
         info!("Starting Party pipelines with config {:#?}", self.config);
@@ -127,37 +114,20 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
             .context("Failed to clone socket for sender")?;
         let network_sender = NetworkSender::new(send_socket, multicast_addr);
 
-        let ntp_service = NtpService::new(network_sender.clone());
-
-        let ntp_for_synced = ntp_service.clone();
-        let synced_stream = Arc::new(SyncedAudioStreamManager::new(
-            move || ntp_for_synced.party_now(),
-            self.state.vocal_removal_enabled.clone(),
-        ));
-
-        self.ntp_service = Some(ntp_service.clone());
-        self.synced_stream = Some(synced_stream.clone());
-        self.network_sender = Some(network_sender.clone());
+        let stream_bundle = self.build_stream_bundle(network_sender.clone());
 
         let realtime_stream = self.realtime_stream.clone();
-
-        // Build stream registry — each stream owns its packet-dispatch logic.
-        let mut registry = StreamRegistry::new();
-        registry.register(realtime_stream.clone() as Arc<dyn NetworkStream<_, _, _>>);
-        registry.register(synced_stream.clone() as Arc<dyn NetworkStream<_, _, _>>);
-        registry.register(ntp_service.clone() as Arc<dyn NetworkStream<_, _, _>>);
-        registry.register(self.music_streams.clone() as Arc<dyn NetworkStream<_, _, _>>);
-        let registry = Arc::new(registry);
+        let synced_stream = stream_bundle.synced_stream.clone();
+        self.ntp_service = Some(stream_bundle.ntp_service.clone());
+        self.synced_stream = Some(stream_bundle.synced_stream.clone());
 
         let (abort_tx, abort_rx) = std::sync::mpsc::sync_channel(1);
 
         self.network_thread = Some(thread::spawn({
             let state = self.state.clone();
-            let realtime_stream = realtime_stream.clone();
-            let synced_stream = synced_stream.clone();
-            let ntp_service = ntp_service.clone();
+            let view_state = self.state.view_state.clone();
+            let registry = stream_bundle.registry.clone();
             let network_sender = network_sender.clone();
-            let registry = registry;
 
             move || {
                 let rt = tokio::runtime::Builder::new_multi_thread()
@@ -166,11 +136,10 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
                     .expect("Failed to create Tokio runtime");
 
                 rt.block_on(async {
-                    ntp_service.start();
-                    realtime_stream.start_cleanup_task();
-                    synced_stream.start_cleanup_task();
-                    synced_stream.start_retransmit_task(network_sender);
-                    Self::start_host_sync_task_async(state.clone(), realtime_stream);
+                    registry.start_all(NetworkStreamContext {
+                        view_state,
+                        sender: network_sender,
+                    });
 
                     let handle = PacketDispatcher::start(socket, local_ips, state, registry);
                     let _ = abort_tx.send(handle.abort_handle());
@@ -263,11 +232,13 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
 
         self._audio_streams.clear();
         self.mic_input = None;
-        self.music_streams.clear();
-        self.network_sender = None;
+        if let Some(music_streams) = self.music_streams.take() {
+            music_streams.clear();
+        }
         self.ntp_service = None;
         self.synced_stream = None;
         self.multicast_lock = None;
+        self.state.view_state.clear();
 
         if let Some(handle) = self.network_thread.take() {
             let _ = handle.join();
@@ -285,75 +256,39 @@ impl<Sample: AudioSample + Clone + cpal::SizedSample, const CHANNELS: usize, con
         file_name: String,
         progress: Arc<MusicStreamProgress>,
     ) -> Result<()> {
-        let network_sender = self
-            .network_sender
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Network not started"))?
-            .clone();
-
-        let ntp_service = self
-            .ntp_service
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("NTP service not started"))?
-            .clone();
-
-        let synced_stream = self
-            .synced_stream
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Synced stream not started"))?
-            .clone();
-
-        let music_stream = MusicStream::start::<Sample, CHANNELS, SAMPLE_RATE>(
-            data,
-            file_name,
-            ntp_service,
-            network_sender,
-            synced_stream,
-            progress,
-        )?;
-
-        self.music_streams.push(music_stream);
-
-        Ok(())
+        self.music_streams()?.start_stream(data, file_name, progress)
     }
 
-    fn start_host_sync_task_async(
-        state: Arc<AppState>,
-        realtime_stream: Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
-    ) {
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(100));
-            loop {
-                interval.tick().await;
+    fn build_stream_bundle(
+        &mut self,
+        network_sender: NetworkSender,
+    ) -> NetworkStreamBundle<Sample, CHANNELS, SAMPLE_RATE> {
+        let ntp_service = NtpService::new(network_sender.clone());
 
-                let mut active_host_ids = realtime_stream.active_hosts();
-                active_host_ids.sort_by_key(|h| h.to_string());
+        let ntp_for_synced = ntp_service.clone();
+        let synced_stream = Arc::new(SyncedAudioStreamManager::new(
+            move || ntp_for_synced.party_now(),
+            self.state.vocal_removal_enabled.clone(),
+        ));
 
-                let mut host_infos_vec = Vec::new();
+        let music_streams = Arc::new(MusicStreamRegistry::new(
+            ntp_service.clone(),
+            network_sender,
+            synced_stream.clone(),
+        ));
+        self.music_streams = Some(music_streams.clone());
 
-                for host_id in active_host_ids {
-                    let stream_stats = realtime_stream.host_stream_stats(host_id);
+        let streams: Vec<Arc<dyn NetworkStream<Sample, CHANNELS, SAMPLE_RATE>>> = vec![
+            self.realtime_stream.clone() as Arc<dyn NetworkStream<Sample, CHANNELS, SAMPLE_RATE>>,
+            synced_stream.clone() as Arc<dyn NetworkStream<Sample, CHANNELS, SAMPLE_RATE>>,
+            ntp_service.clone() as Arc<dyn NetworkStream<Sample, CHANNELS, SAMPLE_RATE>>,
+            music_streams as Arc<dyn NetworkStream<Sample, CHANNELS, SAMPLE_RATE>>,
+        ];
 
-                    let streams: Vec<StreamInfo> = stream_stats
-                        .into_iter()
-                        .map(|s| StreamInfo {
-                            stream_id: s.stream_id.to_string(),
-                            packet_loss: s.packet_loss,
-                            target_latency: s.target_latency,
-                            audio_level: s.audio_level,
-                        })
-                        .collect();
-
-                    host_infos_vec.push(HostInfo {
-                        id: host_id,
-                        streams,
-                    });
-                }
-
-                if let Ok(mut host_infos) = state.host_infos.lock() {
-                    *host_infos = host_infos_vec;
-                }
-            }
-        });
+        NetworkStreamBundle {
+            ntp_service,
+            synced_stream,
+            registry: Arc::new(StreamRegistry::from_streams(streams)),
+        }
     }
 }

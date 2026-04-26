@@ -15,6 +15,7 @@
 //!
 //! For synchronized music playback, see [`sync_stream`](super::sync_stream).
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -26,14 +27,12 @@ use tracing::info;
 
 use crate::audio::frame::AudioBuffer;
 use crate::audio::opus::OpusPacket;
-use crate::audio::{
-    AudioSample, JitterBuffer, PullSnapshot, RealtimeFrameDecoder, RealtimeOpusFrame,
-};
+use crate::audio::{AudioSample, JitterBuffer, RealtimeFrameDecoder, RealtimeOpusFrame};
 use crate::party::combinator::{InputId, Mixer};
-use crate::party::network_stream::NetworkStream;
+use crate::party::network_stream::{NetworkStream, NetworkStreamContext};
 use crate::party::tagged_packet::{PacketTag, REALTIME_TAG, TaggedPacket};
 use crate::pipeline::{GraphNode, Pullable, Pushable};
-use crate::state::HostId;
+use crate::state::{HostId, PartyViewState, StreamViewKey};
 
 pub use crate::audio::PullSnapshot as StreamSnapshot;
 
@@ -207,53 +206,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         });
     }
 
-    /// Returns the number of active decode chains.
-    pub fn buffer_count(&self) -> usize {
-        self.chains.len()
-    }
-
-    /// Returns a list of unique active host IDs (IP addresses).
-    pub fn active_hosts(&self) -> Vec<HostId> {
-        let mut hosts = Vec::new();
-        for entry in self.chains.iter() {
-            let host_id = HostId::from(entry.key().source_addr.ip());
-            if !hosts.contains(&host_id) {
-                hosts.push(host_id);
-            }
-        }
-        hosts
-    }
-
-    /// Returns stats for all streams belonging to a specific host (IP).
-    pub fn host_stream_stats(&self, host_id: HostId) -> Vec<StreamStats> {
-        let mut result = Vec::new();
-
-        for entry in self.chains.iter() {
-            if entry.key().source_addr.ip() != host_id.ip() {
-                continue;
-            }
-
-            let stream_id = entry.key().stream_id;
-            let stats = entry.value().jitter_buffer.stats();
-
-            let stream_name =
-                if self.has_multiple_instances(entry.key().source_addr.ip(), stream_id) {
-                    format!("{} (:{})", stream_id, entry.key().source_addr.port())
-                } else {
-                    stream_id.to_string()
-                };
-
-            result.push(StreamStats {
-                stream_id: stream_name,
-                packet_loss: stats.loss_rate() as f32,
-                target_latency: stats.target_latency() as f32,
-                audio_level: stats.audio_level(),
-            });
-        }
-
-        result
-    }
-
     fn has_multiple_instances(&self, ip: std::net::IpAddr, stream_id: RealtimeStreamId) -> bool {
         let mut count = 0;
         for entry in self.chains.iter() {
@@ -265,28 +217,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             }
         }
         false
-    }
-
-    /// Returns snapshots for a specific stream, identified by stream_id string.
-    /// The stream_id should match the format returned by host_stream_stats().
-    pub fn stream_snapshots(&self, host_id: HostId, stream_id: &str) -> Vec<PullSnapshot> {
-        for entry in self.chains.iter() {
-            if entry.key().source_addr.ip() != host_id.ip() {
-                continue;
-            }
-
-            let sid = entry.key().stream_id;
-            let stream_name = if self.has_multiple_instances(entry.key().source_addr.ip(), sid) {
-                format!("{} (:{})", sid, entry.key().source_addr.port())
-            } else {
-                sid.to_string()
-            };
-
-            if stream_name == stream_id {
-                return entry.value().jitter_buffer.stats().recent_snapshots();
-            }
-        }
-        Vec::new()
     }
 
     /// Starts the background cleanup task.
@@ -302,15 +232,48 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             }
         });
     }
-}
 
-/// Statistics for a single audio stream.
-#[derive(Debug, Clone)]
-pub struct StreamStats {
-    pub stream_id: String,
-    pub packet_loss: f32,
-    pub target_latency: f32,
-    pub audio_level: u32,
+    pub fn start_view_task(self: &Arc<Self>, view_state: Arc<PartyViewState>) {
+        let stream = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(100));
+            loop {
+                interval.tick().await;
+                stream.update_view_state(&view_state);
+            }
+        });
+    }
+
+    fn update_view_state(&self, view_state: &PartyViewState) {
+        let mut active = HashSet::new();
+
+        for entry in self.chains.iter() {
+            let key = entry.key();
+            let host_id = HostId::from(key.source_addr.ip());
+            let stream_name = if self.has_multiple_instances(key.source_addr.ip(), key.stream_id) {
+                format!("{} (:{})", key.stream_id, key.source_addr.port())
+            } else {
+                key.stream_id.to_string()
+            };
+
+            let view_key = StreamViewKey {
+                host_id,
+                source_addr: key.source_addr,
+                stream_id: key.stream_id.to_string(),
+            };
+            active.insert(view_key.clone());
+
+            let stats = entry.value().jitter_buffer.stats();
+            view_state.realtime_stream(view_key, stream_name).update(
+                stats.loss_rate() as f32,
+                stats.target_latency() as u32,
+                stats.audio_level(),
+                stats.recent_snapshots(),
+            );
+        }
+
+        view_state.retain_realtime_streams(&active);
+    }
 }
 
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Default
@@ -333,6 +296,11 @@ impl<S: AudioSample, const C: usize, const SR: u32> NetworkStream<S, C, SR>
             .map_err(|e| anyhow::anyhow!("RealtimeFrame deserialize: {:?}", e))?;
         self.receive(source, frame);
         Ok(())
+    }
+
+    fn start(self: Arc<Self>, ctx: NetworkStreamContext) {
+        self.start_cleanup_task();
+        self.start_view_task(ctx.view_state);
     }
 }
 

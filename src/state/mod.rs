@@ -11,7 +11,11 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex};
 
 use crate::music_provider::ProviderFactory;
-use crate::party::{NtpDebugInfo, Party, PartyConfig, StreamSnapshot, SyncedStreamState};
+use crate::party::{Party, PartyConfig};
+
+mod view_state;
+
+pub use view_state::{PartyViewState, StreamViewKey};
 
 /// Unique identifier for a remote host, derived from their IP address.
 /// We use IP address instead of SocketAddr to keep the host identity stable
@@ -48,7 +52,8 @@ impl From<SocketAddr> for HostId {
 /// Information about a single audio stream from a remote host.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamInfo {
-    pub stream_id: String,
+    pub key: StreamViewKey,
+    pub display_name: String,
     pub packet_loss: f32,
     pub target_latency: f32,
     pub audio_level: u32,
@@ -107,7 +112,7 @@ pub struct AppState {
     pub system_audio_level: Arc<AtomicU32>,
     pub listen_enabled: Arc<AtomicBool>,
     pub vocal_removal_enabled: Arc<AtomicBool>,
-    pub host_infos: Arc<Mutex<Vec<HostInfo>>>,
+    pub view_state: Arc<PartyViewState>,
     pub music_progress: Arc<MusicStreamProgress>,
     pub party: Mutex<Option<Party<f32, 2, 48000>>>,
     pub music_provider_factories: &'static [ProviderFactory],
@@ -124,7 +129,7 @@ impl AppState {
             system_audio_level: Arc::new(AtomicU32::new(0)),
             listen_enabled: Arc::new(AtomicBool::new(true)),
             vocal_removal_enabled: Arc::new(AtomicBool::new(false)),
-            host_infos: Arc::new(Mutex::new(Vec::new())),
+            view_state: Arc::new(PartyViewState::new()),
             music_progress: Arc::new(MusicStreamProgress::new()),
             party: Mutex::new(None),
             music_provider_factories: &[
@@ -157,15 +162,6 @@ impl AppState {
                 mic_input.disable();
             }
         }
-    }
-
-    pub fn stream_snapshots(&self, host_id: HostId, stream_id: &str) -> Vec<StreamSnapshot> {
-        self.party
-            .lock()
-            .expect("Party lock poisoned")
-            .as_ref()
-            .map(|party| party.stream_snapshots(host_id, stream_id))
-            .unwrap_or_default()
     }
 
     pub fn start_music_stream(&self, data: Vec<u8>, file_name: String) -> Result<()> {
@@ -206,22 +202,5 @@ impl AppState {
             .as_ref()
             .context("Party not initialized")?
             .seek_music(stream_id, position_ms)
-    }
-
-    pub fn synced_stream_states(&self) -> Vec<SyncedStreamState> {
-        self.party
-            .lock()
-            .expect("Party lock poisoned")
-            .as_ref()
-            .map(|party| party.synced_stream_states())
-            .unwrap_or_default()
-    }
-
-    pub fn ntp_debug_info(&self) -> Option<NtpDebugInfo> {
-        self.party
-            .lock()
-            .expect("Party lock poisoned")
-            .as_ref()
-            .and_then(|party| party.ntp_service().map(|ntp| ntp.debug_info()))
     }
 }

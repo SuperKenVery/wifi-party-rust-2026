@@ -45,11 +45,12 @@ use crate::audio::decoders::{
 use crate::audio::effects::DecodedVocalRemover;
 use crate::audio::frame::AudioBuffer;
 use crate::audio::symphonia_compat::WireCodecParams;
-use crate::party::network_stream::NetworkStream;
+use crate::party::network_stream::{NetworkStream, NetworkStreamContext};
 use crate::party::tagged_packet::{
     PacketTag, REQUEST_FRAMES_TAG, SYNCED_CONTROL_TAG, SYNCED_META_TAG, SYNCED_TAG, TaggedPacket,
 };
 use crate::pipeline::{GraphNode, Pullable, Pushable};
+use crate::state::PartyViewState;
 
 const SYNCED_STREAM_TIMEOUT: Duration = Duration::from_secs(30);
 const VOCAL_REMOVER_SAMPLE_RATE: u32 = 44_100;
@@ -765,6 +766,17 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             }
         });
     }
+
+    pub fn start_view_task(self: &Arc<Self>, view_state: Arc<PartyViewState>) {
+        let stream = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(100));
+            loop {
+                interval.tick().await;
+                view_state.set_synced_streams(stream.active_streams());
+            }
+        });
+    }
 }
 
 impl<S: AudioSample, const C: usize, const SR: u32> NetworkStream<S, C, SR>
@@ -794,6 +806,12 @@ impl<S: AudioSample, const C: usize, const SR: u32> NetworkStream<S, C, SR>
             _ => unreachable!("SyncedAudioStreamManager received unexpected tag {tag}"),
         }
         Ok(())
+    }
+
+    fn start(self: Arc<Self>, ctx: NetworkStreamContext) {
+        self.start_cleanup_task();
+        self.start_retransmit_task(ctx.sender);
+        self.start_view_task(ctx.view_state);
     }
 }
 
