@@ -32,6 +32,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use dashmap::DashMap;
 use rkyv::{Archive, Deserialize, Serialize};
 use symphonia::core::codecs::DecoderOptions;
@@ -50,6 +51,7 @@ use crate::party::tagged_packet::{
     PacketTag, REQUEST_FRAMES_TAG, SYNCED_CONTROL_TAG, SYNCED_META_TAG, SYNCED_TAG, TaggedPacket,
 };
 use crate::pipeline::{GraphNode, Pullable, Pushable};
+use crate::push_chain;
 use crate::state::PartyViewState;
 
 const SYNCED_STREAM_TIMEOUT: Duration = Duration::from_secs(30);
@@ -203,7 +205,7 @@ pub enum SyncedControl {
 /// arrival (in `receive()`). Decoded PCM accumulates in `output_buffer`,
 /// which the audio callback reads from via `pull_and_mix()`.
 struct BufferEntry<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    // -- Push pipeline --
+    // -- Receiving pipeline --
     /// Head of the push pipeline. Push CompressedPacket here to decode eagerly.
     pipeline_head: Arc<dyn Pushable<CompressedPacket>>,
     /// Pre-decoded audio buffer. Pull from here in the audio callback.
@@ -228,25 +230,6 @@ struct BufferEntry<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     start_party_time: u64,
     /// Total samples pulled to output (for progress UI).
     samples_played: u64,
-}
-
-fn create_decoder(
-    codec_params: &WireCodecParams,
-) -> Option<Box<dyn symphonia::core::codecs::Decoder>> {
-    let params = codec_params.to_symphonia();
-    match symphonia::default::get_codecs().make(&params, &DecoderOptions::default()) {
-        Ok(decoder) => {
-            info!(
-                "Created decoder for codec {:?}, sample_rate={}",
-                codec_params.codec, codec_params.sample_rate
-            );
-            Some(decoder)
-        }
-        Err(e) => {
-            error!("Failed to create decoder: {}", e);
-            None
-        }
-    }
 }
 
 /// Manages synchronized audio streams from multiple sources.
@@ -301,10 +284,25 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             return;
         }
 
-        // New stream — create decoder and wire up push pipeline.
-        let Some(decoder) = create_decoder(&meta.codec_params) else {
-            return;
-        };
+        if let Err(e) = self.handle_new_stream(source_addr, key, meta) {
+            error!("Failed to create synced buffer: {e:#}");
+        }
+    }
+
+    fn handle_new_stream(
+        &self,
+        source_addr: SocketAddr,
+        key: BufferKey,
+        meta: SyncedStreamMeta,
+    ) -> anyhow::Result<()> {
+        let stream_id = meta.stream_id;
+
+        let decoder = symphonia::default::get_codecs()
+            .make(
+                &meta.codec_params.to_symphonia(),
+                &DecoderOptions::default(),
+            )
+            .with_context(|| format!("create decoder for stream {stream_id}"))?;
 
         let output_buffer = SimpleBuffer::<Sample, CHANNELS, SAMPLE_RATE>::new();
         let output_buffer_sink: Arc<SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE>> =
@@ -318,56 +316,37 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         //
         // The vocal-removal model expects 44.1 kHz stereo, while the app's
         // output mixer can remain at SAMPLE_RATE.
-        let to_model_rate_node = match FftResampler::<CHANNELS, VOCAL_REMOVER_SAMPLE_RATE>::new(
-            meta.codec_params.sample_rate,
-        ) {
-            Ok(r) => Arc::new(r),
-            Err(e) => {
-                error!(
-                    "Failed to create 44.1 kHz resampler for stream {}: {}",
-                    meta.stream_id, e
-                );
-                return;
-            }
-        };
+        let to_model_rate_node = Arc::new(
+            FftResampler::<CHANNELS, VOCAL_REMOVER_SAMPLE_RATE>::new(meta.codec_params.sample_rate)
+                .with_context(|| format!("create 44.1 kHz resampler for stream {stream_id}"))?,
+        );
         let vocal_remover_node = Arc::new(
             DecodedVocalRemover::<CHANNELS, VOCAL_REMOVER_SAMPLE_RATE>::new(
                 self.vocal_removal_enabled.clone(),
             ),
         );
-        let to_output_rate_node =
-            match FftResampler::<CHANNELS, SAMPLE_RATE>::new(VOCAL_REMOVER_SAMPLE_RATE) {
-                Ok(r) => Arc::new(r),
-                Err(e) => {
-                    error!(
-                        "Failed to create output-rate resampler for stream {}: {}",
-                        meta.stream_id, e
-                    );
-                    return;
-                }
-            };
+        let to_output_rate_node = Arc::new(
+            FftResampler::<CHANNELS, SAMPLE_RATE>::new(VOCAL_REMOVER_SAMPLE_RATE)
+                .with_context(|| format!("create output-rate resampler for stream {stream_id}"))?,
+        );
 
         let interleaver_node = Arc::new(Interleaver::<Sample, CHANNELS, SAMPLE_RATE>::new());
 
-        // Wire: decoder_graph → to_model_rate_graph → vocal_remover_graph
-        // → to_output_rate_graph → interleaver_graph → output_buffer_sink
-        let interleaver_graph = Arc::new(GraphNode::new(interleaver_node));
-        interleaver_graph.add_output(output_buffer_sink.clone());
-        let to_output_rate_graph = Arc::new(GraphNode::new(to_output_rate_node.clone()));
-        to_output_rate_graph.add_output(interleaver_graph);
-        let vocal_remover_graph = Arc::new(GraphNode::new(vocal_remover_node.clone()));
-        vocal_remover_graph.add_output(to_output_rate_graph);
-        let to_model_rate_graph = Arc::new(GraphNode::new(to_model_rate_node.clone()));
-        to_model_rate_graph.add_output(vocal_remover_graph);
-        let decoder_graph = Arc::new(GraphNode::new(decoder_node.clone()));
-        decoder_graph.add_output(to_model_rate_graph);
+        // Wire: decoder → to_model_rate → vocal_remover → to_output_rate → interleaver → output_buffer
+        let pipeline_head: Arc<dyn Pushable<CompressedPacket>> = push_chain![
+            decoder_node.clone(),
+            to_model_rate_node.clone(),
+            vocal_remover_node.clone(),
+            to_output_rate_node.clone(),
+            interleaver_node.clone(),
+            => output_buffer_sink.clone()
+        ];
 
         let reset_dec = decoder_node.clone();
         let reset_to_model_rate = to_model_rate_node.clone();
         let reset_vocal_remover = vocal_remover_node.clone();
         let reset_to_output_rate = to_output_rate_node.clone();
         let reset_buf = output_buffer_sink.clone();
-        let pipeline_head: Arc<dyn Pushable<CompressedPacket>> = decoder_graph;
         let pipeline_reset: Box<dyn Fn() + Send + Sync> = Box::new(move || {
             reset_dec.reset();
             reset_to_model_rate.reset();
@@ -378,7 +357,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
         info!(
             "Creating synced buffer for source {} stream {}",
-            source_addr, meta.stream_id
+            source_addr, stream_id
         );
 
         // Deref the Arc to get a SimpleBuffer clone for pulling.
@@ -402,6 +381,8 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 samples_played: 0,
             },
         );
+
+        Ok(())
     }
 
     /// Receives playback control.
