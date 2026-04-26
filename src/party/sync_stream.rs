@@ -4,27 +4,29 @@
 //! and play at a specified party clock time, ensuring all participants hear
 //! the same audio at the same moment.
 //!
-//! # Architecture (push-based pipeline)
+//! # Architecture (push-based pipeline with dual output buffers)
 //!
 //! ```text
 //! Network packets → BufferEntry (reassembles fragments, sequences)
 //!                     ↓ push(CompressedPacket)
 //!                   SymphoniaDecoder (per-channel f32 PCM)
 //!                     ↓ push(DecodedAudio)
-//!                   FftResampler (resamples or passes through; per-channel f32 PCM)
+//!                   FftResampler → 44.1 kHz (model input rate)
 //!                     ↓ push(DecodedAudio)
-//!                   Interleaver (interleaved AudioBuffer)
-//!                     ↓ push(AudioBuffer)
-//!                   SimpleBuffer (pre-decoded audio ring)
-//!                     ↑ pull()
-//!                   SyncedAudioStreamManager::pull_and_mix() (NTP-timed playback)
+//!                   Tee ──┬→ FftResampler → SAMPLE_RATE → Interleaver → SimpleBuffer (raw)
+//!                         │
+//!                         └→ VocalRemover → FftResampler → SAMPLE_RATE → Interleaver → SimpleBuffer (removed)
+//!                                         ↑ pull()                           ↑ pull()
+//!                   SyncedAudioStreamManager::pull_and_mix() selects which buffer to pull from
 //!                     ↑ pull()
 //!                   Output Mixer → Speaker
 //! ```
 //!
 //! Decoding and resampling happen eagerly on packet arrival (in the network
-//! receive path). The audio callback only reads from the pre-decoded
-//! SimpleBuffer, ensuring deterministic low-latency playback.
+//! receive path). Both output buffers are filled in parallel. The audio
+//! callback reads from the appropriate buffer based on the vocal removal
+//! toggle, ensuring instant feedback without waiting for a single buffer to
+//! drain.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -36,21 +38,22 @@ use anyhow::Context;
 use dashmap::DashMap;
 use rkyv::{Archive, Deserialize, Serialize};
 use symphonia::core::codecs::DecoderOptions;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::audio::AudioSample;
 use crate::audio::buffers::simple_buffer::SimpleBuffer;
 use crate::audio::decoders::{
-    CompressedPacket, FftResampler, Interleaver, PacketCounter, SymphoniaDecoder,
+    CompressedPacket, DecodedAudio, FftResampler, Interleaver, PacketCounter, SymphoniaDecoder,
 };
 use crate::audio::effects::DecodedVocalRemover;
 use crate::audio::frame::AudioBuffer;
 use crate::audio::symphonia_compat::WireCodecParams;
+use crate::party::combinator::Tee;
 use crate::party::network_stream::{NetworkStream, NetworkStreamContext};
 use crate::party::tagged_packet::{
     PacketTag, REQUEST_FRAMES_TAG, SYNCED_CONTROL_TAG, SYNCED_META_TAG, SYNCED_TAG, TaggedPacket,
 };
-use crate::pipeline::{GraphNode, Pullable, Pushable};
+use crate::pipeline::{Pullable, Pushable};
 use crate::push_chain;
 use crate::state::PartyViewState;
 
@@ -202,15 +205,19 @@ pub enum SyncedControl {
 /// A buffer for a single stream from a single source.
 ///
 /// Compressed packets are pushed through the decode pipeline eagerly on
-/// arrival (in `receive()`). Decoded PCM accumulates in `output_buffer`,
-/// which the audio callback reads from via `pull_and_mix()`.
+/// arrival (in `receive()`). Decoded PCM accumulates in two output buffers
+/// (raw and vocal-removed) filled in parallel, so toggling vocal removal
+/// takes effect immediately when `pull_and_mix()` selects the active buffer.
 struct BufferEntry<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     // -- Receiving pipeline --
     /// Head of the push pipeline. Push CompressedPacket here to decode eagerly.
+    /// This feeds through a Tee fork that fills both output buffers in parallel.
     pipeline_head: Arc<dyn Pushable<CompressedPacket>>,
-    /// Pre-decoded audio buffer. Pull from here in the audio callback.
-    output_buffer: SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE>,
-    /// Resets decoder, resampler internal state, and output buffer on seek.
+    /// Pre-decoded audio buffer (no vocal removal). Pull when vocal removal is off.
+    output_buffer_raw: SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE>,
+    /// Pre-decoded audio buffer (with vocal removal). Pull when vocal removal is on.
+    output_buffer_no_vocal: SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE>,
+    /// Resets decoder, resampler internal state, and both output buffers on seek.
     pipeline_reset: Box<dyn Fn() + Send + Sync>,
     /// Packet progress counters (for UI).
     packet_counter: PacketCounter,
@@ -304,15 +311,26 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             )
             .with_context(|| format!("create decoder for stream {stream_id}"))?;
 
-        let output_buffer = SimpleBuffer::<Sample, CHANNELS, SAMPLE_RATE>::new();
-        let output_buffer_sink: Arc<SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE>> =
-            Arc::new(output_buffer);
+        // Two output buffers: one for the raw path (no vocal removal), one for
+        // the vocal-removed path. Both are filled in parallel via a Tee fork so
+        // toggling vocal removal takes effect immediately.
+        let output_buffer_raw = SimpleBuffer::<Sample, CHANNELS, SAMPLE_RATE>::new();
+        let output_buffer_raw_sink: Arc<_> = Arc::new(output_buffer_raw);
+
+        let output_buffer_removed = SimpleBuffer::<Sample, CHANNELS, SAMPLE_RATE>::new();
+        let output_buffer_removed_sink: Arc<_> = Arc::new(output_buffer_removed);
 
         let decoder_node = Arc::new(SymphoniaDecoder::<CHANNELS>::new(decoder));
 
-        // Build push pipeline:
-        // decoder → source rate to 44.1 kHz → vocal remover → output rate
-        // → interleaver → output_buffer.
+        // Build push pipeline with a Tee fork after the 44.1 kHz resampler:
+        //
+        //   decoder → to_model_rate(→44.1k) → Tee ──┬→ to_output_rate → interleaver → output_buffer_raw
+        //                                            │
+        //                                            └→ vocal_remover → to_output_rate → interleaver → output_buffer_removed
+        //
+        // Both output buffers are filled in parallel so toggling the vocal
+        // removal checkbox takes effect immediately — pull_and_mix simply
+        // selects the appropriate buffer at read time.
         //
         // The vocal-removal model expects 44.1 kHz stereo, while the app's
         // output mixer can remain at SAMPLE_RATE.
@@ -321,38 +339,60 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 .with_context(|| format!("create 44.1 kHz resampler for stream {stream_id}"))?,
         );
         let vocal_remover_node = Arc::new(
-            DecodedVocalRemover::<CHANNELS, VOCAL_REMOVER_SAMPLE_RATE>::new(
-                self.vocal_removal_enabled.clone(),
-            ),
+            DecodedVocalRemover::<CHANNELS, VOCAL_REMOVER_SAMPLE_RATE>::new(Arc::new(
+                AtomicBool::new(true),
+            )),
         );
-        let to_output_rate_node = Arc::new(
-            FftResampler::<CHANNELS, SAMPLE_RATE>::new(VOCAL_REMOVER_SAMPLE_RATE)
-                .with_context(|| format!("create output-rate resampler for stream {stream_id}"))?,
+        let to_output_rate_node_for_raw = Arc::new(
+            FftResampler::<CHANNELS, SAMPLE_RATE>::new(VOCAL_REMOVER_SAMPLE_RATE).with_context(
+                || format!("create output-rate resampler (raw) for stream {stream_id}"),
+            )?,
+        );
+        let to_output_rate_node_for_removed = Arc::new(
+            FftResampler::<CHANNELS, SAMPLE_RATE>::new(VOCAL_REMOVER_SAMPLE_RATE).with_context(
+                || format!("create output-rate resampler (removed) for stream {stream_id}"),
+            )?,
         );
 
-        let interleaver_node = Arc::new(Interleaver::<Sample, CHANNELS, SAMPLE_RATE>::new());
+        let interleaver_node_for_raw =
+            Arc::new(Interleaver::<Sample, CHANNELS, SAMPLE_RATE>::new());
+        let interleaver_node_for_removed =
+            Arc::new(Interleaver::<Sample, CHANNELS, SAMPLE_RATE>::new());
 
-        // Wire: decoder → to_model_rate → vocal_remover → to_output_rate → interleaver → output_buffer
+        // Wire: decoder → to_model_rate → Tee
         let pipeline_head: Arc<dyn Pushable<CompressedPacket>> = push_chain![
             decoder_node.clone(),
-            to_model_rate_node.clone(),
-            vocal_remover_node.clone(),
-            to_output_rate_node.clone(),
-            interleaver_node.clone(),
-            => output_buffer_sink.clone()
+            => Arc::new(Tee::new(
+                push_chain![
+                    to_output_rate_node_for_raw.clone(),
+                    interleaver_node_for_raw.clone(),
+                    => output_buffer_raw_sink.clone()
+                ],
+                push_chain![
+                    to_model_rate_node.clone(),
+                    vocal_remover_node.clone(),
+                    to_output_rate_node_for_removed.clone(),
+                    interleaver_node_for_removed.clone(),
+                    => output_buffer_removed_sink.clone()
+                ]
+            ))
         ];
 
         let reset_dec = decoder_node.clone();
         let reset_to_model_rate = to_model_rate_node.clone();
         let reset_vocal_remover = vocal_remover_node.clone();
-        let reset_to_output_rate = to_output_rate_node.clone();
-        let reset_buf = output_buffer_sink.clone();
+        let reset_to_output_rate_raw = to_output_rate_node_for_raw.clone();
+        let reset_to_output_rate_removed = to_output_rate_node_for_removed.clone();
+        let reset_buf_raw = output_buffer_raw_sink.clone();
+        let reset_buf_removed = output_buffer_removed_sink.clone();
         let pipeline_reset: Box<dyn Fn() + Send + Sync> = Box::new(move || {
             reset_dec.reset();
             reset_to_model_rate.reset();
             reset_vocal_remover.reset();
-            reset_to_output_rate.reset();
-            reset_buf.reset();
+            reset_to_output_rate_raw.reset();
+            reset_to_output_rate_removed.reset();
+            reset_buf_raw.reset();
+            reset_buf_removed.reset();
         });
 
         info!(
@@ -362,13 +402,15 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
         // Deref the Arc to get a SimpleBuffer clone for pulling.
         // SimpleBuffer uses Arc<Mutex<...>> internally so clones share state.
-        let output_for_pull = (*output_buffer_sink).clone();
+        let output_raw_for_pull = (*output_buffer_raw_sink).clone();
+        let output_removed_for_pull = (*output_buffer_removed_sink).clone();
 
         self.buffers.insert(
             key,
             BufferEntry {
                 pipeline_head,
-                output_buffer: output_for_pull,
+                output_buffer_raw: output_raw_for_pull,
+                output_buffer_no_vocal: output_removed_for_pull,
                 pipeline_reset,
                 packet_counter: PacketCounter::new(),
                 meta,
@@ -581,6 +623,8 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         // 10ms lag threshold before we attempt drift correction.
         let drift_threshold = SAMPLE_RATE as u64 * 10 / 1000;
 
+        let vocal_removal_on = self.vocal_removal_enabled.load(Ordering::Relaxed);
+
         for mut entry in self.buffers.iter_mut() {
             if !entry.playing || entry.start_party_time > party_now {
                 continue;
@@ -591,10 +635,11 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             let expected_samples = elapsed_us * SAMPLE_RATE as u64 / 1_000_000;
 
             if entry.samples_played + drift_threshold < expected_samples {
-                // Lagging: discard old audio from the buffer to skip ahead.
+                // Lagging: discard old audio from both buffers to skip ahead.
                 let lag_samples = expected_samples - entry.samples_played;
                 let to_discard = (lag_samples as usize).saturating_mul(CHANNELS);
-                entry.output_buffer.discard(to_discard);
+                entry.output_buffer_raw.pull(to_discard);
+                entry.output_buffer_no_vocal.pull(to_discard);
                 warn!(
                     "Synced stream lagging: discarding {:.1}ms of audio",
                     lag_samples as f64 * 1000.0 / SAMPLE_RATE as f64
@@ -611,9 +656,20 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 continue;
             }
 
-            let Some(buf) = entry.output_buffer.pull(num_samples) else {
+            // Select the active buffer based on the vocal removal toggle.
+            // Pull from the active buffer and discard the same amount from
+            // the inactive one so both stay time-aligned — toggling switches
+            // to the correct point in the stream without hearing stale audio.
+            let (active, inactive) = if vocal_removal_on {
+                (&entry.output_buffer_no_vocal, &entry.output_buffer_raw)
+            } else {
+                (&entry.output_buffer_raw, &entry.output_buffer_no_vocal)
+            };
+
+            let Some(buf) = active.pull(num_samples) else {
                 continue;
             };
+            inactive.pull(num_samples);
 
             source_count += 1;
             let buf_data = buf.data();
