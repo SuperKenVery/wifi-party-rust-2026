@@ -177,18 +177,6 @@
               filter = sourceFilter;
               name = "source";
             });
-
-            buildPhase = ''
-              cp ${tailwind-assets}/tailwind_output.css assets/tailwind_output.css
-              export CARGO_HOME=$cargoVendorDir
-
-              dx bundle --release
-            '';
-
-            installPhaseCommand = ''
-              mkdir -p $out/
-              cp -r ./target/dx/nju-schedule-ics/release/web/* $out/
-            '';
         });
     });
 

@@ -14,7 +14,10 @@ use symphonia::core::probe::Hint;
 use crate::audio::buffers::simple_buffer::SimpleBuffer;
 use crate::audio::decoders::{CompressedPacket, FftResampler, Interleaver, SymphoniaDecoder};
 use crate::audio::symphonia_compat::WireCodecParams;
-use crate::party::sync_stream::*;
+use crate::party::share_music::receiver::*;
+use crate::party::share_music::{
+    SyncedControl, SyncedFrame, SyncedStreamId, SyncedStreamMeta, new_stream_id,
+};
 use crate::pipeline::{GraphNode, Pullable, Pushable};
 
 const SR: u32 = 48000;

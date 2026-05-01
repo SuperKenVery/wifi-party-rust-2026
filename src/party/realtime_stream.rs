@@ -13,7 +13,7 @@
 //! The mixer is shared across all sources, enabling dynamic addition/removal
 //! of network hosts without rebuilding the pipeline.
 //!
-//! For synchronized music playback, see [`sync_stream`](super::sync_stream).
+//! For synchronized music playback, see [`share_music`](super::share_music).
 
 use std::collections::HashSet;
 use std::net::SocketAddr;

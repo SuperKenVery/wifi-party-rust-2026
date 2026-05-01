@@ -21,16 +21,15 @@ use crate::{pull_chain, push_chain};
 
 use super::combinator::{Mixer, Tee};
 use super::config::PartyConfig;
-use super::music::MusicStreamRegistry;
 use super::network_stream::{NetworkStream, NetworkStreamContext, StreamRegistry};
 use super::ntp::NtpService;
 use super::packet_dispatcher::PacketDispatcher;
 use super::realtime_stream::{RealtimeAudioStream, RealtimeFramePacker, RealtimeStreamId};
-use super::sync_stream::SyncedAudioStreamManager;
+use super::share_music::{ShareMusicService, SyncedStreamId};
 
 struct NetworkStreamBundle<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     ntp_service: Arc<NtpService>,
-    synced_stream: Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>,
+    share_music: Arc<ShareMusicService<Sample, CHANNELS, SAMPLE_RATE>>,
     registry: Arc<StreamRegistry<Sample, CHANNELS, SAMPLE_RATE>>,
 }
 
@@ -38,9 +37,8 @@ pub struct Party<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     state: Arc<AppState>,
     config: PartyConfig,
     realtime_stream: Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
-    synced_stream: Option<Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>>,
+    share_music: Option<Arc<ShareMusicService<Sample, CHANNELS, SAMPLE_RATE>>>,
     ntp_service: Option<Arc<NtpService>>,
-    music_streams: Option<Arc<MusicStreamRegistry<Sample, CHANNELS, SAMPLE_RATE>>>,
     mic_input: Option<Arc<AudioInput<Sample, CHANNELS, SAMPLE_RATE>>>,
     _audio_streams: Vec<cpal::Stream>,
     dispatcher_abort: Option<tokio::task::AbortHandle>,
@@ -57,9 +55,8 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
             state,
             config,
             realtime_stream: Arc::new(RealtimeAudioStream::new()),
-            synced_stream: None,
+            share_music: None,
             ntp_service: None,
-            music_streams: None,
             mic_input: None,
             _audio_streams: Vec::new(),
             dispatcher_abort: None,
@@ -72,26 +69,22 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
         self.mic_input.as_ref()
     }
 
-    pub fn pause_music(&self, stream_id: super::sync_stream::SyncedStreamId) -> Result<()> {
-        self.music_streams()?.pause(stream_id)
+    pub fn pause_music(&self, stream_id: SyncedStreamId) -> Result<()> {
+        self.share_music()?.pause(stream_id)
     }
 
-    pub fn resume_music(&self, stream_id: super::sync_stream::SyncedStreamId) -> Result<()> {
-        self.music_streams()?.resume(stream_id)
+    pub fn resume_music(&self, stream_id: SyncedStreamId) -> Result<()> {
+        self.share_music()?.resume(stream_id)
     }
 
-    pub fn seek_music(
-        &self,
-        stream_id: super::sync_stream::SyncedStreamId,
-        position_ms: u64,
-    ) -> Result<()> {
-        self.music_streams()?.seek(stream_id, position_ms)
+    pub fn seek_music(&self, stream_id: SyncedStreamId, position_ms: u64) -> Result<()> {
+        self.share_music()?.seek(stream_id, position_ms)
     }
 
-    fn music_streams(&self) -> Result<&Arc<MusicStreamRegistry<Sample, CHANNELS, SAMPLE_RATE>>> {
-        self.music_streams
+    fn share_music(&self) -> Result<&Arc<ShareMusicService<Sample, CHANNELS, SAMPLE_RATE>>> {
+        self.share_music
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Music stream registry not started"))
+            .ok_or_else(|| anyhow::anyhow!("ShareMusicService not started"))
     }
 }
 
@@ -117,9 +110,9 @@ impl<
         let stream_bundle = self.build_stream_bundle(network_sender.clone());
 
         let realtime_stream = self.realtime_stream.clone();
-        let synced_stream = stream_bundle.synced_stream.clone();
+        let synced_stream = stream_bundle.share_music.receiver();
         self.ntp_service = Some(stream_bundle.ntp_service.clone());
-        self.synced_stream = Some(stream_bundle.synced_stream.clone());
+        self.share_music = Some(stream_bundle.share_music.clone());
 
         let (abort_tx, abort_rx) = std::sync::mpsc::sync_channel(1);
 
@@ -232,11 +225,11 @@ impl<
 
         self._audio_streams.clear();
         self.mic_input = None;
-        if let Some(music_streams) = self.music_streams.take() {
-            music_streams.clear();
+        if let Some(share_music) = self.share_music.take() {
+            share_music.clear();
         }
         self.ntp_service = None;
-        self.synced_stream = None;
+        self.share_music = None;
         self.multicast_lock = None;
         self.state.view_state.clear();
 
@@ -256,7 +249,7 @@ impl<
         file_name: String,
         progress: Arc<MusicStreamProgress>,
     ) -> Result<()> {
-        self.music_streams()?.start_stream(data, file_name, progress)
+        self.share_music()?.start_stream(data, file_name, progress)
     }
 
     fn build_stream_bundle(
@@ -266,28 +259,22 @@ impl<
         let ntp_service = NtpService::new(network_sender.clone());
 
         let ntp_for_synced = ntp_service.clone();
-        let synced_stream = Arc::new(SyncedAudioStreamManager::new(
+        let share_music = Arc::new(ShareMusicService::new(
+            ntp_service.clone(),
+            network_sender,
             move || ntp_for_synced.party_now(),
             self.state.vocal_removal_enabled.clone(),
         ));
 
-        let music_streams = Arc::new(MusicStreamRegistry::new(
-            ntp_service.clone(),
-            network_sender,
-            synced_stream.clone(),
-        ));
-        self.music_streams = Some(music_streams.clone());
-
         let streams: Vec<Arc<dyn NetworkStream<Sample, CHANNELS, SAMPLE_RATE>>> = vec![
             self.realtime_stream.clone() as Arc<dyn NetworkStream<Sample, CHANNELS, SAMPLE_RATE>>,
-            synced_stream.clone() as Arc<dyn NetworkStream<Sample, CHANNELS, SAMPLE_RATE>>,
+            share_music.clone() as Arc<dyn NetworkStream<Sample, CHANNELS, SAMPLE_RATE>>,
             ntp_service.clone() as Arc<dyn NetworkStream<Sample, CHANNELS, SAMPLE_RATE>>,
-            music_streams as Arc<dyn NetworkStream<Sample, CHANNELS, SAMPLE_RATE>>,
         ];
 
         NetworkStreamBundle {
             ntp_service,
-            synced_stream,
+            share_music,
             registry: Arc::new(StreamRegistry::from_streams(streams)),
         }
     }

@@ -1,12 +1,3 @@
-//! Synchronized audio stream (with buffering) for music playback.
-//!
-//! Unlike realtime streams that play immediately, synced streams buffer audio
-//! and play at a specified party clock time, ensuring all participants hear
-//! the same audio at the same moment.
-//!
-//! # Architecture (push-based pipeline with dual output buffers)
-//!
-//! ```text
 //! Network packets → BufferEntry (reassembles fragments, sequences)
 //!                     ↓ push(CompressedPacket)
 //!                   SymphoniaDecoder (per-channel f32 PCM)
@@ -31,25 +22,27 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use dashmap::DashMap;
-use rkyv::{Archive, Deserialize, Serialize};
 use symphonia::core::codecs::DecoderOptions;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::audio::AudioSample;
 use crate::audio::buffers::simple_buffer::SimpleBuffer;
 use crate::audio::decoders::{
-    CompressedPacket, DecodedAudio, FftResampler, Interleaver, PacketCounter, SymphoniaDecoder,
+    CompressedPacket, FftResampler, Interleaver, PacketCounter, SymphoniaDecoder,
 };
 use crate::audio::effects::DecodedVocalRemover;
 use crate::audio::frame::AudioBuffer;
-use crate::audio::symphonia_compat::WireCodecParams;
 use crate::party::combinator::Tee;
 use crate::party::network_stream::{NetworkStream, NetworkStreamContext};
+use crate::party::share_music::{
+    RequestFramesPayload, SyncedControl, SyncedFrame, SyncedStreamId, SyncedStreamMeta,
+    SyncedStreamProgress, SyncedStreamState,
+};
 use crate::party::tagged_packet::{
     PacketTag, REQUEST_FRAMES_TAG, SYNCED_CONTROL_TAG, SYNCED_META_TAG, SYNCED_TAG, TaggedPacket,
 };
@@ -59,107 +52,6 @@ use crate::state::PartyViewState;
 
 const SYNCED_STREAM_TIMEOUT: Duration = Duration::from_secs(30);
 const VOCAL_REMOVER_SAMPLE_RATE: u32 = 44_100;
-
-static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
-
-pub type SyncedStreamId = u64;
-
-pub fn new_stream_id() -> SyncedStreamId {
-    NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed)
-}
-
-/// Metadata about a synced stream, sent over the network.
-///
-/// Contains information the receiver needs to display and track the stream:
-/// - file name for UI display
-/// - total frames for progress/completion tracking
-/// - codec params for creating the decoder on receiver side
-#[derive(Archive, Serialize, Deserialize, Debug, Clone)]
-#[rkyv(compare(PartialEq))]
-pub struct SyncedStreamMeta {
-    pub stream_id: SyncedStreamId,
-    pub file_name: String,
-    pub total_frames: u64,
-    pub total_samples: u64,
-    pub codec_params: WireCodecParams,
-}
-
-/// A single compressed audio packet for synced playback, sent over the network.
-///
-/// Contains raw compressed bytes from the original audio file.
-/// Timing is calculated from sequence_number + control messages.
-///
-/// Large payloads (e.g. ALAC frames of 3–8 KB) exceed the link MTU, so we
-/// split them across multiple `SyncedFrame`s that share the same
-/// `sequence_number` but differ in `fragment_idx`. Receivers reassemble by
-/// seq before decoding. Frames that fit in a single datagram use
-/// `fragment_idx = 0, fragment_total = 1`.
-#[derive(Archive, Serialize, Deserialize, Debug, Clone)]
-#[rkyv(compare(PartialEq))]
-pub struct SyncedFrame {
-    pub stream_id: SyncedStreamId,
-    pub sequence_number: u64,
-    pub dur: u32,
-    pub fragment_idx: u16,
-    pub fragment_total: u16,
-    pub data: Vec<u8>,
-}
-
-/// Max bytes of compressed audio per fragment. Leaves headroom under a
-/// conservative 1400-byte UDP payload for the rest of `SyncedFrame`,
-/// the `NetworkPacket::Synced` wrapper, and rkyv framing overhead.
-pub const MAX_FRAGMENT_DATA: usize = 1200;
-
-/// Raw packet stored for sender-side retransmission.
-#[derive(Clone)]
-pub struct RawPacket {
-    pub dur: u32,
-    pub data: Vec<u8>,
-}
-
-impl SyncedFrame {
-    /// Build a non-fragmented frame (`fragment_total = 1`).
-    pub fn whole(stream_id: SyncedStreamId, sequence_number: u64, dur: u32, data: Vec<u8>) -> Self {
-        Self {
-            stream_id,
-            sequence_number,
-            dur,
-            fragment_idx: 0,
-            fragment_total: 1,
-            data,
-        }
-    }
-}
-
-/// Playback progress for a synced stream (output type for GUI).
-#[derive(Debug, Clone, PartialEq)]
-pub struct SyncedStreamProgress {
-    pub samples_played: u64,
-    pub total_samples: u64,
-    pub buffered_frames: u64,
-    pub is_playing: bool,
-    pub highest_seq_received: u64,
-}
-
-/// Complete state of a synced stream (output type for GUI).
-#[derive(Debug, Clone)]
-pub struct SyncedStreamState {
-    pub stream_id: SyncedStreamId,
-    pub meta: SyncedStreamMeta,
-    pub progress: SyncedStreamProgress,
-    pub is_local_sender: bool,
-}
-
-impl PartialEq for SyncedStreamState {
-    fn eq(&self, other: &Self) -> bool {
-        self.stream_id == other.stream_id
-            && self.meta.stream_id == other.meta.stream_id
-            && self.meta.file_name == other.meta.file_name
-            && self.meta.total_frames == other.meta.total_frames
-            && self.progress == other.progress
-            && self.is_local_sender == other.is_local_sender
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct BufferKey {
@@ -175,27 +67,6 @@ struct FragmentSet {
     received_count: u16,
     dur: u32,
     parts: Vec<Option<Vec<u8>>>,
-}
-
-/// Wire payload for retransmission requests.
-#[derive(Archive, Serialize, Deserialize, Debug, Clone)]
-pub struct RequestFramesPayload {
-    pub stream_id: SyncedStreamId,
-    pub seqs: Vec<u64>,
-}
-
-/// Control commands for synced streams.
-#[derive(Archive, Serialize, Deserialize, Debug, Clone)]
-#[rkyv(compare(PartialEq))]
-pub enum SyncedControl {
-    Start {
-        stream_id: SyncedStreamId,
-        party_clock_time: u64,
-        seq: u64,
-    },
-    Pause {
-        stream_id: SyncedStreamId,
-    },
 }
 
 // ---------------------------------------------------------------------------

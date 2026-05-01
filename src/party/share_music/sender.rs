@@ -29,10 +29,10 @@ use crate::audio::symphonia_compat::WireCodecParams;
 use crate::io::NetworkSender;
 use crate::party::network_stream::NetworkStream;
 use crate::party::ntp::NtpService;
-use crate::party::sync_stream::SyncedControl;
-use crate::party::sync_stream::{
-    MAX_FRAGMENT_DATA, RawPacket, RequestFramesPayload, SyncedAudioStreamManager, SyncedFrame,
-    SyncedStreamId, SyncedStreamMeta, new_stream_id,
+use crate::party::share_music::receiver::SyncedAudioStreamManager;
+use crate::party::share_music::{
+    MAX_FRAGMENT_DATA, RawPacket, RequestFramesPayload, SyncedControl, SyncedFrame, SyncedStreamId,
+    SyncedStreamMeta, new_stream_id,
 };
 use crate::party::tagged_packet::{
     PacketTag, REQUEST_FRAMES_TAG, SYNCED_CONTROL_TAG, SYNCED_META_TAG, SYNCED_TAG, TaggedPacket,
