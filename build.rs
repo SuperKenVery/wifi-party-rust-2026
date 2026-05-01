@@ -12,9 +12,8 @@
 /// On any failure (missing file, …) a cargo warning is emitted and VocalRemover
 /// falls back to a pass-through node.
 fn main() {
-    let default_path = "/Users/ken/Codes/tmp/REALTIME_DTT/all_rt.onnx";
-    let model_path = std::env::var("ALL_RT_ONNX_PATH")
-        .unwrap_or_else(|_| default_path.to_string());
+    let default_path = "assets/all_rt.onnx";
+    let model_path = std::env::var("ALL_RT_ONNX_PATH").unwrap_or_else(|_| default_path.to_string());
 
     println!("cargo:rerun-if-env-changed=ALL_RT_ONNX_PATH");
     println!("cargo:rerun-if-changed={model_path}");

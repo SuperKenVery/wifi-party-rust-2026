@@ -87,8 +87,9 @@ impl<Sample: AudioSample + cpal::SizedSample, const CHANNELS: usize, const SAMPL
         let input_config = input_device.default_input_config()?;
         debug!("Input config: {input_config:#?}");
 
-        const MIN_BUFFER_MS: u32 = 3;
-        let min_buffer_size = SAMPLE_RATE * MIN_BUFFER_MS / 1000;
+        const MIN_BUFFER_MS: f32 = 1.0;
+        let min_buffer_size = ((SAMPLE_RATE as f32) * MIN_BUFFER_MS / 1000.0) as u32;
+        // let min_buffer_size = 0.5;
 
         let config = StreamConfig {
             channels: CHANNELS as u16,
