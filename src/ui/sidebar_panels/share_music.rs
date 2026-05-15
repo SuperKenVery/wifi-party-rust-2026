@@ -50,6 +50,10 @@ pub fn ShareMusicPanel(
     let streaming_total = progress
         .streaming_total
         .load(std::sync::atomic::Ordering::Relaxed);
+    let local_sender_stream_id = active_streams
+        .iter()
+        .find(|stream| stream.is_local_sender)
+        .map(|stream| stream.stream_id);
     rsx! {
         div {
             class: "flex-1 flex flex-col relative overflow-hidden bg-slate-900",
@@ -80,9 +84,14 @@ pub fn ShareMusicPanel(
                                     checked: state_arc.vocal_removal_enabled.load(std::sync::atomic::Ordering::Relaxed),
                                     onchange: {
                                         let state = state_arc.clone();
+                                        let stream_id = local_sender_stream_id;
                                         move |evt: Event<FormData>| {
                                             let checked = evt.checked();
-                                            state.vocal_removal_enabled.store(checked, std::sync::atomic::Ordering::Relaxed);
+                                            if let Some(stream_id) = stream_id {
+                                                let _ = state.set_music_vocal_removal(stream_id, checked);
+                                            } else {
+                                                state.vocal_removal_enabled.store(checked, std::sync::atomic::Ordering::Relaxed);
+                                            }
                                         }
                                     },
                                 }

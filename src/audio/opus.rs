@@ -70,6 +70,12 @@ impl OpusEncoderState {
 
         Ok(&self.output_buffer[..len])
     }
+
+    pub fn reset(&mut self) {
+        if let Err(e) = self.encoder.reset_state() {
+            tracing::warn!("Failed to reset Opus encoder: {}", e);
+        }
+    }
 }
 
 pub struct OpusDecoderState {
@@ -113,6 +119,12 @@ impl OpusDecoderState {
 
         Ok(&self.output_buffer[..frame_size.min(self.output_buffer.len())])
     }
+
+    pub fn reset(&mut self) {
+        if let Err(e) = self.decoder.reset_state() {
+            tracing::warn!("Failed to reset Opus decoder: {}", e);
+        }
+    }
 }
 
 /// Pipeline node that encodes PCM audio to Opus format.
@@ -132,6 +144,10 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             state: Mutex::new(OpusEncoderState::new::<CHANNELS, SAMPLE_RATE>()?),
             _marker: std::marker::PhantomData,
         })
+    }
+
+    pub fn reset(&self) {
+        self.state.lock().unwrap().reset();
     }
 }
 
@@ -260,6 +276,10 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 None
             }
         }
+    }
+
+    pub fn reset(&self) {
+        self.state.lock().unwrap().reset();
     }
 }
 

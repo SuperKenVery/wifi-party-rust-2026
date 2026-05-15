@@ -1,23 +1,15 @@
-//! Network packets → BufferEntry (reassembles fragments, sequences)
-//!                     ↓ push(CompressedPacket)
-//!                   SymphoniaDecoder (per-channel f32 PCM)
-//!                     ↓ push(DecodedAudio)
-//!                   FftResampler → 44.1 kHz (model input rate)
-//!                     ↓ push(DecodedAudio)
-//!                   Tee ──┬→ FftResampler → SAMPLE_RATE → Interleaver → SimpleBuffer (raw)
-//!                         │
-//!                         └→ VocalRemover → FftResampler → SAMPLE_RATE → Interleaver → SimpleBuffer (removed)
-//!                                         ↑ pull()                           ↑ pull()
+//! Network packets → BufferEntry (reassembles fragments, sequences per track)
+//!                  ├─ Original → SymphoniaDecoder → FftResampler → Interleaver → raw buffer
+//!                  └─ NoVocal  → OpusDecoder → no-vocal buffer
+//!                     ↑ pull()                    ↑ pull()
 //!                   SyncedAudioStreamManager::pull_and_mix() selects which buffer to pull from
 //!                     ↑ pull()
 //!                   Output Mixer → Speaker
 //! ```
 //!
-//! Decoding and resampling happen eagerly on packet arrival (in the network
-//! receive path). Both output buffers are filled in parallel. The audio
-//! callback reads from the appropriate buffer based on the vocal removal
-//! toggle, ensuring instant feedback without waiting for a single buffer to
-//! drain.
+//! Decoding and resampling happen eagerly on packet arrival. The sender always
+//! publishes both tracks; the audio callback switches between the pre-decoded
+//! buffers when it receives a shared vocal-removal control event.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -35,13 +27,12 @@ use crate::audio::buffers::simple_buffer::SimpleBuffer;
 use crate::audio::decoders::{
     CompressedPacket, FftResampler, Interleaver, PacketCounter, SymphoniaDecoder,
 };
-use crate::audio::effects::DecodedVocalRemover;
 use crate::audio::frame::AudioBuffer;
-use crate::party::combinator::Tee;
+use crate::audio::opus::{OpusDecoder, OpusPacket};
 use crate::party::network_stream::{NetworkStream, NetworkStreamContext};
 use crate::party::share_music::{
     RequestFramesPayload, SyncedControl, SyncedFrame, SyncedStreamId, SyncedStreamMeta,
-    SyncedStreamProgress, SyncedStreamState,
+    SyncedStreamProgress, SyncedStreamState, SyncedTrack,
 };
 use crate::party::tagged_packet::{
     PacketTag, REQUEST_FRAMES_TAG, SYNCED_CONTROL_TAG, SYNCED_META_TAG, SYNCED_TAG, TaggedPacket,
@@ -51,7 +42,6 @@ use crate::push_chain;
 use crate::state::PartyViewState;
 
 const SYNCED_STREAM_TIMEOUT: Duration = Duration::from_secs(30);
-const VOCAL_REMOVER_SAMPLE_RATE: u32 = 44_100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct BufferKey {
@@ -73,33 +63,52 @@ struct FragmentSet {
 //  BufferEntry — per-source/stream state using push-based pipeline
 // ---------------------------------------------------------------------------
 
+struct TrackReceiveState {
+    pending_raw: HashMap<u64, SyncedFrame>,
+    pending_fragments: HashMap<u64, FragmentSet>,
+    next_feed_seq: u64,
+    packet_counter: PacketCounter,
+}
+
+impl TrackReceiveState {
+    fn new() -> Self {
+        Self {
+            pending_raw: HashMap::new(),
+            pending_fragments: HashMap::new(),
+            next_feed_seq: 1,
+            packet_counter: PacketCounter::new(),
+        }
+    }
+
+    fn reset_to(&mut self, seq: u64) {
+        self.pending_raw.clear();
+        self.pending_fragments.clear();
+        self.next_feed_seq = seq;
+    }
+}
+
 /// A buffer for a single stream from a single source.
 ///
-/// Compressed packets are pushed through the decode pipeline eagerly on
-/// arrival (in `receive()`). Decoded PCM accumulates in two output buffers
-/// (raw and vocal-removed) filled in parallel, so toggling vocal removal
-/// takes effect immediately when `pull_and_mix()` selects the active buffer.
+/// The original and no-vocal tracks are received independently. Decoded PCM
+/// accumulates in two output buffers; shared control events decide which buffer
+/// the audio callback pulls from.
 struct BufferEntry<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     // -- Receiving pipeline --
-    /// Head of the push pipeline. Push CompressedPacket here to decode eagerly.
-    /// This feeds through a Tee fork that fills both output buffers in parallel.
-    pipeline_head: Arc<dyn Pushable<CompressedPacket>>,
+    /// Head of the original-file push pipeline. Push CompressedPacket here to
+    /// decode original compressed packets eagerly.
+    original_pipeline_head: Arc<dyn Pushable<CompressedPacket>>,
+    /// Opus decoder for sender-produced no-vocal packets.
+    no_vocal_decoder: Arc<OpusDecoder<Sample, CHANNELS, SAMPLE_RATE>>,
     /// Pre-decoded audio buffer (no vocal removal). Pull when vocal removal is off.
     output_buffer_raw: SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE>,
-    /// Pre-decoded audio buffer (with vocal removal). Pull when vocal removal is on.
+    /// Pre-decoded audio buffer (sender-side vocal removal). Pull when vocal removal is on.
     output_buffer_no_vocal: SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE>,
-    /// Resets decoder, resampler internal state, and both output buffers on seek.
-    pipeline_reset: Box<dyn Fn() + Send + Sync>,
-    /// Packet progress counters (for UI).
-    packet_counter: PacketCounter,
+    /// Resets decoder/resampler state and both output buffers on seek.
+    reset_decoder_states: Box<dyn Fn() + Send + Sync>,
 
     meta: SyncedStreamMeta,
-    /// Out of order compressed frames waiting for predecessors.
-    pending_raw: HashMap<u64, SyncedFrame>,
-    /// Long frames segmented to fit MTU, here we store segments.
-    pending_fragments: HashMap<u64, FragmentSet>,
-    /// Next expected sequence number for feeding into the pipeline.
-    next_feed_seq: u64,
+    original_track: TrackReceiveState,
+    no_vocal_track: TrackReceiveState,
     last_seen: Instant,
 
     // -- Playback state --
@@ -108,6 +117,17 @@ struct BufferEntry<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     start_party_time: u64,
     /// Total samples pulled to output (for progress UI).
     samples_played: u64,
+    vocal_removal_active: bool,
+    pending_vocal_removal: Option<(bool, u64)>,
+}
+
+enum ReadyPackets<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    Original(Arc<dyn Pushable<CompressedPacket>>, Vec<SyncedFrame>),
+    NoVocal(
+        Arc<OpusDecoder<Sample, CHANNELS, SAMPLE_RATE>>,
+        SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE>,
+        Vec<SyncedFrame>,
+    ),
 }
 
 /// Manages synchronized audio streams from multiple sources.
@@ -182,9 +202,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             )
             .with_context(|| format!("create decoder for stream {stream_id}"))?;
 
-        // Two output buffers: one for the raw path (no vocal removal), one for
-        // the vocal-removed path. Both are filled in parallel via a Tee fork so
-        // toggling vocal removal takes effect immediately.
         let output_buffer_raw = SimpleBuffer::<Sample, CHANNELS, SAMPLE_RATE>::new();
         let output_buffer_raw_sink: Arc<_> = Arc::new(output_buffer_raw);
 
@@ -192,76 +209,39 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         let output_buffer_removed_sink: Arc<_> = Arc::new(output_buffer_removed);
 
         let decoder_node = Arc::new(SymphoniaDecoder::<CHANNELS>::new(decoder));
-
-        // Build push pipeline with a Tee fork after the 44.1 kHz resampler:
-        //
-        //   decoder → to_model_rate(→44.1k) → Tee ──┬→ to_output_rate → interleaver → output_buffer_raw
-        //                                            │
-        //                                            └→ vocal_remover → to_output_rate → interleaver → output_buffer_removed
-        //
-        // Both output buffers are filled in parallel so toggling the vocal
-        // removal checkbox takes effect immediately — pull_and_mix simply
-        // selects the appropriate buffer at read time.
-        //
-        // The vocal-removal model expects 44.1 kHz stereo, while the app's
-        // output mixer can remain at SAMPLE_RATE.
-        let to_model_rate_node = Arc::new(
-            FftResampler::<CHANNELS, VOCAL_REMOVER_SAMPLE_RATE>::new(meta.codec_params.sample_rate)
-                .with_context(|| format!("create 44.1 kHz resampler for stream {stream_id}"))?,
-        );
-        let vocal_remover_node = Arc::new(
-            DecodedVocalRemover::<CHANNELS, VOCAL_REMOVER_SAMPLE_RATE>::new(Arc::new(
-                AtomicBool::new(true),
-            )),
-        );
         let to_output_rate_node_for_raw = Arc::new(
-            FftResampler::<CHANNELS, SAMPLE_RATE>::new(VOCAL_REMOVER_SAMPLE_RATE).with_context(
-                || format!("create output-rate resampler (raw) for stream {stream_id}"),
-            )?,
-        );
-        let to_output_rate_node_for_removed = Arc::new(
-            FftResampler::<CHANNELS, SAMPLE_RATE>::new(VOCAL_REMOVER_SAMPLE_RATE).with_context(
-                || format!("create output-rate resampler (removed) for stream {stream_id}"),
-            )?,
+            FftResampler::<CHANNELS, SAMPLE_RATE>::new(meta.codec_params.sample_rate)
+                .with_context(|| {
+                    format!("create output-rate resampler (raw) for stream {stream_id}")
+                })?,
         );
 
         let interleaver_node_for_raw =
             Arc::new(Interleaver::<Sample, CHANNELS, SAMPLE_RATE>::new());
-        let interleaver_node_for_removed =
-            Arc::new(Interleaver::<Sample, CHANNELS, SAMPLE_RATE>::new());
+        let no_vocal_decoder = Arc::new(
+            OpusDecoder::<Sample, CHANNELS, SAMPLE_RATE>::new()
+                .with_context(|| format!("create no-vocal Opus decoder for stream {stream_id}"))?,
+        );
 
-        // Wire: decoder → to_model_rate → Tee
-        let pipeline_head: Arc<dyn Pushable<CompressedPacket>> = push_chain![
+        // Wire: decoder → to_output_rate → interleaver → output_buffer_raw.
+        // The no-vocal track arrives as Opus and is decoded directly into
+        // output_buffer_removed in `receive()`.
+        let original_pipeline_head: Arc<dyn Pushable<CompressedPacket>> = push_chain![
             decoder_node.clone(),
-            => Arc::new(Tee::new(
-                push_chain![
-                    to_output_rate_node_for_raw.clone(),
-                    interleaver_node_for_raw.clone(),
-                    => output_buffer_raw_sink.clone()
-                ],
-                push_chain![
-                    to_model_rate_node.clone(),
-                    vocal_remover_node.clone(),
-                    to_output_rate_node_for_removed.clone(),
-                    interleaver_node_for_removed.clone(),
-                    => output_buffer_removed_sink.clone()
-                ]
-            ))
+            to_output_rate_node_for_raw.clone(),
+            interleaver_node_for_raw.clone(),
+            => output_buffer_raw_sink.clone()
         ];
 
         let reset_dec = decoder_node.clone();
-        let reset_to_model_rate = to_model_rate_node.clone();
-        let reset_vocal_remover = vocal_remover_node.clone();
         let reset_to_output_rate_raw = to_output_rate_node_for_raw.clone();
-        let reset_to_output_rate_removed = to_output_rate_node_for_removed.clone();
+        let reset_no_vocal_decoder = no_vocal_decoder.clone();
         let reset_buf_raw = output_buffer_raw_sink.clone();
         let reset_buf_removed = output_buffer_removed_sink.clone();
-        let pipeline_reset: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+        let original_pipeline_reset: Box<dyn Fn() + Send + Sync> = Box::new(move || {
             reset_dec.reset();
-            reset_to_model_rate.reset();
-            reset_vocal_remover.reset();
             reset_to_output_rate_raw.reset();
-            reset_to_output_rate_removed.reset();
+            reset_no_vocal_decoder.reset();
             reset_buf_raw.reset();
             reset_buf_removed.reset();
         });
@@ -279,19 +259,20 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         self.buffers.insert(
             key,
             BufferEntry {
-                pipeline_head,
+                original_pipeline_head,
+                no_vocal_decoder,
                 output_buffer_raw: output_raw_for_pull,
                 output_buffer_no_vocal: output_removed_for_pull,
-                pipeline_reset,
-                packet_counter: PacketCounter::new(),
+                reset_decoder_states: original_pipeline_reset,
                 meta,
-                pending_raw: HashMap::new(),
-                pending_fragments: HashMap::new(),
-                next_feed_seq: 1,
+                original_track: TrackReceiveState::new(),
+                no_vocal_track: TrackReceiveState::new(),
                 last_seen: Instant::now(),
                 playing: false,
                 start_party_time: 0,
                 samples_played: 0,
+                vocal_removal_active: false,
+                pending_vocal_removal: None,
             },
         );
 
@@ -303,6 +284,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         let stream_id = match &control {
             SyncedControl::Start { stream_id, .. } => *stream_id,
             SyncedControl::Pause { stream_id } => *stream_id,
+            SyncedControl::SetVocalRemoval { stream_id, .. } => *stream_id,
         };
 
         let key = BufferKey {
@@ -319,6 +301,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             SyncedControl::Start {
                 party_clock_time,
                 seq,
+                no_vocal_seq,
                 ..
             } => {
                 entry.playing = true;
@@ -332,22 +315,36 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 // Sender handles seeking in the source file — receiver just
                 // starts fresh from the new seq. For resume (seq == next_feed_seq),
                 // reset is harmless since no packets are queued ahead.
-                if seq != entry.next_feed_seq {
-                    (entry.pipeline_reset)();
-                    entry.next_feed_seq = seq;
-                    entry.pending_raw.clear();
-                    entry.pending_fragments.clear();
+                if seq != entry.original_track.next_feed_seq
+                    || no_vocal_seq != entry.no_vocal_track.next_feed_seq
+                {
+                    (entry.reset_decoder_states)();
+                    entry.original_track.reset_to(seq);
+                    entry.no_vocal_track.reset_to(no_vocal_seq);
                 }
 
                 info!(
-                    "Stream {:?} starting at seq {} at party time {}",
-                    key, seq, party_clock_time
+                    "Stream {:?} starting at seq {} / no-vocal seq {} at party time {}",
+                    key, seq, no_vocal_seq, party_clock_time
                 );
             }
             SyncedControl::Pause { .. } => {
                 entry.playing = false;
                 entry.last_seen = Instant::now();
                 info!("Stream {:?} paused", key);
+            }
+            SyncedControl::SetVocalRemoval {
+                enabled,
+                party_clock_time,
+                ..
+            } => {
+                entry.pending_vocal_removal = Some((enabled, party_clock_time));
+                entry.last_seen = Instant::now();
+                self.vocal_removal_enabled.store(enabled, Ordering::Relaxed);
+                info!(
+                    "Stream {:?} scheduled vocal-removal={} at party time {}",
+                    key, enabled, party_clock_time
+                );
             }
         }
     }
@@ -366,7 +363,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         // Collect packets to push, then release the DashMap lock before
         // pushing through the decode pipeline. Decode + resample is expensive
         // and must not block pull_and_mix (which needs iter_mut over the map).
-        let (pipeline_head, packets_to_push) = {
+        let action = {
             let Some(mut entry) = self.buffers.get_mut(&key) else {
                 return;
             };
@@ -374,72 +371,107 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
             entry.last_seen = Instant::now();
 
-            let seq = frame.sequence_number;
-
-            // Duplicate or old frame.
-            if seq < entry.next_feed_seq || entry.pending_raw.contains_key(&seq) {
-                return;
-            }
-
-            // Reassemble fragments if needed.
-            let frame = if frame.fragment_total <= 1 {
-                frame
-            } else {
-                match Self::insert_fragment(entry, frame) {
-                    Some(assembled) => assembled,
-                    None => return,
+            match frame.track {
+                SyncedTrack::Original => {
+                    let ready = Self::collect_ready_frames(&mut entry.original_track, frame);
+                    if ready.is_empty() {
+                        return;
+                    }
+                    ReadyPackets::Original(entry.original_pipeline_head.clone(), ready)
                 }
-            };
-
-            let mut packets = Vec::new();
-
-            // Collect ready packets in sequence order.
-            if seq == entry.next_feed_seq {
-                entry.packet_counter.record_packet(seq);
-                packets.push(CompressedPacket {
-                    dur: frame.dur,
-                    data: frame.data,
-                });
-                entry.next_feed_seq += 1;
-
-                // Drain any consecutive pending packets.
-                while let Some(pending) = entry.pending_raw.remove(&entry.next_feed_seq) {
-                    entry.packet_counter.record_packet(entry.next_feed_seq);
-                    packets.push(CompressedPacket {
-                        dur: pending.dur,
-                        data: pending.data,
-                    });
-                    entry.next_feed_seq += 1;
+                SyncedTrack::NoVocal => {
+                    let ready = Self::collect_ready_frames(&mut entry.no_vocal_track, frame);
+                    if ready.is_empty() {
+                        return;
+                    }
+                    ReadyPackets::NoVocal(
+                        entry.no_vocal_decoder.clone(),
+                        entry.output_buffer_no_vocal.clone(),
+                        ready,
+                    )
                 }
-            } else {
-                entry.pending_raw.insert(seq, frame);
-                return;
             }
-
-            (entry.pipeline_head.clone(), packets)
         };
 
-        // DashMap lock released — push packets through decode pipeline without contention.
-        for packet in packets_to_push {
-            pipeline_head.push(packet);
+        match action {
+            ReadyPackets::Original(pipeline_head, frames) => {
+                for frame in frames {
+                    pipeline_head.push(CompressedPacket {
+                        dur: frame.dur,
+                        data: frame.data,
+                    });
+                }
+            }
+            ReadyPackets::NoVocal(decoder, output, frames) => {
+                for frame in frames {
+                    let packet = OpusPacket {
+                        data: frame.data,
+                        frame_size: frame.dur as usize * CHANNELS,
+                    };
+                    if let Some(decoded) = decoder.decode_packet(&packet) {
+                        output.push(decoded);
+                    }
+                }
+            }
         }
+    }
+
+    fn collect_ready_frames(track: &mut TrackReceiveState, frame: SyncedFrame) -> Vec<SyncedFrame> {
+        let seq = frame.sequence_number;
+
+        // Duplicate or old frame.
+        if seq < track.next_feed_seq || track.pending_raw.contains_key(&seq) {
+            return Vec::new();
+        }
+
+        // Reassemble fragments if needed.
+        let frame = if frame.fragment_total <= 1 {
+            frame
+        } else {
+            match Self::insert_fragment(track, frame) {
+                Some(assembled) => assembled,
+                None => return Vec::new(),
+            }
+        };
+
+        let mut frames = Vec::new();
+
+        // Collect ready packets in sequence order.
+        if seq == track.next_feed_seq {
+            track.packet_counter.record_packet(seq);
+            frames.push(frame);
+            track.next_feed_seq += 1;
+
+            // Drain any consecutive pending packets.
+            while let Some(pending) = track.pending_raw.remove(&track.next_feed_seq) {
+                track.packet_counter.record_packet(track.next_feed_seq);
+                frames.push(pending);
+                track.next_feed_seq += 1;
+            }
+        } else {
+            track.pending_raw.insert(seq, frame);
+        }
+
+        frames
     }
 
     /// Insert a fragment; return the assembled whole frame once complete.
     fn insert_fragment(
-        entry: &mut BufferEntry<Sample, CHANNELS, SAMPLE_RATE>,
+        track_state: &mut TrackReceiveState,
         frame: SyncedFrame,
     ) -> Option<SyncedFrame> {
         let seq = frame.sequence_number;
         let total = frame.fragment_total;
         let idx = frame.fragment_idx;
+        let stream_id = frame.stream_id;
+        let track = frame.track;
 
         if total == 0 || idx >= total {
             warn!("Bad fragment for seq={}: idx={}, total={}", seq, idx, total);
             return None;
         }
 
-        let set = entry
+        let set = track_state
             .pending_fragments
             .entry(seq)
             .or_insert_with(|| FragmentSet {
@@ -467,14 +499,14 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             return None;
         }
 
-        let set = entry.pending_fragments.remove(&seq)?;
+        let set = track_state.pending_fragments.remove(&seq)?;
         let total_len: usize = set.parts.iter().flatten().map(|v| v.len()).sum();
         let mut data = Vec::with_capacity(total_len);
         for part in set.parts.into_iter().flatten() {
             data.extend_from_slice(&part);
         }
 
-        Some(SyncedFrame::whole(entry.meta.stream_id, seq, set.dur, data))
+        Some(SyncedFrame::for_track(track, stream_id, seq, set.dur, data))
     }
 
     /// Pulls samples from all streams and mixes them together.
@@ -494,9 +526,15 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         // 10ms lag threshold before we attempt drift correction.
         let drift_threshold = SAMPLE_RATE as u64 * 10 / 1000;
 
-        let vocal_removal_on = self.vocal_removal_enabled.load(Ordering::Relaxed);
-
         for mut entry in self.buffers.iter_mut() {
+            if let Some((enabled, switch_at)) = entry.pending_vocal_removal {
+                if party_now >= switch_at {
+                    entry.vocal_removal_active = enabled;
+                    entry.pending_vocal_removal = None;
+                    self.vocal_removal_enabled.store(enabled, Ordering::Relaxed);
+                }
+            }
+
             if !entry.playing || entry.start_party_time > party_now {
                 continue;
             }
@@ -531,7 +569,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             // Pull from the active buffer and discard the same amount from
             // the inactive one so both stay time-aligned — toggling switches
             // to the correct point in the stream without hearing stale audio.
-            let (active, inactive) = if vocal_removal_on {
+            let (active, inactive) = if entry.vocal_removal_active {
                 (&entry.output_buffer_no_vocal, &entry.output_buffer_raw)
             } else {
                 (&entry.output_buffer_raw, &entry.output_buffer_no_vocal)
@@ -590,9 +628,9 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 progress: SyncedStreamProgress {
                     samples_played: entry.samples_played,
                     total_samples: entry.meta.total_samples,
-                    buffered_frames: entry.packet_counter.packets_pushed(),
+                    buffered_frames: entry.original_track.packet_counter.packets_pushed(),
                     is_playing: entry.playing,
-                    highest_seq_received: entry.packet_counter.highest_seq(),
+                    highest_seq_received: entry.original_track.packet_counter.highest_seq(),
                 },
                 is_local_sender,
             });
@@ -602,35 +640,50 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     }
 
     /// Identifies gaps in the received packets and returns them for retransmission.
-    pub fn get_missing_frames(&self) -> Vec<(SocketAddr, SyncedStreamId, Vec<u64>)> {
+    pub fn get_missing_frames(&self) -> Vec<(SocketAddr, SyncedStreamId, SyncedTrack, Vec<u64>)> {
         let mut result = Vec::new();
 
         for entry in self.buffers.iter() {
-            let next_feed = entry.next_feed_seq;
-
-            // The highest seq we've actually received is the max of
-            // (next_feed_seq - 1) and pending_raw keys. If pending_raw is
-            // empty, everything up to next_feed_seq has been fed — no gaps.
-            let Some(&highest) = entry.pending_raw.keys().max() else {
-                continue;
-            };
-
-            // Scan gaps between next_feed_seq and the highest pending packet.
-            let mut missing = Vec::new();
-            for seq in next_feed..highest {
-                if !entry.pending_raw.contains_key(&seq) {
-                    missing.push(seq);
-                    if missing.len() >= 100 {
-                        break;
-                    }
-                }
-            }
-
-            if !missing.is_empty() {
-                result.push((entry.key().source_addr, entry.key().stream_id, missing));
+            for (track, state) in [
+                (SyncedTrack::Original, &entry.original_track),
+                (SyncedTrack::NoVocal, &entry.no_vocal_track),
+            ] {
+                let Some(missing) = Self::missing_for_track(state) else {
+                    continue;
+                };
+                result.push((
+                    entry.key().source_addr,
+                    entry.key().stream_id,
+                    track,
+                    missing,
+                ));
             }
         }
         result
+    }
+
+    fn missing_for_track(state: &TrackReceiveState) -> Option<Vec<u64>> {
+        let next_feed = state.next_feed_seq;
+
+        // The highest seq we've actually received is the max of
+        // (next_feed_seq - 1) and pending_raw keys. If pending_raw is
+        // empty, everything up to next_feed_seq has been fed — no gaps.
+        let Some(&highest) = state.pending_raw.keys().max() else {
+            return None;
+        };
+
+        // Scan gaps between next_feed_seq and the highest pending packet.
+        let mut missing = Vec::new();
+        for seq in next_feed..highest {
+            if !state.pending_raw.contains_key(&seq) {
+                missing.push(seq);
+                if missing.len() >= 100 {
+                    break;
+                }
+            }
+        }
+
+        (!missing.is_empty()).then_some(missing)
     }
 
     /// Starts the background cleanup task.
@@ -659,9 +712,10 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             let mut interval = tokio::time::interval(Duration::from_millis(200));
             loop {
                 interval.tick().await;
-                for (_addr, stream_id, seqs) in stream.get_missing_frames() {
+                for (_addr, stream_id, track, seqs) in stream.get_missing_frames() {
                     let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&RequestFramesPayload {
                         stream_id,
+                        track,
                         seqs,
                     })
                     .expect("RequestFramesPayload serialization")

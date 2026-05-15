@@ -104,6 +104,7 @@ fn feed_and_start(
             stream_id,
             party_clock_time: 0,
             seq: 1,
+            no_vocal_seq: 1,
         },
     );
     for (seq, (dur, data)) in packets.iter().enumerate() {
@@ -118,11 +119,14 @@ fn feed_and_start(
 fn pull_all(mgr: &SyncedAudioStreamManager<f32, CH, SR>, clock: &Arc<AtomicU64>) -> Vec<f32> {
     const CHUNK: usize = 480;
     let mut samples = Vec::new();
-    clock.store(0, Ordering::Relaxed);
+    let mut party_time_us = 0u64;
+    clock.store(party_time_us, Ordering::Relaxed);
     for _ in 0..1_000_000 {
         match mgr.pull_and_mix(CHUNK) {
             Some(buf) => {
+                party_time_us += (buf.data().len() as u64 / CH as u64) * 1_000_000 / SR as u64;
                 samples.extend_from_slice(buf.data());
+                clock.store(party_time_us, Ordering::Relaxed);
             }
             None => break,
         }
@@ -575,6 +579,7 @@ fn test_out_of_order_frames_all_decoded() {
             stream_id: sid,
             party_clock_time: 0,
             seq: 1,
+            no_vocal_seq: 1,
         },
     );
 
@@ -626,6 +631,7 @@ fn test_fragment_reassembly() {
         test_addr(),
         SyncedFrame {
             stream_id: sid,
+            track: crate::party::share_music::SyncedTrack::Original,
             sequence_number: 1,
             dur: *dur1,
             fragment_idx: 0,
@@ -645,6 +651,7 @@ fn test_fragment_reassembly() {
         test_addr(),
         SyncedFrame {
             stream_id: sid,
+            track: crate::party::share_music::SyncedTrack::Original,
             sequence_number: 1,
             dur: *dur1,
             fragment_idx: 1,
@@ -667,6 +674,7 @@ fn test_fragment_reassembly() {
             stream_id: sid,
             party_clock_time: 0,
             seq: 1,
+            no_vocal_seq: 1,
         },
     );
 
@@ -986,6 +994,7 @@ fn test_incremental_feeding_matches_bulk() {
             stream_id: sid2,
             party_clock_time: 0,
             seq: 1,
+            no_vocal_seq: 1,
         },
     );
 

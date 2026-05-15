@@ -15,37 +15,42 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use dashmap::DashMap;
-use symphonia::core::codecs::CODEC_TYPE_NULL;
+use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use tracing::{info, warn};
 
-use crate::audio::AudioSample;
+use crate::audio::decoders::{CompressedPacket, FftResampler, Interleaver, SymphoniaDecoder};
+use crate::audio::effects::DecodedVocalRemover;
+use crate::audio::frame::AudioBuffer;
 use crate::audio::symphonia_compat::WireCodecParams;
+use crate::audio::{AudioSample, OpusEncoder};
 use crate::io::NetworkSender;
 use crate::party::network_stream::NetworkStream;
 use crate::party::ntp::NtpService;
 use crate::party::share_music::receiver::SyncedAudioStreamManager;
 use crate::party::share_music::{
-    MAX_FRAGMENT_DATA, RawPacket, RequestFramesPayload, SyncedControl, SyncedFrame, SyncedStreamId,
-    SyncedStreamMeta, new_stream_id,
+    new_stream_id, RawPacket, RequestFramesPayload, SyncedControl, SyncedFrame, SyncedStreamId,
+    SyncedStreamMeta, SyncedTrack, MAX_FRAGMENT_DATA,
 };
 use crate::party::tagged_packet::{
-    PacketTag, REQUEST_FRAMES_TAG, SYNCED_CONTROL_TAG, SYNCED_META_TAG, SYNCED_TAG, TaggedPacket,
+    PacketTag, TaggedPacket, REQUEST_FRAMES_TAG, SYNCED_CONTROL_TAG, SYNCED_META_TAG, SYNCED_TAG,
 };
-use crate::pipeline::Pushable;
+use crate::pipeline::{Node, Pushable};
 use crate::state::MusicStreamProgress;
 
 const LOCAL_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
 const SEND_RATE_MULTIPLIER: u32 = 2;
 const REDUNDANCY_COUNT: usize = 2;
+const NO_VOCAL_OPUS_FRAME_MS: u32 = 20;
+const VOCAL_REMOVER_SAMPLE_RATE: u32 = 44_100;
 
 enum MusicCommand {
-    Retransmit(Vec<u64>),
+    Retransmit(SyncedTrack, Vec<u64>),
     Pause,
     Resume,
     Seek(u64),
@@ -68,6 +73,7 @@ impl MusicStream {
         network_sender: NetworkSender,
         synced_stream: Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>,
         progress: Arc<MusicStreamProgress>,
+        initial_vocal_removal_enabled: bool,
     ) -> Result<Self> {
         info!("Starting music stream for: {}", file_name);
 
@@ -78,7 +84,8 @@ impl MusicStream {
 
         let stream_id = new_stream_id();
         let is_running = Arc::new(AtomicBool::new(true));
-        let vault: Arc<DashMap<u64, RawPacket>> = Arc::new(DashMap::new());
+        let original_vault: Arc<DashMap<u64, RawPacket>> = Arc::new(DashMap::new());
+        let no_vocal_vault: Arc<DashMap<u64, RawPacket>> = Arc::new(DashMap::new());
         let (command_tx, command_rx) = std::sync::mpsc::channel();
 
         progress.is_streaming.store(true, Ordering::Relaxed);
@@ -107,6 +114,7 @@ impl MusicStream {
             stream_id,
             party_clock_time: start_at,
             seq: 1,
+            no_vocal_seq: 1,
         };
         {
             let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&control)
@@ -119,24 +127,49 @@ impl MusicStream {
         }
         synced_stream.receive_control(LOCAL_ADDR, control);
 
+        let control = SyncedControl::SetVocalRemoval {
+            stream_id,
+            enabled: initial_vocal_removal_enabled,
+            party_clock_time: start_at,
+        };
+        {
+            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&control)
+                .expect("SyncedControl ser")
+                .into_vec();
+            network_sender.push(TaggedPacket {
+                tag: SYNCED_CONTROL_TAG,
+                payload,
+            });
+        }
+        synced_stream.receive_control(LOCAL_ADDR, control);
+
+        let no_vocal_encoder =
+            NoVocalOpusTrack::<Sample, CHANNELS, SAMPLE_RATE>::new(meta.codec_params.clone())?;
+
         let ctx = StreamContext {
             source,
             meta,
+            no_vocal_encoder,
             ntp_service,
             network_sender,
             synced_stream,
             progress,
             is_running: is_running.clone(),
-            vault,
+            original_vault,
+            no_vocal_vault,
             command_rx,
             frames_read: 0,
             is_complete: false,
-            next_seq_to_send: 1,
-            last_send_time: Instant::now(),
+            next_original_seq_to_send: 1,
+            next_no_vocal_seq_to_send: 1,
+            last_original_send_time: Instant::now(),
+            last_no_vocal_send_time: Instant::now(),
             retransmit_queue: VecDeque::new(),
             last_pause_seq: 1,
+            last_pause_no_vocal_seq: 1,
             last_start_party_time: start_at,
             last_start_seq: 1,
+            last_start_no_vocal_seq: 1,
             frame_dur_us: None,
         };
 
@@ -154,8 +187,8 @@ impl MusicStream {
         })
     }
 
-    pub fn handle_retransmission_request(&self, seqs: Vec<u64>) {
-        let _ = self.command_tx.send(MusicCommand::Retransmit(seqs));
+    pub fn handle_retransmission_request(&self, track: SyncedTrack, seqs: Vec<u64>) {
+        let _ = self.command_tx.send(MusicCommand::Retransmit(track, seqs));
     }
 
     pub fn pause(&self) -> Result<()> {
@@ -196,6 +229,7 @@ struct MusicStreamDeps<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     ntp_service: Arc<NtpService>,
     network_sender: NetworkSender,
     synced_stream: Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>,
+    vocal_removal_enabled: Arc<AtomicBool>,
 }
 
 /// Owns outgoing music streams and routes retransmit/control operations by stream id.
@@ -214,6 +248,7 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
         ntp_service: Arc<NtpService>,
         network_sender: NetworkSender,
         synced_stream: Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>,
+        vocal_removal_enabled: Arc<AtomicBool>,
     ) -> Self {
         Self {
             streams: Mutex::new(Vec::new()),
@@ -221,6 +256,7 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
                 ntp_service,
                 network_sender,
                 synced_stream,
+                vocal_removal_enabled,
             },
         }
     }
@@ -240,6 +276,7 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
             deps.network_sender,
             deps.synced_stream,
             progress,
+            deps.vocal_removal_enabled.load(Ordering::Relaxed),
         )?;
 
         self.push(music_stream);
@@ -255,11 +292,16 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
         self.streams.lock().unwrap().clear();
     }
 
-    pub fn handle_retransmission(&self, stream_id: SyncedStreamId, seqs: Vec<u64>) {
+    pub fn handle_retransmission(
+        &self,
+        stream_id: SyncedStreamId,
+        track: SyncedTrack,
+        seqs: Vec<u64>,
+    ) {
         let streams = self.streams.lock().unwrap();
         for stream in streams.iter() {
             if stream.stream_id() == stream_id {
-                stream.handle_retransmission_request(seqs);
+                stream.handle_retransmission_request(track, seqs);
                 break;
             }
         }
@@ -294,6 +336,38 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
         }
         Err(anyhow!("Stream not found"))
     }
+
+    pub fn set_vocal_removal(&self, stream_id: SyncedStreamId, enabled: bool) -> Result<()> {
+        let has_local_stream = self
+            .streams
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|stream| stream.stream_id() == stream_id);
+        if !has_local_stream {
+            return Err(anyhow!("Stream not found"));
+        }
+
+        self.deps
+            .vocal_removal_enabled
+            .store(enabled, Ordering::Relaxed);
+
+        let switch_at = self.deps.ntp_service.party_now() + 200_000;
+        let control = SyncedControl::SetVocalRemoval {
+            stream_id,
+            enabled,
+            party_clock_time: switch_at,
+        };
+        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&control)
+            .expect("SyncedControl ser")
+            .into_vec();
+        self.deps.network_sender.push(TaggedPacket {
+            tag: SYNCED_CONTROL_TAG,
+            payload,
+        });
+        self.deps.synced_stream.receive_control(LOCAL_ADDR, control);
+        Ok(())
+    }
 }
 
 impl<S: AudioSample + 'static, const C: usize, const SR: u32> NetworkStream<S, C, SR>
@@ -306,7 +380,7 @@ impl<S: AudioSample + 'static, const C: usize, const SR: u32> NetworkStream<S, C
     fn handle(&self, _source: SocketAddr, _tag: PacketTag, bytes: &[u8]) -> anyhow::Result<()> {
         let req = rkyv::from_bytes::<RequestFramesPayload, rkyv::rancor::Error>(bytes)
             .map_err(|e| anyhow::anyhow!("RequestFramesPayload deserialize: {:?}", e))?;
-        self.handle_retransmission(req.stream_id, req.seqs);
+        self.handle_retransmission(req.stream_id, req.track, req.seqs);
         Ok(())
     }
 }
@@ -401,11 +475,128 @@ impl AudioSource {
     }
 }
 
+/// Sender-side pipeline for the derived no-vocal track.
+///
+/// The original file packets remain the canonical synced stream. This helper
+/// decodes those same packets locally, runs vocal removal at the model rate,
+/// resamples back to the app output rate, batches to Opus-valid 20 ms frames,
+/// and emits packets with an independent no-vocal sequence.
+struct NoVocalOpusTrack<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    decoder: SymphoniaDecoder<CHANNELS>,
+    to_model_rate: FftResampler<CHANNELS, VOCAL_REMOVER_SAMPLE_RATE>,
+    vocal_remover: DecodedVocalRemover<CHANNELS, VOCAL_REMOVER_SAMPLE_RATE>,
+    to_output_rate: FftResampler<CHANNELS, SAMPLE_RATE>,
+    interleaver: Interleaver<Sample, CHANNELS, SAMPLE_RATE>,
+    encoder: OpusEncoder<Sample, CHANNELS, SAMPLE_RATE>,
+    pending_pcm: Vec<Sample>,
+    next_seq: u64,
+}
+
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    NoVocalOpusTrack<Sample, CHANNELS, SAMPLE_RATE>
+{
+    fn new(codec_params: WireCodecParams) -> Result<Self> {
+        let decoder = symphonia::default::get_codecs()
+            .make(&codec_params.to_symphonia(), &DecoderOptions::default())
+            .context("create no-vocal source decoder")?;
+
+        Ok(Self {
+            decoder: SymphoniaDecoder::<CHANNELS>::new(decoder),
+            to_model_rate: FftResampler::<CHANNELS, VOCAL_REMOVER_SAMPLE_RATE>::new(
+                codec_params.sample_rate,
+            )
+            .context("create no-vocal model-rate resampler")?,
+            vocal_remover: DecodedVocalRemover::<CHANNELS, VOCAL_REMOVER_SAMPLE_RATE>::new(
+                Arc::new(AtomicBool::new(true)),
+            ),
+            to_output_rate: FftResampler::<CHANNELS, SAMPLE_RATE>::new(VOCAL_REMOVER_SAMPLE_RATE)
+                .context("create no-vocal output-rate resampler")?,
+            interleaver: Interleaver::<Sample, CHANNELS, SAMPLE_RATE>::new(),
+            encoder: OpusEncoder::<Sample, CHANNELS, SAMPLE_RATE>::new()
+                .context("create no-vocal Opus encoder")?,
+            pending_pcm: Vec::new(),
+            next_seq: 1,
+        })
+    }
+
+    fn reset(&mut self, next_seq: u64) {
+        self.decoder.reset();
+        self.to_model_rate.reset();
+        self.vocal_remover.reset();
+        self.to_output_rate.reset();
+        self.encoder.reset();
+        self.pending_pcm.clear();
+        self.next_seq = next_seq;
+    }
+
+    fn process_raw(&mut self, raw: &RawPacket) -> Vec<(u64, RawPacket)> {
+        let Some(decoded) = self.decoder.process(CompressedPacket {
+            dur: raw.dur,
+            data: raw.data.clone(),
+        }) else {
+            return Vec::new();
+        };
+
+        let Some(model_rate) = self.to_model_rate.process(decoded) else {
+            return Vec::new();
+        };
+        let Some(no_vocal) = self.vocal_remover.process(model_rate) else {
+            return Vec::new();
+        };
+        let Some(output_rate) = self.to_output_rate.process(no_vocal) else {
+            return Vec::new();
+        };
+        let Some(interleaved) = self.interleaver.process(output_rate) else {
+            return Vec::new();
+        };
+
+        self.encode_available(interleaved)
+    }
+
+    fn encode_available(
+        &mut self,
+        audio: AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>,
+    ) -> Vec<(u64, RawPacket)> {
+        self.pending_pcm.extend(audio.into_inner());
+
+        let frame_samples = Self::opus_frame_samples_total();
+        let frame_samples_per_channel = frame_samples / CHANNELS;
+        let mut packets = Vec::new();
+
+        while self.pending_pcm.len() >= frame_samples {
+            let samples: Vec<Sample> = self.pending_pcm.drain(..frame_samples).collect();
+            let Ok(buffer) = AudioBuffer::<Sample, CHANNELS, SAMPLE_RATE>::new(samples) else {
+                break;
+            };
+            let Some(opus) = self.encoder.process(buffer) else {
+                continue;
+            };
+
+            let seq = self.next_seq;
+            self.next_seq += 1;
+            packets.push((
+                seq,
+                RawPacket {
+                    dur: frame_samples_per_channel as u32,
+                    data: opus.data,
+                },
+            ));
+        }
+
+        packets
+    }
+
+    fn opus_frame_samples_total() -> usize {
+        (SAMPLE_RATE as usize * CHANNELS * NO_VOCAL_OPUS_FRAME_MS as usize) / 1000
+    }
+}
+
 /// Worker context for the streaming thread.
 /// Moved into the thread and consumed by `run()`.
-struct StreamContext<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+struct StreamContext<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     source: AudioSource,
     meta: SyncedStreamMeta,
+    no_vocal_encoder: NoVocalOpusTrack<Sample, CHANNELS, SAMPLE_RATE>,
 
     ntp_service: Arc<NtpService>,
     network_sender: NetworkSender,
@@ -413,17 +604,22 @@ struct StreamContext<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     progress: Arc<MusicStreamProgress>,
 
     is_running: Arc<AtomicBool>,
-    vault: Arc<DashMap<u64, RawPacket>>,
+    original_vault: Arc<DashMap<u64, RawPacket>>,
+    no_vocal_vault: Arc<DashMap<u64, RawPacket>>,
     command_rx: std::sync::mpsc::Receiver<MusicCommand>,
 
     frames_read: u64,
     is_complete: bool,
-    next_seq_to_send: u64,
-    last_send_time: Instant,
-    retransmit_queue: VecDeque<u64>,
+    next_original_seq_to_send: u64,
+    next_no_vocal_seq_to_send: u64,
+    last_original_send_time: Instant,
+    last_no_vocal_send_time: Instant,
+    retransmit_queue: VecDeque<(SyncedTrack, u64)>,
     last_pause_seq: u64,
+    last_pause_no_vocal_seq: u64,
     last_start_party_time: u64,
     last_start_seq: u64,
+    last_start_no_vocal_seq: u64,
     /// Microseconds per compressed frame, computed from the first packet's dur.
     /// `None` until the first packet is read.
     frame_dur_us: Option<u64>,
@@ -466,7 +662,11 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
 
         let total_samples = (duration * self.sample_rate() as f64) as u64;
         // Estimate total packets from first packet's dur, or fall back to 1024
-        let samples_per_frame = self.vault.get(&1).map(|p| p.dur as u64).unwrap_or(1024);
+        let samples_per_frame = self
+            .original_vault
+            .get(&1)
+            .map(|p| p.dur as u64)
+            .unwrap_or(1024);
         let est_packets = total_samples / samples_per_frame;
         self.meta.total_frames = est_packets;
         self.meta.total_samples = total_samples;
@@ -505,8 +705,9 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
     fn handle_commands(&mut self) {
         while let Ok(cmd) = self.command_rx.try_recv() {
             match cmd {
-                MusicCommand::Retransmit(seqs) => {
-                    self.retransmit_queue.extend(seqs);
+                MusicCommand::Retransmit(track, seqs) => {
+                    self.retransmit_queue
+                        .extend(seqs.into_iter().map(|seq| (track, seq)));
                 }
                 MusicCommand::Pause => self.handle_pause(),
                 MusicCommand::Resume => self.handle_resume(),
@@ -535,8 +736,12 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
             let elapsed_us = party_now - self.last_start_party_time;
             let elapsed_samples = elapsed_us * self.sample_rate() as u64 / 1_000_000;
             self.last_pause_seq = self.find_seq_at_samples(self.last_start_seq, elapsed_samples);
+            let elapsed_output_samples = elapsed_us * SAMPLE_RATE as u64 / 1_000_000;
+            self.last_pause_no_vocal_seq = self
+                .find_no_vocal_seq_at_samples(self.last_start_no_vocal_seq, elapsed_output_samples);
         } else {
             self.last_pause_seq = self.last_start_seq;
+            self.last_pause_no_vocal_seq = self.last_start_no_vocal_seq;
         }
     }
 
@@ -546,6 +751,7 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
             stream_id: self.meta.stream_id,
             party_clock_time: resume_at,
             seq: self.last_pause_seq,
+            no_vocal_seq: self.last_pause_no_vocal_seq,
         };
         {
             let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&control)
@@ -560,12 +766,15 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
 
         self.last_start_party_time = resume_at;
         self.last_start_seq = self.last_pause_seq;
+        self.last_start_no_vocal_seq = self.last_pause_no_vocal_seq;
     }
 
     fn handle_seek(&mut self, pos_ms: u64) {
         let seek_at = self.ntp_service.party_now() + 300_000;
         let target_samples = pos_ms * self.sample_rate() as u64 / 1000;
         let seq = self.find_seq_at_samples(1, target_samples);
+        let target_output_samples = pos_ms * SAMPLE_RATE as u64 / 1000;
+        let no_vocal_seq = self.find_no_vocal_seq_at_samples(1, target_output_samples);
 
         // If seeking beyond what we've read, seek the format reader
         if seq > self.frames_read {
@@ -575,6 +784,7 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
                 info!("Seeked to {} samples (seq {})", target_samples, seq);
                 self.frames_read = seq - 1;
                 self.is_complete = false;
+                self.no_vocal_encoder.reset(no_vocal_seq);
             }
         }
 
@@ -582,6 +792,7 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
             stream_id: self.meta.stream_id,
             party_clock_time: seek_at,
             seq,
+            no_vocal_seq,
         };
         {
             let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&control)
@@ -596,14 +807,17 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
 
         self.last_start_party_time = seek_at;
         self.last_start_seq = seq;
+        self.last_start_no_vocal_seq = no_vocal_seq;
         self.last_pause_seq = seq;
-        self.next_seq_to_send = seq;
+        self.last_pause_no_vocal_seq = no_vocal_seq;
+        self.next_original_seq_to_send = seq;
+        self.next_no_vocal_seq_to_send = no_vocal_seq;
     }
 
     fn find_seq_at_samples(&self, start_seq: u64, target_samples: u64) -> u64 {
         let mut cum = 0u64;
         let mut seq = start_seq;
-        while let Some(pkt) = self.vault.get(&seq) {
+        while let Some(pkt) = self.original_vault.get(&seq) {
             if cum >= target_samples {
                 break;
             }
@@ -611,6 +825,11 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
             seq += 1;
         }
         seq
+    }
+
+    fn find_no_vocal_seq_at_samples(&self, start_seq: u64, target_samples: u64) -> u64 {
+        let frame_samples = (SAMPLE_RATE as u64 * NO_VOCAL_OPUS_FRAME_MS as u64) / 1000;
+        start_seq + target_samples / frame_samples.max(1)
     }
 
     fn read_packets(&mut self) {
@@ -627,13 +846,17 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
                         self.frame_dur_us =
                             Some(raw.dur as u64 * 1_000_000 / self.sample_rate() as u64);
                     }
-                    self.vault.insert(self.frames_read, raw);
+                    for (seq, no_vocal_packet) in self.no_vocal_encoder.process_raw(&raw) {
+                        self.no_vocal_vault.insert(seq, no_vocal_packet);
+                    }
+                    self.original_vault.insert(self.frames_read, raw);
                 }
                 Ok(None) => {
                     // EOF - calculate exact total_samples from all packets
                     self.is_complete = true;
                     self.meta.total_frames = self.frames_read;
-                    self.meta.total_samples = self.vault.iter().map(|r| r.dur as u64).sum();
+                    self.meta.total_samples =
+                        self.original_vault.iter().map(|r| r.dur as u64).sum();
                     let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&self.meta)
                         .expect("SyncedMeta ser")
                         .into_vec();
@@ -650,11 +873,15 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
 
     fn send_retransmissions(&mut self) {
         for _ in 0..10 {
-            let Some(seq) = self.retransmit_queue.pop_front() else {
+            let Some((track, seq)) = self.retransmit_queue.pop_front() else {
                 break;
             };
-            if let Some(packet) = self.vault.get(&seq) {
-                for frame in fragment_raw_packet(self.meta.stream_id, seq, &packet) {
+            let vault = match track {
+                SyncedTrack::Original => &self.original_vault,
+                SyncedTrack::NoVocal => &self.no_vocal_vault,
+            };
+            if let Some(packet) = vault.get(&seq) {
+                for frame in fragment_raw_packet(track, self.meta.stream_id, seq, &packet) {
                     let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&frame)
                         .expect("SyncedFrame ser")
                         .into_vec();
@@ -668,8 +895,13 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
     }
 
     fn send_packets(&mut self) {
+        self.send_original_packets();
+        self.send_no_vocal_packets();
+    }
+
+    fn send_original_packets(&mut self) {
         let now = Instant::now();
-        let elapsed_us = now.duration_since(self.last_send_time).as_micros() as u64;
+        let elapsed_us = now.duration_since(self.last_original_send_time).as_micros() as u64;
         // Use actual frame duration; fall back to 20ms if not yet known.
         let frame_dur_us = self.frame_dur_us.unwrap_or(20_000);
         let frames_to_send = (elapsed_us * SEND_RATE_MULTIPLIER as u64) / frame_dur_us;
@@ -679,9 +911,10 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
         }
 
         for _ in 0..frames_to_send {
-            if let Some(packet) = self.vault.get(&self.next_seq_to_send) {
-                let seq = self.next_seq_to_send;
-                let fragments = fragment_raw_packet(self.meta.stream_id, seq, &packet);
+            if let Some(packet) = self.original_vault.get(&self.next_original_seq_to_send) {
+                let seq = self.next_original_seq_to_send;
+                let fragments =
+                    fragment_raw_packet(SyncedTrack::Original, self.meta.stream_id, seq, &packet);
 
                 for _ in 0..REDUNDANCY_COUNT {
                     for frame in &fragments {
@@ -705,27 +938,81 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
                 self.progress
                     .streaming_current
                     .store(seq, Ordering::Relaxed);
-                self.next_seq_to_send += 1;
-            } else if self.is_complete && self.next_seq_to_send > self.meta.total_frames {
+                self.next_original_seq_to_send += 1;
+            } else if self.is_complete && self.next_original_seq_to_send > self.meta.total_frames {
                 break;
             } else {
                 break;
             }
         }
-        self.last_send_time = now;
+        self.last_original_send_time = now;
+    }
+
+    fn send_no_vocal_packets(&mut self) {
+        let now = Instant::now();
+        let elapsed_us = now.duration_since(self.last_no_vocal_send_time).as_micros() as u64;
+        let frame_dur_us = NO_VOCAL_OPUS_FRAME_MS as u64 * 1000;
+        let frames_to_send = (elapsed_us * SEND_RATE_MULTIPLIER as u64) / frame_dur_us;
+
+        if frames_to_send == 0 {
+            return;
+        }
+
+        for _ in 0..frames_to_send {
+            if let Some(packet) = self.no_vocal_vault.get(&self.next_no_vocal_seq_to_send) {
+                let seq = self.next_no_vocal_seq_to_send;
+                let fragments =
+                    fragment_raw_packet(SyncedTrack::NoVocal, self.meta.stream_id, seq, &packet);
+
+                for _ in 0..REDUNDANCY_COUNT {
+                    for frame in &fragments {
+                        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(frame)
+                            .expect("SyncedFrame ser")
+                            .into_vec();
+                        self.network_sender.push(TaggedPacket {
+                            tag: SYNCED_TAG,
+                            payload,
+                        });
+                    }
+                }
+
+                let local = SyncedFrame::for_track(
+                    SyncedTrack::NoVocal,
+                    self.meta.stream_id,
+                    seq,
+                    packet.dur,
+                    packet.data.clone(),
+                );
+                self.synced_stream.receive(LOCAL_ADDR, local);
+
+                self.next_no_vocal_seq_to_send += 1;
+            } else if self.is_complete {
+                break;
+            } else {
+                break;
+            }
+        }
+        self.last_no_vocal_send_time = now;
     }
 }
 
 /// Split a `RawPacket` into one or more `SyncedFrame`s whose `data` fits in
 /// a single UDP datagram. All fragments share the same sequence number.
 fn fragment_raw_packet(
+    track: SyncedTrack,
     stream_id: SyncedStreamId,
     seq: u64,
     packet: &RawPacket,
 ) -> Vec<SyncedFrame> {
     let data = &packet.data;
     if data.len() <= MAX_FRAGMENT_DATA {
-        return vec![SyncedFrame::whole(stream_id, seq, packet.dur, data.clone())];
+        return vec![SyncedFrame::for_track(
+            track,
+            stream_id,
+            seq,
+            packet.dur,
+            data.clone(),
+        )];
     }
 
     let total = data.len().div_ceil(MAX_FRAGMENT_DATA) as u16;
@@ -735,6 +1022,7 @@ fn fragment_raw_packet(
             let end = (start + MAX_FRAGMENT_DATA).min(data.len());
             SyncedFrame {
                 stream_id,
+                track,
                 sequence_number: seq,
                 dur: packet.dur,
                 fragment_idx: idx,

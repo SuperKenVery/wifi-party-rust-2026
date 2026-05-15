@@ -203,4 +203,17 @@ impl AppState {
             .context("Party not initialized")?
             .seek_music(stream_id, position_ms)
     }
+
+    pub fn set_music_vocal_removal(
+        &self,
+        stream_id: crate::party::SyncedStreamId,
+        enabled: bool,
+    ) -> Result<()> {
+        self.party
+            .lock()
+            .expect("Party lock poisoned")
+            .as_ref()
+            .context("Party not initialized")?
+            .set_music_vocal_removal(stream_id, enabled)
+    }
 }

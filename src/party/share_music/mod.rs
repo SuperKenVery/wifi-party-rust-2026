@@ -41,6 +41,18 @@ pub fn new_stream_id() -> SyncedStreamId {
 //  Wire types
 // ---------------------------------------------------------------------------
 
+/// A logical audio track inside one synced music stream.
+///
+/// `Original` carries the source file's original compressed packets. `NoVocal`
+/// carries sender-produced Opus packets after vocal removal. Both tracks share
+/// a `stream_id` but have independent packet sequences and retransmission.
+#[derive(Archive, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[rkyv(compare(PartialEq))]
+pub enum SyncedTrack {
+    Original,
+    NoVocal,
+}
+
 /// Metadata about a synced stream, sent over the network.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone)]
 #[rkyv(compare(PartialEq))]
@@ -57,7 +69,9 @@ pub struct SyncedStreamMeta {
 #[rkyv(compare(PartialEq))]
 pub struct SyncedFrame {
     pub stream_id: SyncedStreamId,
+    pub track: SyncedTrack,
     pub sequence_number: u64,
+    /// Duration in samples per channel for this track's codec timeline.
     pub dur: u32,
     pub fragment_idx: u16,
     pub fragment_total: u16,
@@ -79,8 +93,20 @@ pub struct RawPacket {
 impl SyncedFrame {
     /// Build a non-fragmented frame (`fragment_total = 1`).
     pub fn whole(stream_id: SyncedStreamId, sequence_number: u64, dur: u32, data: Vec<u8>) -> Self {
+        Self::for_track(SyncedTrack::Original, stream_id, sequence_number, dur, data)
+    }
+
+    /// Build a non-fragmented frame (`fragment_total = 1`) for a specific track.
+    pub fn for_track(
+        track: SyncedTrack,
+        stream_id: SyncedStreamId,
+        sequence_number: u64,
+        dur: u32,
+        data: Vec<u8>,
+    ) -> Self {
         Self {
             stream_id,
+            track,
             sequence_number,
             dur,
             fragment_idx: 0,
@@ -124,6 +150,7 @@ impl PartialEq for SyncedStreamState {
 #[derive(Archive, Serialize, Deserialize, Debug, Clone)]
 pub struct RequestFramesPayload {
     pub stream_id: SyncedStreamId,
+    pub track: SyncedTrack,
     pub seqs: Vec<u64>,
 }
 
@@ -135,9 +162,15 @@ pub enum SyncedControl {
         stream_id: SyncedStreamId,
         party_clock_time: u64,
         seq: u64,
+        no_vocal_seq: u64,
     },
     Pause {
         stream_id: SyncedStreamId,
+    },
+    SetVocalRemoval {
+        stream_id: SyncedStreamId,
+        enabled: bool,
+        party_clock_time: u64,
     },
 }
 
@@ -167,10 +200,14 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
     ) -> Self {
         let receiver = Arc::new(receiver::SyncedAudioStreamManager::new(
             party_now_fn,
-            vocal_removal_enabled,
+            vocal_removal_enabled.clone(),
         ));
-        let sender =
-            sender::MusicStreamRegistry::new(ntp_service, network_sender, receiver.clone());
+        let sender = sender::MusicStreamRegistry::new(
+            ntp_service,
+            network_sender,
+            receiver.clone(),
+            vocal_removal_enabled,
+        );
         info!("ShareMusicService created");
         Self { sender, receiver }
     }
@@ -198,6 +235,15 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
     /// Seek to a position (in milliseconds) in a stream by ID.
     pub fn seek(&self, stream_id: SyncedStreamId, position_ms: u64) -> anyhow::Result<()> {
         self.sender.seek(stream_id, position_ms)
+    }
+
+    /// Schedule a shared vocal-removal track switch for a local outgoing stream.
+    pub fn set_vocal_removal(
+        &self,
+        stream_id: SyncedStreamId,
+        enabled: bool,
+    ) -> anyhow::Result<()> {
+        self.sender.set_vocal_removal(stream_id, enabled)
     }
 
     /// Clear all outgoing streams.

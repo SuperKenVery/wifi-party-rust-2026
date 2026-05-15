@@ -81,6 +81,10 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
         self.share_music()?.seek(stream_id, position_ms)
     }
 
+    pub fn set_music_vocal_removal(&self, stream_id: SyncedStreamId, enabled: bool) -> Result<()> {
+        self.share_music()?.set_vocal_removal(stream_id, enabled)
+    }
+
     fn share_music(&self) -> Result<&Arc<ShareMusicService<Sample, CHANNELS, SAMPLE_RATE>>> {
         self.share_music
             .as_ref()
