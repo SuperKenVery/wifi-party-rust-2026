@@ -4,8 +4,8 @@
 //! - [`Tee`] - Splits data to two destinations (implements `Pushable`)
 //! - [`DynamicMixer`] - Runtime-configurable mixer using DashMap (implements `Pullable`)
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use dashmap::DashMap;
 
@@ -45,6 +45,123 @@ impl<T: Clone + Send + Sync, A: Pushable<T>, B: Pushable<T>> Pushable<T> for Tee
     fn push(&self, input: T) {
         self.a.push(input.clone());
         self.b.push(input);
+    }
+}
+
+struct SelectState {
+    logical_frames: u64,
+    consumed_frames: Vec<u64>,
+}
+
+/// Selects one pull input for output while keeping all inputs aligned.
+///
+/// `pull()` returns audio from the selected input only, but it also advances
+/// non-selected inputs by discarding the same number of frames whenever data is
+/// available. If an inactive input temporarily has no data, the selector keeps
+/// its consumed position behind the logical output position and catches it up
+/// before it can be selected later.
+pub struct SynchronizedSelect<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
+    inputs: Vec<Arc<dyn Pullable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>>>,
+    selected: AtomicUsize,
+    state: Mutex<SelectState>,
+}
+
+impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    SynchronizedSelect<Sample, CHANNELS, SAMPLE_RATE>
+{
+    pub fn new(
+        inputs: impl IntoIterator<Item = Arc<dyn Pullable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>>>,
+    ) -> Self {
+        let inputs: Vec<_> = inputs.into_iter().collect();
+        let input_count = inputs.len();
+        Self {
+            inputs,
+            selected: AtomicUsize::new(0),
+            state: Mutex::new(SelectState {
+                logical_frames: 0,
+                consumed_frames: vec![0; input_count],
+            }),
+        }
+    }
+
+    pub fn set_selected(&self, index: usize) {
+        if index < self.inputs.len() {
+            self.selected.store(index, Ordering::Release);
+        }
+    }
+
+    pub fn selected(&self) -> usize {
+        self.selected.load(Ordering::Acquire)
+    }
+
+    pub fn reset_to(&self, frame_pos: u64) {
+        let mut state = self.state.lock().unwrap();
+        state.logical_frames = frame_pos;
+        for consumed in &mut state.consumed_frames {
+            *consumed = frame_pos;
+        }
+    }
+
+    pub fn discard_to(&self, frame_pos: u64) {
+        let mut state = self.state.lock().unwrap();
+        state.logical_frames = state.logical_frames.max(frame_pos);
+        self.catch_up_all(&mut state);
+    }
+
+    fn catch_up_all(&self, state: &mut SelectState) {
+        for index in 0..self.inputs.len() {
+            let _ = self.catch_up_input(index, state.logical_frames, state);
+        }
+    }
+
+    fn catch_up_input(&self, index: usize, target_frames: u64, state: &mut SelectState) -> bool {
+        while state.consumed_frames[index] < target_frames {
+            let frames_to_discard = target_frames - state.consumed_frames[index];
+            let samples_to_discard = frames_to_discard.saturating_mul(CHANNELS as u64);
+            let Ok(samples_to_discard) = usize::try_from(samples_to_discard) else {
+                return false;
+            };
+            let Some(discarded) = self.inputs[index].pull(samples_to_discard) else {
+                return false;
+            };
+            let discarded_frames = discarded.data().len() / CHANNELS;
+            if discarded_frames == 0 {
+                return false;
+            }
+            state.consumed_frames[index] += discarded_frames as u64;
+        }
+
+        true
+    }
+}
+
+impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
+    Pullable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>
+    for SynchronizedSelect<Sample, CHANNELS, SAMPLE_RATE>
+{
+    fn pull(&self, len: usize) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
+        let selected = self.selected();
+        if selected >= self.inputs.len() || len == 0 {
+            return None;
+        }
+
+        let mut state = self.state.lock().unwrap();
+        let logical_frames = state.logical_frames;
+        if !self.catch_up_input(selected, logical_frames, &mut state) {
+            return None;
+        }
+
+        let output = self.inputs[selected].pull(len)?;
+        let output_frames = output.data().len() / CHANNELS;
+        if output_frames == 0 {
+            return None;
+        }
+
+        state.consumed_frames[selected] += output_frames as u64;
+        state.logical_frames += output_frames as u64;
+        self.catch_up_all(&mut state);
+
+        Some(output)
     }
 }
 
@@ -165,5 +282,77 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 {
     fn pull(&self, len: usize) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
         self.pull_and_mix(len)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio::SimpleBuffer;
+
+    type TestBuffer = AudioBuffer<f32, 2, 48_000>;
+
+    fn audio(frames: &[(f32, f32)]) -> TestBuffer {
+        let mut samples = Vec::with_capacity(frames.len() * 2);
+        for (left, right) in frames {
+            samples.push(*left);
+            samples.push(*right);
+        }
+        AudioBuffer::new(samples).unwrap()
+    }
+
+    fn make_selector(
+        raw: &SimpleBuffer<f32, 2, 48_000>,
+        alternate: &SimpleBuffer<f32, 2, 48_000>,
+    ) -> SynchronizedSelect<f32, 2, 48_000> {
+        SynchronizedSelect::new(vec![
+            Arc::new(raw.clone()) as Arc<dyn Pullable<TestBuffer>>,
+            Arc::new(alternate.clone()) as Arc<dyn Pullable<TestBuffer>>,
+        ])
+    }
+
+    #[test]
+    fn synchronized_select_consumes_inactive_input() {
+        let raw = SimpleBuffer::<f32, 2, 48_000>::new();
+        let alternate = SimpleBuffer::<f32, 2, 48_000>::new();
+        raw.push(audio(&[(1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0)]));
+        alternate.push(audio(&[
+            (10.0, 10.0),
+            (20.0, 20.0),
+            (30.0, 30.0),
+            (40.0, 40.0),
+        ]));
+
+        let selector = make_selector(&raw, &alternate);
+
+        let first = selector.pull(4).unwrap();
+        assert_eq!(first.data(), &[1.0, 1.0, 2.0, 2.0]);
+
+        selector.set_selected(1);
+        let second = selector.pull(4).unwrap();
+        assert_eq!(second.data(), &[30.0, 30.0, 40.0, 40.0]);
+    }
+
+    #[test]
+    fn synchronized_select_discards_late_inactive_input_before_selecting() {
+        let raw = SimpleBuffer::<f32, 2, 48_000>::new();
+        let alternate = SimpleBuffer::<f32, 2, 48_000>::new();
+        raw.push(audio(&[(1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0)]));
+
+        let selector = make_selector(&raw, &alternate);
+
+        let first = selector.pull(4).unwrap();
+        assert_eq!(first.data(), &[1.0, 1.0, 2.0, 2.0]);
+
+        alternate.push(audio(&[
+            (10.0, 10.0),
+            (20.0, 20.0),
+            (30.0, 30.0),
+            (40.0, 40.0),
+        ]));
+
+        selector.set_selected(1);
+        let second = selector.pull(4).unwrap();
+        assert_eq!(second.data(), &[30.0, 30.0, 40.0, 40.0]);
     }
 }

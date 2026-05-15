@@ -29,6 +29,7 @@ use crate::audio::decoders::{
 };
 use crate::audio::frame::AudioBuffer;
 use crate::audio::opus::{OpusDecoder, OpusPacket};
+use crate::party::combinator::SynchronizedSelect;
 use crate::party::network_stream::{NetworkStream, NetworkStreamContext};
 use crate::party::share_music::{
     RequestFramesPayload, SyncedControl, SyncedFrame, SyncedStreamId, SyncedStreamMeta,
@@ -99,9 +100,9 @@ struct BufferEntry<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     original_pipeline_head: Arc<dyn Pushable<CompressedPacket>>,
     /// Opus decoder for sender-produced no-vocal packets.
     no_vocal_decoder: Arc<OpusDecoder<Sample, CHANNELS, SAMPLE_RATE>>,
-    /// Pre-decoded audio buffer (no vocal removal). Pull when vocal removal is off.
-    output_buffer_raw: SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE>,
-    /// Pre-decoded audio buffer (sender-side vocal removal). Pull when vocal removal is on.
+    /// Pull-side selector for raw/no-vocal output buffers.
+    output_selector: Arc<SynchronizedSelect<Sample, CHANNELS, SAMPLE_RATE>>,
+    /// Pre-decoded sender-side vocal removal buffer. Push no-vocal decoded PCM here.
     output_buffer_no_vocal: SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE>,
     /// Resets decoder/resampler state and both output buffers on seek.
     reset_decoder_states: Box<dyn Fn() + Send + Sync>,
@@ -253,16 +254,23 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 
         // Deref the Arc to get a SimpleBuffer clone for pulling.
         // SimpleBuffer uses Arc<Mutex<...>> internally so clones share state.
-        let output_raw_for_pull = (*output_buffer_raw_sink).clone();
-        let output_removed_for_pull = (*output_buffer_removed_sink).clone();
+        let output_raw_for_pull: Arc<dyn Pullable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>> =
+            Arc::new((*output_buffer_raw_sink).clone());
+        let output_removed_for_pull: Arc<dyn Pullable<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>>> =
+            Arc::new((*output_buffer_removed_sink).clone());
+        let output_selector = Arc::new(SynchronizedSelect::new([
+            output_raw_for_pull,
+            output_removed_for_pull,
+        ]));
+        let output_removed_for_push = (*output_buffer_removed_sink).clone();
 
         self.buffers.insert(
             key,
             BufferEntry {
                 original_pipeline_head,
                 no_vocal_decoder,
-                output_buffer_raw: output_raw_for_pull,
-                output_buffer_no_vocal: output_removed_for_pull,
+                output_selector,
+                output_buffer_no_vocal: output_removed_for_push,
                 reset_decoder_states: original_pipeline_reset,
                 meta,
                 original_track: TrackReceiveState::new(),
@@ -310,6 +318,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 // Reset samples_played so drift correction is relative to
                 // the new start_party_time, not accumulated from a prior session.
                 entry.samples_played = 0;
+                entry.output_selector.reset_to(0);
 
                 // Reset pipeline and pending queues on seek.
                 // Sender handles seeking in the source file — receiver just
@@ -544,13 +553,13 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             let expected_samples = elapsed_us * SAMPLE_RATE as u64 / 1_000_000;
 
             if entry.samples_played + drift_threshold < expected_samples {
-                // Lagging: discard old audio from both buffers to skip ahead.
+                // Lagging: advance the selector's logical position. Each
+                // underlying buffer discards what it has now and records any
+                // remaining debt until missing packets arrive.
                 let lag_samples = expected_samples - entry.samples_played;
-                let to_discard = (lag_samples as usize).saturating_mul(CHANNELS);
-                entry.output_buffer_raw.pull(to_discard);
-                entry.output_buffer_no_vocal.pull(to_discard);
+                entry.output_selector.discard_to(expected_samples);
                 warn!(
-                    "Synced stream lagging: discarding {:.1}ms of audio",
+                    "Synced stream: We are lagging: discarding {:.1}ms of buffered audio",
                     lag_samples as f64 * 1000.0 / SAMPLE_RATE as f64
                 );
                 entry.samples_played = expected_samples;
@@ -559,26 +568,19 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 // Don't pull and don't advance samples_played — let the party
                 // clock catch up before resuming normal output.
                 warn!(
-                    "Synced stream ahead by {:.1}ms, inserting silence",
+                    "Synced stream: We are ahead by {:.1}ms, inserting silence",
                     (entry.samples_played - expected_samples) as f64 * 1000.0 / SAMPLE_RATE as f64
                 );
                 continue;
             }
 
-            // Select the active buffer based on the vocal removal toggle.
-            // Pull from the active buffer and discard the same amount from
-            // the inactive one so both stay time-aligned — toggling switches
-            // to the correct point in the stream without hearing stale audio.
-            let (active, inactive) = if entry.vocal_removal_active {
-                (&entry.output_buffer_no_vocal, &entry.output_buffer_raw)
-            } else {
-                (&entry.output_buffer_raw, &entry.output_buffer_no_vocal)
-            };
+            entry
+                .output_selector
+                .set_selected(if entry.vocal_removal_active { 1 } else { 0 });
 
-            let Some(buf) = active.pull(num_samples) else {
+            let Some(buf) = entry.output_selector.pull(num_samples) else {
                 continue;
             };
-            inactive.pull(num_samples);
 
             source_count += 1;
             let buf_data = buf.data();
@@ -792,7 +794,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     for Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>
 {
     fn pull(&self, len: usize) -> Option<AudioBuffer<Sample, CHANNELS, SAMPLE_RATE>> {
-        let num_frames = len / CHANNELS;
-        self.pull_and_mix(num_frames)
+        self.as_ref().pull(len)
     }
 }
