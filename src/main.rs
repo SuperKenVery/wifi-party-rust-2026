@@ -27,6 +27,13 @@ use party::PartyConfig;
 use state::AppState;
 use tracing::{Level, error, info};
 
+#[cfg(any(
+    feature = "desktop",
+    all(feature = "mobile", any(target_os = "android", target_os = "ios"))
+))]
+const CUSTOM_HEAD: &str =
+    r#"<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">"#;
+
 fn main() {
     dioxus::logger::init(Level::DEBUG).expect("failed to init logger");
 
@@ -50,18 +57,37 @@ fn run() -> Result<()> {
 
     info!("Application setup complete. Audio pipelines are live.");
 
-    dioxus::LaunchBuilder::desktop()
-        .with_cfg(
+    #[cfg(all(feature = "mobile", any(target_os = "android", target_os = "ios")))]
+    #[allow(unused_mut)]
+    let mut launcher = dioxus::LaunchBuilder::mobile().with_context(state);
+
+    #[cfg(not(all(feature = "mobile", any(target_os = "android", target_os = "ios"))))]
+    #[allow(unused_mut)]
+    let mut launcher = dioxus::LaunchBuilder::new().with_context(state);
+
+    #[cfg(all(
+        feature = "desktop",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
+    {
+        launcher = launcher.with_cfg(
             dioxus::desktop::Config::new()
                 .with_window(
                     dioxus::desktop::WindowBuilder::new()
                         .with_title("Wi-Fi Party KTV")
                         .with_always_on_top(false),
                 )
-                .with_custom_head(r#"<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">"#.into()),
-        )
-        .with_context(state)
-        .launch(ui::App);
+                .with_custom_head(CUSTOM_HEAD.into()),
+        );
+    }
+
+    #[cfg(all(feature = "mobile", any(target_os = "android", target_os = "ios")))]
+    {
+        launcher =
+            launcher.with_cfg(dioxus::mobile::Config::new().with_custom_head(CUSTOM_HEAD.into()));
+    }
+
+    launcher.launch(ui::App);
 
     Ok(())
 }

@@ -14,10 +14,28 @@
 fn main() {
     let default_path = "assets/all_rt.onnx";
     let model_path = std::env::var("ALL_RT_ONNX_PATH").unwrap_or_else(|_| default_path.to_string());
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let vocal_removal_enabled = std::env::var_os("CARGO_FEATURE_VOCAL_REMOVAL").is_some();
 
     println!("cargo:rerun-if-env-changed=ALL_RT_ONNX_PATH");
     println!("cargo:rerun-if-changed={model_path}");
     println!("cargo::rustc-check-cfg=cfg(has_vocal_model)");
+
+    if !vocal_removal_enabled {
+        println!(
+            "cargo:warning=VocalRemover: `vocal-removal` feature disabled. \
+             VocalRemover will pass audio through unmodified."
+        );
+        return;
+    }
+
+    if target_os == "android" {
+        println!(
+            "cargo:warning=VocalRemover: ONNX Runtime vocal removal is disabled on Android. \
+             VocalRemover will pass audio through unmodified."
+        );
+        return;
+    }
 
     if !std::path::Path::new(&model_path).exists() {
         println!(

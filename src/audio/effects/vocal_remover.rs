@@ -52,6 +52,7 @@ const MODEL_CHANNELS: usize = 2;
 // ── Hann window ───────────────────────────────────────────────────────────────
 
 /// Periodic Hann window matching `torch.hann_window(N, periodic=True)`.
+#[cfg(has_vocal_model)]
 fn hann_window(size: usize) -> Vec<f32> {
     (0..size)
         .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / size as f32).cos()))
@@ -64,6 +65,7 @@ fn hann_window(size: usize) -> Vec<f32> {
 ///
 /// Returns `stft[ch * DIM_T + frame] = (real_1024, imag_1024)`.
 /// (`gpu_fft::fft` zero-pads to next power of 2; 1024 is already a power of 2.)
+#[cfg(has_vocal_model)]
 fn stft_gpu(left: &[f32], right: &[f32]) -> Vec<(Vec<f32>, Vec<f32>)> {
     debug_assert_eq!(left.len(), INF_CHUNK);
     debug_assert_eq!(right.len(), INF_CHUNK);
@@ -98,6 +100,7 @@ fn stft_gpu(left: &[f32], right: &[f32]) -> Vec<(Vec<f32>, Vec<f32>)> {
 ///
 /// `spectrograms[src * 2 + ch]` = flat `[N_FREQS × DIM_T]` (real, imag) pair.
 /// Returns `waveforms[src * 2 + ch]` = `INF_CHUNK` samples.
+#[cfg(has_vocal_model)]
 fn istft_gpu(spectrograms: &[(Vec<f32>, Vec<f32>)]) -> Vec<Vec<f32>> {
     let n_items = spectrograms.len(); // N_SOURCES * 2
 
