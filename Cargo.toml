@@ -7,7 +7,7 @@ edition = "2024"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-dioxus = { version = "0.7.9", features = ["desktop", "router"] }
+dioxus = { version = "0.7.9", default-features = false, features = ["router"] }
 chrono = "0.4"
 cpal = { git = "https://github.com/SuperKenVery/cpal", branch = "fix/superkenvery/desc-name" }
 rkyv = "0.8"
@@ -44,6 +44,7 @@ gpu-fft = { version = "1.1.1", features = ["wgpu"] }
 [target.'cfg(target_os = "android")'.dependencies]
 ndk-context = "0.1"
 jni = "0.21"
+cubecl-common = { version = "=0.9.0", default-features = false, features = ["serde"] }
 
 [build-dependencies]
 
@@ -54,6 +55,6 @@ wgpu = "29.0.1"
 
 [features]
 default = ["desktop"]
-web = ["dioxus/web"]
-desktop = ["dioxus/desktop"]
-mobile = ["dioxus/mobile"]
+web = ["dioxus/default", "dioxus/web"]
+desktop = ["dioxus/default", "dioxus/desktop"]
+mobile = ["dioxus/default", "dioxus/mobile"]

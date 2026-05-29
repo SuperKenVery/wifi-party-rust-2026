@@ -74,6 +74,26 @@ pub fn DebugPanel(
                                     }
 
                                     DebugInfoItem {
+                                        label: "Raw Offset",
+                                        value: format_optional_micros(info.raw_offset_micros),
+                                    }
+
+                                    DebugInfoItem {
+                                        label: "Last RTT",
+                                        value: format_optional_micros(info.last_rtt_micros),
+                                    }
+
+                                    DebugInfoItem {
+                                        label: "Best RTT",
+                                        value: format_optional_micros(info.best_rtt_micros),
+                                    }
+
+                                    DebugInfoItem {
+                                        label: "Offset Samples",
+                                        value: format!("{}", info.offset_sample_count),
+                                    }
+
+                                    DebugInfoItem {
                                         label: "Local Time",
                                         value: format!("{} µs", info.local_time_micros),
                                     }
@@ -105,6 +125,12 @@ pub fn DebugPanel(
             }
         }
     }
+}
+
+fn format_optional_micros(value: Option<i64>) -> String {
+    value
+        .map(|micros| format!("{micros} µs"))
+        .unwrap_or_else(|| "n/a".to_string())
 }
 
 #[allow(non_snake_case)]

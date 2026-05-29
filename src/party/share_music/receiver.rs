@@ -556,11 +556,13 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 // Lagging: advance the selector's logical position. Each
                 // underlying buffer discards what it has now and records any
                 // remaining debt until missing packets arrive.
-                let lag_samples = expected_samples - entry.samples_played;
+                // let lag_samples = expected_samples - entry.samples_played;
                 entry.output_selector.discard_to(expected_samples);
                 warn!(
-                    "Synced stream: We are lagging: discarding {:.1}ms of buffered audio",
-                    lag_samples as f64 * 1000.0 / SAMPLE_RATE as f64
+                    "Synced stream: We are lagging: Would have play at {:.1}ms, corrected to {:.1}ms",
+                    // lag_samples as f64 * 1000.0 / SAMPLE_RATE as f64
+                    entry.samples_played as f64 * 1000.0 / SAMPLE_RATE as f64,
+                    expected_samples as f64 * 1000.0 / SAMPLE_RATE as f64,
                 );
                 entry.samples_played = expected_samples;
             } else if expected_samples + drift_threshold < entry.samples_played {
@@ -579,6 +581,13 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 .set_selected(if entry.vocal_removal_active { 1 } else { 0 });
 
             let Some(buf) = entry.output_selector.pull(num_samples) else {
+                // The output callback still advances when this stream has no
+                // decoded data. Keep this stream's read position aligned with
+                // the party clock so late packets are discarded instead of
+                // replayed late on a later callback.
+                let silent_until = expected_samples.saturating_add(num_frames as u64);
+                entry.output_selector.discard_to(silent_until);
+                entry.samples_played = entry.samples_played.max(silent_until);
                 continue;
             };
 

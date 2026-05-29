@@ -106,9 +106,17 @@ fn apple_music_content(state: Arc<AppState>) -> Element {
             let sf = storefront.read().trim().to_string();
             let sf = if sf.is_empty() { "cn".to_string() } else { sf };
             let addr = wrapper_addr.read().trim().to_string();
-            let addr = if addr.is_empty() { "localhost".to_string() } else { addr };
+            let addr = if addr.is_empty() {
+                "localhost".to_string()
+            } else {
+                addr
+            };
             let port = wrapper_port.read().trim().to_string();
-            let port = if port.is_empty() { "10020".to_string() } else { port };
+            let port = if port.is_empty() {
+                "10020".to_string()
+            } else {
+                port
+            };
             let wrapper = format!("{addr}:{port}");
             let song = song.clone();
             let state = state.clone();
@@ -156,7 +164,12 @@ fn apple_music_content(state: Arc<AppState>) -> Element {
                     let _ = prog_tx.send(ev);
                 });
                 match download::download_song_by_id(
-                    &client, &token, &sf, &song.id, &wrapper, Some(prog_cb),
+                    &client,
+                    &token,
+                    &sf,
+                    &song.id,
+                    &wrapper,
+                    Some(prog_cb),
                 )
                 .await
                 {

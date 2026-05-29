@@ -769,6 +769,56 @@ fn test_pause_stops_output() {
     );
 }
 
+/// Verifies that missing decoded data does not freeze the synced playhead.
+#[test]
+fn test_empty_stream_advances_playhead() {
+    let sid = new_stream_id();
+    let (codec_params, _) = load_packets(1);
+
+    let clock = Arc::new(AtomicU64::new(100_000));
+    let mgr = make_manager(clock.clone());
+    mgr.receive_meta(
+        test_addr(),
+        SyncedStreamMeta {
+            stream_id: sid,
+            file_name: "read_you.m4a".to_string(),
+            total_frames: 1,
+            total_samples: SR as u64,
+            codec_params,
+        },
+    );
+    mgr.receive_control(
+        test_addr(),
+        SyncedControl::Start {
+            stream_id: sid,
+            party_clock_time: 0,
+            seq: 1,
+            no_vocal_seq: 1,
+        },
+    );
+
+    assert!(
+        mgr.pull_and_mix(480).is_none(),
+        "No decoded packets should produce silence"
+    );
+    let progress = mgr.active_streams().pop().unwrap().progress;
+    assert_eq!(
+        progress.samples_played, 5_280,
+        "Playhead should advance to party-clock position plus the silent callback"
+    );
+
+    clock.store(110_000, Ordering::Relaxed);
+    assert!(
+        mgr.pull_and_mix(480).is_none(),
+        "Still no decoded packets should continue producing silence"
+    );
+    let progress = mgr.active_streams().pop().unwrap().progress;
+    assert_eq!(
+        progress.samples_played, 5_760,
+        "Playhead should continue advancing across empty callbacks"
+    );
+}
+
 /// Verifies that different pull sizes produce the same total audio content.
 /// This catches issues with leftover buffer handling at chunk boundaries.
 #[test]

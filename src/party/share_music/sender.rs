@@ -15,9 +15,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use dashmap::DashMap;
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
@@ -34,11 +34,11 @@ use crate::party::network_stream::NetworkStream;
 use crate::party::ntp::NtpService;
 use crate::party::share_music::receiver::SyncedAudioStreamManager;
 use crate::party::share_music::{
-    new_stream_id, RawPacket, RequestFramesPayload, SyncedControl, SyncedFrame, SyncedStreamId,
-    SyncedStreamMeta, SyncedTrack, MAX_FRAGMENT_DATA,
+    MAX_FRAGMENT_DATA, RawPacket, RequestFramesPayload, SyncedControl, SyncedFrame, SyncedStreamId,
+    SyncedStreamMeta, SyncedTrack, new_stream_id,
 };
 use crate::party::tagged_packet::{
-    PacketTag, TaggedPacket, REQUEST_FRAMES_TAG, SYNCED_CONTROL_TAG, SYNCED_META_TAG, SYNCED_TAG,
+    PacketTag, REQUEST_FRAMES_TAG, SYNCED_CONTROL_TAG, SYNCED_META_TAG, SYNCED_TAG, TaggedPacket,
 };
 use crate::pipeline::{Node, Pushable};
 use crate::state::MusicStreamProgress;

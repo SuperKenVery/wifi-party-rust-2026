@@ -72,6 +72,10 @@ pub struct NtpView {
     available: AtomicBool,
     synced: AtomicBool,
     offset_micros: AtomicI64,
+    raw_offset_micros: AtomicI64,
+    last_rtt_micros: AtomicI64,
+    best_rtt_micros: AtomicI64,
+    offset_sample_count: AtomicU32,
     local_time_micros: AtomicU64,
     party_time_micros: AtomicU64,
     pending_requests: AtomicU32,
@@ -85,6 +89,10 @@ impl NtpView {
             available: AtomicBool::new(false),
             synced: AtomicBool::new(false),
             offset_micros: AtomicI64::new(0),
+            raw_offset_micros: AtomicI64::new(i64::MIN),
+            last_rtt_micros: AtomicI64::new(i64::MIN),
+            best_rtt_micros: AtomicI64::new(i64::MIN),
+            offset_sample_count: AtomicU32::new(0),
             local_time_micros: AtomicU64::new(0),
             party_time_micros: AtomicU64::new(0),
             pending_requests: AtomicU32::new(0),
@@ -97,6 +105,16 @@ impl NtpView {
         self.synced.store(info.synced, Ordering::Relaxed);
         self.offset_micros
             .store(info.offset_micros, Ordering::Relaxed);
+        self.raw_offset_micros.store(
+            info.raw_offset_micros.unwrap_or(i64::MIN),
+            Ordering::Relaxed,
+        );
+        self.last_rtt_micros
+            .store(info.last_rtt_micros.unwrap_or(i64::MIN), Ordering::Relaxed);
+        self.best_rtt_micros
+            .store(info.best_rtt_micros.unwrap_or(i64::MIN), Ordering::Relaxed);
+        self.offset_sample_count
+            .store(info.offset_sample_count as u32, Ordering::Relaxed);
         self.local_time_micros
             .store(info.local_time_micros, Ordering::Relaxed);
         self.party_time_micros
@@ -119,6 +137,10 @@ impl NtpView {
         Some(NtpDebugInfo {
             synced: self.synced.load(Ordering::Relaxed),
             offset_micros: self.offset_micros.load(Ordering::Relaxed),
+            raw_offset_micros: Self::load_optional_i64(&self.raw_offset_micros),
+            last_rtt_micros: Self::load_optional_i64(&self.last_rtt_micros),
+            best_rtt_micros: Self::load_optional_i64(&self.best_rtt_micros),
+            offset_sample_count: self.offset_sample_count.load(Ordering::Relaxed) as usize,
             local_time_micros: self.local_time_micros.load(Ordering::Relaxed),
             party_time_micros: self.party_time_micros.load(Ordering::Relaxed),
             party_time_formatted: self
@@ -129,6 +151,13 @@ impl NtpView {
             pending_requests: self.pending_requests.load(Ordering::Relaxed) as usize,
             pending_responses: self.pending_responses.load(Ordering::Relaxed) as usize,
         })
+    }
+
+    fn load_optional_i64(value: &AtomicI64) -> Option<i64> {
+        match value.load(Ordering::Relaxed) {
+            i64::MIN => None,
+            value => Some(value),
+        }
     }
 }
 
@@ -159,8 +188,7 @@ impl PartyViewState {
     }
 
     pub fn retain_realtime_streams(&self, active: &HashSet<StreamViewKey>) {
-        self.realtime_streams
-            .retain(|key, _| active.contains(key));
+        self.realtime_streams.retain(|key, _| active.contains(key));
     }
 
     pub fn realtime_hosts(&self) -> Vec<HostInfo> {
