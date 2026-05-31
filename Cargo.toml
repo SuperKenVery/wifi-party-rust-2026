@@ -57,5 +57,5 @@ wgpu = "29.0.1"
 default = ["desktop", "vocal-removal"]
 web = ["dioxus/default", "dioxus/web"]
 desktop = ["dioxus/default", "dioxus/desktop"]
-mobile = ["dioxus/default", "dioxus/mobile"]
+mobile = ["dioxus/default", "dioxus/mobile", "vocal-removal"]
 vocal-removal = ["dep:gpu-fft", "dep:ndarray", "dep:ort"]

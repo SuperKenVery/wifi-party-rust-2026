@@ -13,6 +13,9 @@ You need two terminals running:
 
 ```bash
 dx serve
+
+# For android:
+ORT_CXX_STDLIB=c++_static dx serve --platform android
 ```
 
 **Terminal 2** — Tailwind CSS watcher:

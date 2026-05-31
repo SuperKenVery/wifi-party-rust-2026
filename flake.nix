@@ -32,7 +32,13 @@
 
     rustToolchain = eachSystem (pkgs: pkgs.rust-bin.stable.latest.default.override {
       extensions = ["rust-src" "rust-analyzer"];
-      targets = ["wasm32-unknown-unknown" "aarch64-linux-android"];
+      targets = [
+        "wasm32-unknown-unknown"
+        "aarch64-linux-android"
+        "aarch64-apple-ios"
+        "aarch64-apple-ios-sim"
+        "x86_64-apple-ios"
+      ];
     });
 
     dioxus-cli = eachSystem (pkgs: pkgs.dioxus-cli.overrideAttrs (oldAttrs: {
@@ -71,7 +77,7 @@
     androidSdk = eachSystem (pkgs: (pkgs.androidenv.composeAndroidPackages {
       platformVersions = [ "33" "34" ];
       buildToolsVersions = [ "33.0.0" "34.0.0" ];
-      ndkVersions = [ "25.2.9519653" ];
+      ndkVersions = [ "29.0.14206865" ];
       includeEmulator = false;
       includeSources = false;
       includeSystemImages = false;
@@ -104,9 +110,6 @@
         ] ++
         (pkgs.lib.optionals pkgs.stdenv.isLinux (with pkgs; [
           openssl
-        ])) ++
-        (pkgs.lib.optionals pkgs.stdenv.isDarwin (with pkgs; [
-          apple-sdk_15
         ]));
 
         RUST_BACKTRACE = "1";
@@ -117,7 +120,7 @@
 
         JAVA_HOME = "${jdk17}";
         ANDROID_HOME = "${androidSdk.${pkgs.stdenv.hostPlatform.system}}/libexec/android-sdk";
-        NDK_HOME = "${androidSdk.${pkgs.stdenv.hostPlatform.system}}/libexec/android-sdk/ndk/25.2.9519653";
+        NDK_HOME = "${androidSdk.${pkgs.stdenv.hostPlatform.system}}/libexec/android-sdk/ndk/29.0.14206865";
       });
     });
 
