@@ -16,6 +16,11 @@ dx serve
 
 # For android:
 ORT_CXX_STDLIB=c++_static dx serve --platform android
+
+# For iOS, we use the system apple sdk (instead of nix's):
+set -e DEVELOPER_DIR SDKROOT
+set -gx PATH /usr/bin /bin /usr/sbin /sbin $PATH
+dx serve --platform ios
 ```
 
 **Terminal 2** — Tailwind CSS watcher:

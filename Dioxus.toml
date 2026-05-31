@@ -1,6 +1,11 @@
+# https://dioxuslabs.com/learn/0.7/guides/tools/configure/
+# https://github.com/DioxusLabs/dioxus/blob/main/packages/cli/src/config/dioxus_config.rs
+
 [application]
 android_manifest = "assets/AndroidManifest.xml"
 android_main_activity = "assets/MainActivity.kt"
+ios_info_plist = "assets/Info.ios.plist"
+ios_entitlements = "assets/Entitlements.ios.plist"
 
 [bundle]
 identifier = "com.ken.WifiPartyRust"
