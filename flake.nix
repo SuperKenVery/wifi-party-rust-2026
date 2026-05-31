@@ -113,7 +113,7 @@
         ]));
 
         RUST_BACKTRACE = "1";
-        RUST_LOG = "debug";
+        RUST_LOG = "warn,wifi_party_rust=debug";
 
         OPUS_NO_PKG = "1";
         CMAKE_POLICY_VERSION_MINIMUM = "3.5";

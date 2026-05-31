@@ -333,8 +333,12 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 }
 
                 info!(
-                    "Stream {:?} starting at seq {} / no-vocal seq {} at party time {}",
-                    key, seq, no_vocal_seq, party_clock_time
+                    "Stream {:?} starting at seq {} / no-vocal seq {} at party time {} ({} seconds later)",
+                    key,
+                    seq,
+                    no_vocal_seq,
+                    party_clock_time,
+                    (party_clock_time - (self.party_now_fn)()) as f64 / 1000000.0,
                 );
             }
             SyncedControl::Pause { .. } => {
@@ -351,8 +355,11 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 entry.last_seen = Instant::now();
                 self.vocal_removal_enabled.store(enabled, Ordering::Relaxed);
                 info!(
-                    "Stream {:?} scheduled vocal-removal={} at party time {}",
-                    key, enabled, party_clock_time
+                    "Stream {:?} scheduled vocal-removal={} at party time {} ({} seconds later)",
+                    key,
+                    enabled,
+                    party_clock_time,
+                    (party_clock_time - (self.party_now_fn)()) as f64 / 1000000.0
                 );
             }
         }
