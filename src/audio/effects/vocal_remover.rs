@@ -1,10 +1,10 @@
-//! Vocal remover effect using the RT-DTT model via ONNX Runtime (ort) + gpu-fft.
+//! Vocal remover effect using the RT-DTT model via Burn (Flex CPU backend) + gpu-fft.
 //!
 //! ## How it works
 //!
-//! At **build time** `build.rs` embeds `all_rt.onnx` into the binary
-//! (sets `cfg(has_vocal_model)`).  At **run time** `gpu-fft` (CubeCL / wgpu) does
-//! the STFT/iSTFT on the GPU, and ONNX Runtime runs the separation network.
+//! At **build time** `build.rs` converts `all_rt.onnx` into Burn Rust code
+//! (sets `cfg(has_vocal_model)`).  At **run time** the Flex backend runs the
+//! separation network on CPU, and `gpu-fft` (CubeCL / wgpu) does STFT/iSTFT on GPU.
 //!
 //! When the model is not available at build time (no ONNX file found) the node
 //! compiles as a pass-through and emits a tracing warning on first use.
@@ -16,13 +16,21 @@
 //! 1. Zero-pad OVERLAP=512 on each side → `INF_CHUNK = 32 256` samples.
 //! 2. GPU STFT: batch all frames × channels with `gpu_fft::fft_batch`.
 //!    Periodic Hann window, `n_fft=1024`, `hop=512`, `center=True`.
-//! 3. Pack first `DIM_F=384` bins into an ONNX input `[1,4,384,64]`.
-//! 4. Inference with ONNX Runtime → output `[1,4,4,384,64]`.
+//! 3. Pack first `DIM_F=384` bins into a Burn tensor `[1,4,384,64]`.
+//! 4. Inference with Burn Flex backend → output `[1,4,4,384,64]`.
 //! 5. GPU iSTFT: reconstruct the vocal waveform with `gpu_fft::ifft_batch` + OLA.
 //! 6. `instrumental = mix − vocals` (source index 3), trim overlap.
 
+use burn::backend::Flex;
+use burn::tensor::{Tensor, TensorData};
+use burn_flex::FlexDevice;
+use burn_store::ModuleSnapshot;
+use include_bytes_aligned::include_bytes_aligned;
+
 #[cfg(has_vocal_model)]
-use ort::session::Session;
+pub mod all_rt {
+    include!(concat!(env!("OUT_DIR"), "/model/all_rt.rs"));
+}
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -48,6 +56,14 @@ const N_SOURCES: usize = 4; // bass / drums / other / vocals
 const VOCALS_IDX: usize = 3;
 const MODEL_SAMPLE_RATE: u32 = 44_100;
 const MODEL_CHANNELS: usize = 2;
+
+/// The Burn device shared by all model instances.
+///
+/// Created fresh per `State` so each instance has its own allocator.
+#[cfg(has_vocal_model)]
+fn default_device() -> FlexDevice {
+    FlexDevice::default()
+}
 
 // ── Hann window ───────────────────────────────────────────────────────────────
 
@@ -183,7 +199,7 @@ fn istft_gpu(spectrograms: &[(Vec<f32>, Vec<f32>)]) -> Vec<Vec<f32>> {
 ///
 /// Returns `GEN_SIZE * 2` interleaved stereo f32 samples (vocal-removed).
 #[cfg(has_vocal_model)]
-fn infer_chunk(session: &mut Session, chunk: &[f32]) -> Vec<f32> {
+fn infer_chunk(model: &all_rt::Model<Flex>, device: &FlexDevice, chunk: &[f32]) -> Vec<f32> {
     debug_assert_eq!(chunk.len(), INF_CHUNK * 2);
 
     // 1. De-interleave.
@@ -194,11 +210,11 @@ fn infer_chunk(session: &mut Session, chunk: &[f32]) -> Vec<f32> {
         right[i] = chunk[i * 2 + 1];
     }
 
-    // 2. GPU STFT — stft[ch * DIM_T + frame] = (real_1024, imag_1024).
+    // 2. GPU STFT.
     let stft = stft_gpu(&left, &right);
 
-    // 3. Pack into ONNX input layout: (1, 4, DIM_F, DIM_T)
-    //    Channel layout: [ch0_re, ch0_im, ch1_re, ch1_im] (inner-to-outer: t, freq, cri, batch).
+    // 3. Pack into input layout: (1, 4, DIM_F, DIM_T)
+    //    Channel layout: [ch0_re, ch0_im, ch1_re, ch1_im]
     let mut onnx_in = vec![0.0f32; 4 * DIM_F * DIM_T];
     for ch in 0..2usize {
         for frame_idx in 0..DIM_T {
@@ -210,26 +226,20 @@ fn infer_chunk(session: &mut Session, chunk: &[f32]) -> Vec<f32> {
         }
     }
 
-    // 4. Run ONNX inference.
+    // 4. Run Burn inference.
     //    Input:  [1, 4, DIM_F, DIM_T]
     //    Output: [1, 4, 4, DIM_F, DIM_T]  (batch, source, cri, freq, time)
-    let input_array =
-        ndarray::Array4::from_shape_vec((1, 4, DIM_F, DIM_T), onnx_in).expect("input shape");
-    let input_tensor = ort::value::Tensor::from_array(input_array).expect("create tensor");
-    let outputs = session
-        .run(ort::inputs!["input" => input_tensor])
-        .expect("session run");
-    let (_shape, output_slice) = outputs[0]
-        .try_extract_tensor::<f32>()
-        .expect("extract tensor");
-    let out_data: Vec<f32> = output_slice.to_vec();
+    let input =
+        Tensor::<Flex, 4>::from_data(TensorData::new(onnx_in, [1, 4, DIM_F, DIM_T]), device);
+    let output = model.forward(input);
+    let output_data = output.into_data();
+    let out_vec: Vec<f32> = output_data.to_vec().expect("burn tensor to vec");
 
     // 5. Unpack the vocal source spectrogram.
-    //    out_data[src * src_stride + cri * cri_stride + freq * DIM_T + t]
     let src_stride = 4 * DIM_F * DIM_T; // 4 * 384 * 64 = 98 304
     let cri_stride = DIM_F * DIM_T; //     384 * 64 = 24 576
-
     let vocal_stride = VOCALS_IDX * src_stride;
+
     let mut vocal_specs: Vec<(Vec<f32>, Vec<f32>)> = Vec::with_capacity(2);
     for ch in 0..2usize {
         let mut re_bins = vec![0.0f32; N_FREQS * DIM_T];
@@ -237,38 +247,44 @@ fn infer_chunk(session: &mut Session, chunk: &[f32]) -> Vec<f32> {
         for freq in 0..DIM_F {
             for t in 0..DIM_T {
                 re_bins[freq * DIM_T + t] =
-                    out_data[vocal_stride + (ch * 2) * cri_stride + freq * DIM_T + t];
+                    out_vec[vocal_stride + (ch * 2) * cri_stride + freq * DIM_T + t];
                 im_bins[freq * DIM_T + t] =
-                    out_data[vocal_stride + (ch * 2 + 1) * cri_stride + freq * DIM_T + t];
+                    out_vec[vocal_stride + (ch * 2 + 1) * cri_stride + freq * DIM_T + t];
             }
-            // Bins DIM_F..N_FREQS remain zero (high-freq padding).
         }
         vocal_specs.push((re_bins, im_bins));
     }
 
-    // 6. GPU iSTFT for vocal channels.
-    //    waveforms[ch] = INF_CHUNK samples.
-    let waveforms = istft_gpu(&vocal_specs);
+    // 6. GPU iSTFT for vocal channels → INF_CHUNK samples each.
+    let vocal_waveforms = istft_gpu(&vocal_specs);
 
-    // 7. instrumental = mix − vocals, trim OVERLAP from each end.
-    let mut output = vec![0.0f32; GEN_SIZE * 2];
-    for i in 0..GEN_SIZE {
-        let src_i = OVERLAP + i;
-        for ch in 0..2usize {
-            let mix_s = chunk[src_i * 2 + ch];
-            let voc_s = waveforms[ch][src_i];
-            output[i * 2 + ch] = (mix_s - voc_s).clamp(-1.0, 1.0);
-        }
+    // 7. Instrumental = mix − vocals.
+    let mut output = vec![0.0f32; INF_CHUNK * 2];
+    for i in 0..INF_CHUNK {
+        let mix_l = left[i];
+        let mix_r = right[i];
+        let voc_l = vocal_waveforms[0][i];
+        let voc_r = vocal_waveforms[1][i];
+
+        output[i * 2] = (mix_l - voc_l).clamp(-1.0, 1.0);
+        output[i * 2 + 1] = (mix_r - voc_r).clamp(-1.0, 1.0);
     }
 
-    output
+    // 8. Trim center=True padding → GEN_SIZE samples per channel.
+    let mut trimmed = Vec::with_capacity(GEN_SIZE * 2);
+    for i in OVERLAP..OVERLAP + GEN_SIZE {
+        trimmed.push(output[i * 2]);
+        trimmed.push(output[i * 2 + 1]);
+    }
+
+    trimmed
 }
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
 struct State {
     #[cfg(has_vocal_model)]
-    session: Session,
+    model: all_rt::Model<Flex>,
     input_buffer: Vec<f32>,
     output_buffer: Vec<f32>,
 }
@@ -279,28 +295,31 @@ impl State {
         self.output_buffer.clear();
     }
 
+    #[cfg(has_vocal_model)]
+    fn process_impl(&mut self, chunk_data: &[f32]) {
+        let chunk_samples = GEN_SIZE * MODEL_CHANNELS;
+        let mut chunk = vec![0.0f32; INF_CHUNK * MODEL_CHANNELS];
+        let off = OVERLAP * MODEL_CHANNELS;
+        chunk[off..off + chunk_samples].copy_from_slice(chunk_data);
+
+        // Each State needs its own device for thread safety.
+        let device = default_device();
+        let processed = infer_chunk(&self.model, &device, &chunk);
+        self.output_buffer.extend_from_slice(&processed);
+    }
+
+    #[cfg(not(has_vocal_model))]
+    fn process_impl(&mut self, chunk_data: &[f32]) {
+        self.output_buffer.extend_from_slice(chunk_data);
+    }
+
     fn process_interleaved(&mut self, f32_samples: &[f32]) {
         self.input_buffer.extend_from_slice(f32_samples);
 
-        let chunk_samples = GEN_SIZE * MODEL_CHANNELS; // interleaved stereo
+        let chunk_samples = GEN_SIZE * MODEL_CHANNELS;
         while self.input_buffer.len() >= chunk_samples {
             let chunk_data: Vec<f32> = self.input_buffer.drain(..chunk_samples).collect();
-
-            // Build INF_CHUNK chunk: [ OVERLAP zeros | GEN_SIZE samples | OVERLAP zeros ]
-            let mut chunk = vec![0.0f32; INF_CHUNK * MODEL_CHANNELS];
-            let off = OVERLAP * MODEL_CHANNELS;
-            chunk[off..off + chunk_samples].copy_from_slice(&chunk_data);
-
-            #[cfg(has_vocal_model)]
-            {
-                let processed = infer_chunk(&mut self.session, &chunk);
-                self.output_buffer.extend_from_slice(&processed);
-            }
-            #[cfg(not(has_vocal_model))]
-            {
-                // Pass-through: model not compiled in.
-                self.output_buffer.extend_from_slice(&chunk_data);
-            }
+            self.process_impl(&chunk_data);
         }
     }
 
@@ -308,7 +327,6 @@ impl State {
         if self.output_buffer.len() < out_len {
             return None;
         }
-
         Some(self.output_buffer.drain(..out_len).collect())
     }
 }
@@ -336,20 +354,13 @@ fn should_process<const CHANNELS: usize, const SAMPLE_RATE: u32>(
     true
 }
 
-// ── Public struct ─────────────────────────────────────────────────────────────
+// ── Public structs ────────────────────────────────────────────────────────────
 
 /// Removes vocals from stereo 44 100 Hz f32 audio using RT-DTT + GPU acceleration.
 ///
-/// - **Inference**: ONNX Runtime (CoreML on macOS, CPU/GPU elsewhere).
+/// - **Inference**: Burn Flex (pure-Rust SIMD-accelerated CPU backend).
 /// - **STFT / iSTFT**: gpu-fft (CubeCL / wgpu — GPU accelerated).
 /// - **Latency**: ≈ 0.71 s (one `GEN_SIZE = 31 232` sample chunk at 44 100 Hz).
-///
-/// # Example
-///
-/// ```ignore
-/// let remover = VocalRemover::new();
-/// let pipeline = source.pipe(remover);
-/// ```
 pub struct VocalRemover<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     enabled: Arc<AtomicBool>,
     invalid_config_warned: AtomicBool,
@@ -362,37 +373,36 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 {
     pub fn new(enabled: Arc<AtomicBool>) -> Self {
         #[cfg(has_vocal_model)]
-        {
-            let onnx_bytes = include_bytes!(concat!(env!("OUT_DIR"), "/all_rt.onnx"));
-            let session = Session::builder()
-                .expect("ort builder")
-                .commit_from_memory(onnx_bytes)
-                .expect("load onnx model");
-            return Self {
-                enabled,
-                invalid_config_warned: AtomicBool::new(false),
-                state: Mutex::new(State {
-                    session,
-                    input_buffer: Vec::new(),
-                    output_buffer: Vec::new(),
-                }),
-                _marker: std::marker::PhantomData,
-            };
-        }
+        let state = {
+            let device = default_device();
+            // Zero-copy aligned include of burnpack weights.
+            let aligned_bpk: &'static [u8] =
+                include_bytes_aligned!(32, concat!(env!("OUT_DIR"), "/model/all_rt.bpk"));
+            let mut model = all_rt::Model::<Flex>::new(&device);
+            let mut store = burn_store::BurnpackStore::from_static(aligned_bpk);
+            model
+                .load_from(&mut store)
+                .expect("Failed to load burnpack weights");
+            State {
+                model,
+                input_buffer: Vec::new(),
+                output_buffer: Vec::new(),
+            }
+        };
         #[cfg(not(has_vocal_model))]
+        let state = State {
+            input_buffer: Vec::new(),
+            output_buffer: Vec::new(),
+        };
+
         Self {
             enabled,
             invalid_config_warned: AtomicBool::new(false),
-            state: Mutex::new(State {
-                input_buffer: Vec::new(),
-                output_buffer: Vec::new(),
-            }),
+            state: Mutex::new(state),
             _marker: std::marker::PhantomData,
         }
     }
 }
-
-// ── Node impl ─────────────────────────────────────────────────────────────────
 
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Node
     for VocalRemover<Sample, CHANNELS, SAMPLE_RATE>
@@ -408,7 +418,6 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> Node
 
         let mut st = self.state.lock().unwrap();
 
-        // Convert input samples to f32 for processing.
         let f32_samples: Vec<f32> = input
             .data()
             .iter()
@@ -440,30 +449,32 @@ pub struct DecodedVocalRemover<const CHANNELS: usize, const SAMPLE_RATE: u32> {
 impl<const CHANNELS: usize, const SAMPLE_RATE: u32> DecodedVocalRemover<CHANNELS, SAMPLE_RATE> {
     pub fn new(enabled: Arc<AtomicBool>) -> Self {
         #[cfg(has_vocal_model)]
-        {
-            let onnx_bytes = include_bytes!(concat!(env!("OUT_DIR"), "/all_rt.onnx"));
-            let session = Session::builder()
-                .expect("ort builder")
-                .commit_from_memory(onnx_bytes)
-                .expect("load onnx model");
-            return Self {
-                enabled,
-                invalid_config_warned: AtomicBool::new(false),
-                state: Mutex::new(State {
-                    session,
-                    input_buffer: Vec::new(),
-                    output_buffer: Vec::new(),
-                }),
-            };
-        }
+        let state = {
+            let device = default_device();
+            // Zero-copy aligned include of burnpack weights.
+            let aligned_bpk: &'static [u8] =
+                include_bytes_aligned!(32, concat!(env!("OUT_DIR"), "/model/all_rt.bpk"));
+            let mut model = all_rt::Model::<Flex>::new(&device);
+            let mut store = burn_store::BurnpackStore::from_static(aligned_bpk);
+            model
+                .load_from(&mut store)
+                .expect("Failed to load burnpack weights");
+            State {
+                model,
+                input_buffer: Vec::new(),
+                output_buffer: Vec::new(),
+            }
+        };
         #[cfg(not(has_vocal_model))]
+        let state = State {
+            input_buffer: Vec::new(),
+            output_buffer: Vec::new(),
+        };
+
         Self {
             enabled,
             invalid_config_warned: AtomicBool::new(false),
-            state: Mutex::new(State {
-                input_buffer: Vec::new(),
-                output_buffer: Vec::new(),
-            }),
+            state: Mutex::new(state),
         }
     }
 
@@ -633,26 +644,28 @@ mod tests {
         (out_l, out_r)
     }
 
-    /// Diagnose inference speed with ort.
     #[cfg(has_vocal_model)]
     #[test]
     fn infer_chunk_timing() {
-        let onnx_bytes = include_bytes!(concat!(env!("OUT_DIR"), "/all_rt.onnx"));
-        let mut session = Session::builder()
-            .expect("ort builder")
-            .commit_from_memory(onnx_bytes)
-            .expect("load onnx model");
+        let device = super::default_device();
+        let aligned_bpk: &'static [u8] =
+            include_bytes_aligned!(32, concat!(env!("OUT_DIR"), "/model/all_rt.bpk"));
+        let mut model = all_rt::Model::<Flex>::new(&device);
+        let mut store = burn_store::BurnpackStore::from_static(aligned_bpk);
+        model
+            .load_from(&mut store)
+            .expect("Failed to load burnpack weights");
 
         let dummy_chunk = vec![0.0f32; super::INF_CHUNK * 2];
 
-        println!("Warming up (ORT session)...");
+        println!("Warming up (Burn Flex)...");
         let t_warmup = Instant::now();
-        let _ = super::infer_chunk(&mut session, &dummy_chunk);
+        let _ = super::infer_chunk(&model, &device, &dummy_chunk);
         println!("Warmup: {:.1}ms", t_warmup.elapsed().as_secs_f64() * 1000.0);
 
         for i in 0..3 {
             let t0 = Instant::now();
-            let _ = super::infer_chunk(&mut session, &dummy_chunk);
+            let _ = super::infer_chunk(&model, &device, &dummy_chunk);
             let ms = t0.elapsed().as_secs_f64() * 1000.0;
             println!(
                 "Run {i}: {ms:.1}ms / chunk ({:.1}s audio / {:.2}x RT)",
@@ -681,7 +694,6 @@ mod tests {
             total_samples, TARGET_SR, audio_duration_secs
         );
 
-        // Interleave stereo.
         let mut interleaved: Vec<f32> = Vec::with_capacity(total_samples * 2);
         for i in 0..total_samples {
             interleaved.push(left[i]);
@@ -691,10 +703,9 @@ mod tests {
         let remover = VocalRemover::<f32, 2, 44100>::new(Arc::new(AtomicBool::new(true)));
         let mut output_samples: Vec<f32> = Vec::new();
 
-        // Feed in chunks matching GEN_SIZE so the node emits output promptly.
-        let feed_chunk = GEN_SIZE * 2; // interleaved stereo frames
+        let feed_chunk = GEN_SIZE * 2;
 
-        // Warmup: trigger any first-run overhead before timing.
+        // Warmup.
         {
             let warmup_buf = AudioBuffer::new(interleaved[..feed_chunk].to_vec())
                 .expect("AudioBuffer creation failed");
@@ -719,7 +730,6 @@ mod tests {
             audio_duration_secs, elapsed, rt_ratio
         );
 
-        // Write WAV output.
         let spec = hound::WavSpec {
             channels: 2,
             sample_rate: TARGET_SR,

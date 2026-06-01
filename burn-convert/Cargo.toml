@@ -1,0 +1,38 @@
+[package]
+name = "burn-convert"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+burn = { version = "0.21", features = ["ndarray", "std"] }
+burn-ndarray = "0.21"
+burn-onnx = "0.21"
+burn-store = "0.21"
+anyhow = "1"
+cubecl = { version = "0.10", features = ["wgpu"] }
+
+[features]
+default = []
+direct-msl = ["burn-wgpu/cubecl-msl"]
+
+[dependencies.burn-wgpu]
+version = "0.21"
+default-features = true
+features = ["metal"]
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+ort = { version = "2.0.0-rc.12", features = ["coreml"] }
+ndarray = "0.17"
+
+[[bin]]
+name = "burn-convert"
+path = "src/main.rs"
+
+[[bin]]
+name = "compare-ndarray"
+path = "src/compare_ndarray.rs"
+
+[[bin]]
+name = "compare-wgpu"
+path = "src/compare_wgpu.rs"

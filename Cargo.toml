@@ -37,9 +37,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
 mp4-atom = { package = "media-mp4-atom", version = "0.10.1" }
-ort = { version = "2.0.0-rc.12", optional = true }
-ndarray = { version = "0.17", optional = true }
 gpu-fft = { version = "1.1.1", features = ["wgpu"], optional = true }
+include_bytes_aligned = "0.1"
+burn = { version = "0.21", features = ["flex", "std"], optional = true }
+burn-flex = { version = "0.21", optional = true }
+burn-store = { version = "0.21", optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 ndk-context = "0.1"
@@ -50,6 +52,7 @@ cubecl-common = { version = "=0.9.0", default-features = false, features = ["ser
 cubecl-common = { version = "=0.9.0", default-features = false, features = ["serde"] }
 
 [build-dependencies]
+burn-onnx = "0.21"
 
 [dev-dependencies]
 hound = "3.5"
@@ -61,4 +64,4 @@ default = ["desktop", "vocal-removal"]
 web = ["dioxus/default", "dioxus/web"]
 desktop = ["dioxus/default", "dioxus/desktop"]
 mobile = ["dioxus/default", "dioxus/mobile", "vocal-removal"]
-vocal-removal = ["dep:gpu-fft", "dep:ndarray", "dep:ort"]
+vocal-removal = ["dep:gpu-fft", "dep:burn", "dep:burn-flex", "dep:burn-store"]

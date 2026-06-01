@@ -1,4 +1,4 @@
-/// Build script: embeds the RT-DTT ONNX model into the binary when available.
+/// Build script: converts the RT-DTT ONNX model into Burn Rust code at build time.
 ///
 /// The ONNX model path defaults to the developer location but can be overridden
 /// with the `ALL_RT_ONNX_PATH` environment variable at build time:
@@ -7,10 +7,11 @@
 /// ALL_RT_ONNX_PATH=/path/to/all_rt.onnx cargo build
 /// ```
 ///
-/// When the file is found, the script sets `cfg(has_vocal_model)` so VocalRemover
-/// compiles with real inference via ONNX Runtime (ort).
-/// On any failure (missing file, …) a cargo warning is emitted and VocalRemover
-/// falls back to a pass-through node.
+/// `burn-onnx` generates into `$OUT_DIR/model/`:
+/// - `all_rt.rs`  — Rust source (include!-ed from vocal_remover.rs)
+/// - `all_rt.bpk` — BurnPack weight file (loaded at runtime)
+///
+/// Without the model file, the build succeeds but vocal removal becomes a pass-through.
 fn main() {
     let default_path = "assets/all_rt.onnx";
     let model_path = std::env::var("ALL_RT_ONNX_PATH").unwrap_or_else(|_| default_path.to_string());
@@ -36,18 +37,11 @@ fn main() {
         return;
     }
 
-    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
-    let dest = std::path::Path::new(&out_dir).join("all_rt.onnx");
+    // Convert ONNX → Burn. Panics on failure → build error.
+    burn_onnx::ModelGen::new()
+        .input(&model_path)
+        .out_dir("model/")
+        .run_from_script();
 
-    match std::fs::copy(&model_path, &dest) {
-        Ok(_) => {
-            println!("cargo:rustc-cfg=has_vocal_model");
-        }
-        Err(e) => {
-            println!(
-                "cargo:warning=VocalRemover: failed to copy ONNX model to OUT_DIR: {e}. \
-                 VocalRemover will pass audio through unmodified."
-            );
-        }
-    }
+    println!("cargo:rustc-cfg=has_vocal_model");
 }
