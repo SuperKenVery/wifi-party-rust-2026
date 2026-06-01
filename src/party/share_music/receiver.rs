@@ -102,6 +102,8 @@ struct BufferEntry<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     no_vocal_decoder: Arc<OpusDecoder<Sample, CHANNELS, SAMPLE_RATE>>,
     /// Pull-side selector for raw/no-vocal output buffers.
     output_selector: Arc<SynchronizedSelect<Sample, CHANNELS, SAMPLE_RATE>>,
+    /// Pre-decoded original audio buffer.
+    output_buffer_raw: SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE>,
     /// Pre-decoded sender-side vocal removal buffer. Push no-vocal decoded PCM here.
     output_buffer_no_vocal: SimpleBuffer<Sample, CHANNELS, SAMPLE_RATE>,
     /// Resets decoder/resampler state and both output buffers on seek.
@@ -111,6 +113,7 @@ struct BufferEntry<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     original_track: TrackReceiveState,
     no_vocal_track: TrackReceiveState,
     last_seen: Instant,
+    empty_since: Option<Instant>,
 
     // -- Playback state --
     playing: bool,
@@ -262,6 +265,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             output_raw_for_pull,
             output_removed_for_pull,
         ]));
+        let output_raw_for_push = (*output_buffer_raw_sink).clone();
         let output_removed_for_push = (*output_buffer_removed_sink).clone();
 
         self.buffers.insert(
@@ -270,12 +274,14 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                 original_pipeline_head,
                 no_vocal_decoder,
                 output_selector,
+                output_buffer_raw: output_raw_for_push,
                 output_buffer_no_vocal: output_removed_for_push,
                 reset_decoder_states: original_pipeline_reset,
                 meta,
                 original_track: TrackReceiveState::new(),
                 no_vocal_track: TrackReceiveState::new(),
                 last_seen: Instant::now(),
+                empty_since: Some(Instant::now()),
                 playing: false,
                 start_party_time: 0,
                 samples_played: 0,
@@ -338,7 +344,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                     seq,
                     no_vocal_seq,
                     party_clock_time,
-                    (party_clock_time - (self.party_now_fn)()) as f64 / 1000000.0,
+                    (party_clock_time as f64 - (self.party_now_fn)() as f64) / 1000000.0,
                 );
             }
             SyncedControl::Pause { .. } => {
@@ -359,7 +365,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                     key,
                     enabled,
                     party_clock_time,
-                    (party_clock_time - (self.party_now_fn)()) as f64 / 1000000.0
+                    (party_clock_time as f64 - (self.party_now_fn)() as f64) / 1000000.0
                 );
             }
         }
@@ -622,14 +628,24 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     pub fn cleanup_stale(&self) {
         let now = Instant::now();
         self.buffers.retain(|key, entry| {
-            let timed_out = now.duration_since(entry.last_seen) >= SYNCED_STREAM_TIMEOUT;
-            if timed_out {
+            let buffer_empty =
+                entry.output_buffer_raw.is_empty() && entry.output_buffer_no_vocal.is_empty();
+            if buffer_empty {
+                entry.empty_since.get_or_insert(now);
+            } else {
+                entry.empty_since = None;
+            }
+
+            let remove = entry.empty_since.is_some_and(|empty_since| {
+                now.duration_since(empty_since) >= SYNCED_STREAM_TIMEOUT
+            });
+            if remove {
                 info!(
-                    "Removing synced buffer for {} stream {} (timeout)",
+                    "Removing synced buffer for {} stream {} (empty timeout)",
                     key.source_addr, key.stream_id
                 );
             }
-            !timed_out
+            !remove
         });
     }
 

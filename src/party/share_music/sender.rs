@@ -22,7 +22,7 @@ use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::audio::decoders::{CompressedPacket, FftResampler, Interleaver, SymphoniaDecoder};
 use crate::audio::effects::DecodedVocalRemover;
@@ -73,7 +73,7 @@ impl MusicStream {
         network_sender: NetworkSender,
         synced_stream: Arc<SyncedAudioStreamManager<Sample, CHANNELS, SAMPLE_RATE>>,
         progress: Arc<MusicStreamProgress>,
-        initial_vocal_removal_enabled: bool,
+        vocal_removal_enabled: Arc<AtomicBool>,
     ) -> Result<Self> {
         info!("Starting music stream for: {}", file_name);
 
@@ -98,6 +98,9 @@ impl MusicStream {
             total_samples: 0,
             codec_params,
         };
+        let no_vocal_encoder =
+            NoVocalOpusTrack::<Sample, CHANNELS, SAMPLE_RATE>::new(meta.codec_params.clone())?;
+
         {
             let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&meta)
                 .expect("SyncedMeta ser")
@@ -116,6 +119,11 @@ impl MusicStream {
             seq: 1,
             no_vocal_seq: 1,
         };
+        info!(
+            "MusicStream: Sending start command, start_at={}, now={}",
+            start_at,
+            ntp_service.party_now()
+        );
         {
             let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&control)
                 .expect("SyncedControl ser")
@@ -129,7 +137,7 @@ impl MusicStream {
 
         let control = SyncedControl::SetVocalRemoval {
             stream_id,
-            enabled: initial_vocal_removal_enabled,
+            enabled: vocal_removal_enabled.load(Ordering::Relaxed),
             party_clock_time: start_at,
         };
         {
@@ -142,9 +150,6 @@ impl MusicStream {
             });
         }
         synced_stream.receive_control(LOCAL_ADDR, control);
-
-        let no_vocal_encoder =
-            NoVocalOpusTrack::<Sample, CHANNELS, SAMPLE_RATE>::new(meta.codec_params.clone())?;
 
         let ctx = StreamContext {
             source,
@@ -162,6 +167,7 @@ impl MusicStream {
             is_complete: false,
             next_original_seq_to_send: 1,
             next_no_vocal_seq_to_send: 1,
+            next_original_seq_for_no_vocal: 1,
             last_original_send_time: Instant::now(),
             last_no_vocal_send_time: Instant::now(),
             retransmit_queue: VecDeque::new(),
@@ -276,7 +282,7 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
             deps.network_sender,
             deps.synced_stream,
             progress,
-            deps.vocal_removal_enabled.load(Ordering::Relaxed),
+            deps.vocal_removal_enabled,
         )?;
 
         self.push(music_stream);
@@ -352,7 +358,7 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
             .vocal_removal_enabled
             .store(enabled, Ordering::Relaxed);
 
-        let switch_at = self.deps.ntp_service.party_now() + 200_000;
+        let switch_at = self.deps.ntp_service.party_now();
         let control = SyncedControl::SetVocalRemoval {
             stream_id,
             enabled,
@@ -538,15 +544,19 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         };
 
         let Some(model_rate) = self.to_model_rate.process(decoded) else {
+            warn!("share_music: Failed to process music data at step to_model_rate");
             return Vec::new();
         };
         let Some(no_vocal) = self.vocal_remover.process(model_rate) else {
+            warn!("share_music: Failed to process music data at step vocal_remover");
             return Vec::new();
         };
         let Some(output_rate) = self.to_output_rate.process(no_vocal) else {
+            warn!("share_music: Failed to process music data at step to_output_rate");
             return Vec::new();
         };
         let Some(interleaved) = self.interleaver.process(output_rate) else {
+            warn!("share_music: Failed to process music data at step interleaver");
             return Vec::new();
         };
 
@@ -612,6 +622,7 @@ struct StreamContext<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RA
     is_complete: bool,
     next_original_seq_to_send: u64,
     next_no_vocal_seq_to_send: u64,
+    next_original_seq_for_no_vocal: u64,
     last_original_send_time: Instant,
     last_no_vocal_send_time: Instant,
     retransmit_queue: VecDeque<(SyncedTrack, u64)>,
@@ -776,7 +787,7 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
         let target_output_samples = pos_ms * SAMPLE_RATE as u64 / 1000;
         let no_vocal_seq = self.find_no_vocal_seq_at_samples(1, target_output_samples);
 
-        // If seeking beyond what we've read, seek the format reader
+        // If seeking beyond what we've read, seek the format reader.
         if seq > self.frames_read {
             if let Err(e) = self.source.seek(target_samples) {
                 warn!("Failed to seek: {}", e);
@@ -784,9 +795,9 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
                 info!("Seeked to {} samples (seq {})", target_samples, seq);
                 self.frames_read = seq - 1;
                 self.is_complete = false;
-                self.no_vocal_encoder.reset(no_vocal_seq);
             }
         }
+        self.no_vocal_encoder.reset(no_vocal_seq);
 
         let control = SyncedControl::Start {
             stream_id: self.meta.stream_id,
@@ -812,6 +823,7 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
         self.last_pause_no_vocal_seq = no_vocal_seq;
         self.next_original_seq_to_send = seq;
         self.next_no_vocal_seq_to_send = no_vocal_seq;
+        self.next_original_seq_for_no_vocal = seq;
     }
 
     fn find_seq_at_samples(&self, start_seq: u64, target_samples: u64) -> u64 {
@@ -846,9 +858,7 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
                         self.frame_dur_us =
                             Some(raw.dur as u64 * 1_000_000 / self.sample_rate() as u64);
                     }
-                    for (seq, no_vocal_packet) in self.no_vocal_encoder.process_raw(&raw) {
-                        self.no_vocal_vault.insert(seq, no_vocal_packet);
-                    }
+
                     self.original_vault.insert(self.frames_read, raw);
                 }
                 Ok(None) => {
@@ -866,7 +876,10 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
                     });
                     break;
                 }
-                Err(_) => break,
+                Err(e) => {
+                    error!("Failed to read packet in share_music: {:#?}", e);
+                    break;
+                }
             }
         }
     }
@@ -897,6 +910,25 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
     fn send_packets(&mut self) {
         self.send_original_packets();
         self.send_no_vocal_packets();
+    }
+
+    fn process_no_vocal_packets_until(&mut self, target_no_vocal_seq: u64) {
+        while !self.no_vocal_vault.contains_key(&target_no_vocal_seq) {
+            let original_seq = self.next_original_seq_for_no_vocal;
+            let Some(raw) = self
+                .original_vault
+                .get(&original_seq)
+                .map(|packet| packet.clone())
+            else {
+                break;
+            };
+
+            for (seq, no_vocal_packet) in self.no_vocal_encoder.process_raw(&raw) {
+                self.no_vocal_vault.insert(seq, no_vocal_packet);
+            }
+
+            self.next_original_seq_for_no_vocal += 1;
+        }
     }
 
     fn send_original_packets(&mut self) {
@@ -957,6 +989,9 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
         if frames_to_send == 0 {
             return;
         }
+
+        let target_seq = self.next_no_vocal_seq_to_send + frames_to_send - 1;
+        self.process_no_vocal_packets_until(target_seq);
 
         for _ in 0..frames_to_send {
             if let Some(packet) = self.no_vocal_vault.get(&self.next_no_vocal_seq_to_send) {

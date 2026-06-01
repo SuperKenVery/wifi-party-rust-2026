@@ -38,6 +38,10 @@ impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     pub fn reset(&self) {
         self.queue.lock().unwrap().clear();
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.queue.lock().unwrap().is_empty()
+    }
 }
 
 impl<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> Default
