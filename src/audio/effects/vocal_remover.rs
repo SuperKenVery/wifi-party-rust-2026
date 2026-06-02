@@ -1,10 +1,10 @@
-//! Vocal remover effect using the RT-DTT model via Burn (Flex CPU backend) + gpu-fft.
+//! Vocal remover effect using the RT-DTT model via Burn (Wgpu backend) + gpu-fft.
 //!
 //! ## How it works
 //!
-//! At **build time** `build.rs` converts `all_rt.onnx` into Burn Rust code
-//! (sets `cfg(has_vocal_model)`).  At **run time** the Flex backend runs the
-//! separation network on CPU, and `gpu-fft` (CubeCL / wgpu) does STFT/iSTFT on GPU.
+//! At **build time** `wifi-party-vocal-model` converts `all_rt.onnx` into Burn
+//! Rust code. At **run time** the Wgpu backend runs the
+//! separation network, and `gpu-fft` (CubeCL / wgpu) does STFT/iSTFT.
 //!
 //! When the model is not available at build time (no ONNX file found) the node
 //! compiles as a pass-through and emits a tracing warning on first use.
@@ -17,20 +17,15 @@
 //! 2. GPU STFT: batch all frames × channels with `gpu_fft::fft_batch`.
 //!    Periodic Hann window, `n_fft=1024`, `hop=512`, `center=True`.
 //! 3. Pack first `DIM_F=384` bins into a Burn tensor `[1,4,384,64]`.
-//! 4. Inference with Burn Flex backend → output `[1,4,4,384,64]`.
+//! 4. Inference with Burn Wgpu backend → output `[1,4,4,384,64]`.
 //! 5. GPU iSTFT: reconstruct the vocal waveform with `gpu_fft::ifft_batch` + OLA.
 //! 6. `instrumental = mix − vocals` (source index 3), trim overlap.
 
-use burn::backend::Flex;
-use burn::tensor::{Tensor, TensorData};
-use burn_flex::FlexDevice;
-use burn_store::ModuleSnapshot;
-use include_bytes_aligned::include_bytes_aligned;
-
-#[cfg(has_vocal_model)]
-pub mod all_rt {
-    include!(concat!(env!("OUT_DIR"), "/model/all_rt.rs"));
-}
+#[cfg(feature = "vocal-removal")]
+use cubecl::wgpu::{WgpuDevice as FftWgpuDevice, WgpuRuntime};
+use tracing::debug;
+#[cfg(feature = "vocal-removal")]
+use wifi_party_vocal_model::RtDttModel;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -57,18 +52,15 @@ const VOCALS_IDX: usize = 3;
 const MODEL_SAMPLE_RATE: u32 = 44_100;
 const MODEL_CHANNELS: usize = 2;
 
-/// The Burn device shared by all model instances.
-///
-/// Created fresh per `State` so each instance has its own allocator.
-#[cfg(has_vocal_model)]
-fn default_device() -> FlexDevice {
-    FlexDevice::default()
+#[cfg(feature = "vocal-removal")]
+fn default_fft_device() -> FftWgpuDevice {
+    FftWgpuDevice::default()
 }
 
 // ── Hann window ───────────────────────────────────────────────────────────────
 
 /// Periodic Hann window matching `torch.hann_window(N, periodic=True)`.
-#[cfg(has_vocal_model)]
+#[cfg(feature = "vocal-removal")]
 fn hann_window(size: usize) -> Vec<f32> {
     (0..size)
         .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / size as f32).cos()))
@@ -81,8 +73,8 @@ fn hann_window(size: usize) -> Vec<f32> {
 ///
 /// Returns `stft[ch * DIM_T + frame] = (real_1024, imag_1024)`.
 /// (`gpu_fft::fft` zero-pads to next power of 2; 1024 is already a power of 2.)
-#[cfg(has_vocal_model)]
-fn stft_gpu(left: &[f32], right: &[f32]) -> Vec<(Vec<f32>, Vec<f32>)> {
+#[cfg(feature = "vocal-removal")]
+fn stft_gpu(fft_device: &FftWgpuDevice, left: &[f32], right: &[f32]) -> Vec<(Vec<f32>, Vec<f32>)> {
     debug_assert_eq!(left.len(), INF_CHUNK);
     debug_assert_eq!(right.len(), INF_CHUNK);
 
@@ -107,7 +99,7 @@ fn stft_gpu(left: &[f32], right: &[f32]) -> Vec<(Vec<f32>, Vec<f32>)> {
     }
 
     // Batch FFT on GPU — returns one (real, imag) pair per signal, each length 1024.
-    gpu_fft::fft_batch(&signals)
+    gpu_fft::fft::fft_batch::<WgpuRuntime>(fft_device, &signals)
 }
 
 // ── iSTFT (GPU) ───────────────────────────────────────────────────────────────
@@ -116,8 +108,8 @@ fn stft_gpu(left: &[f32], right: &[f32]) -> Vec<(Vec<f32>, Vec<f32>)> {
 ///
 /// `spectrograms[src * 2 + ch]` = flat `[N_FREQS × DIM_T]` (real, imag) pair.
 /// Returns `waveforms[src * 2 + ch]` = `INF_CHUNK` samples.
-#[cfg(has_vocal_model)]
-fn istft_gpu(spectrograms: &[(Vec<f32>, Vec<f32>)]) -> Vec<Vec<f32>> {
+#[cfg(feature = "vocal-removal")]
+fn istft_gpu(fft_device: &FftWgpuDevice, spectrograms: &[(Vec<f32>, Vec<f32>)]) -> Vec<Vec<f32>> {
     let n_items = spectrograms.len(); // N_SOURCES * 2
 
     // Build full conjugate-symmetric N_FFT-point spectra for each frame.
@@ -157,7 +149,7 @@ fn istft_gpu(spectrograms: &[(Vec<f32>, Vec<f32>)]) -> Vec<Vec<f32>> {
     // Output: each element is Vec<f32> of length 2*N_FFT = 2048.
     //   [0..N_FFT]       = real part (already 1/N normalised by gpu-fft)
     //   [N_FFT..2*N_FFT] = imag part (≈ 0 for symmetric spectra)
-    let ifft_out = gpu_fft::ifft_batch(&ifft_in);
+    let ifft_out = gpu_fft::ifft::ifft_batch::<WgpuRuntime>(fft_device, &ifft_in);
 
     // Overlap-add on CPU (sequential by nature).
     let window = hann_window(N_FFT);
@@ -198,8 +190,8 @@ fn istft_gpu(spectrograms: &[(Vec<f32>, Vec<f32>)]) -> Vec<Vec<f32>> {
 /// Process one INF_CHUNK stereo chunk through the separation model.
 ///
 /// Returns `GEN_SIZE * 2` interleaved stereo f32 samples (vocal-removed).
-#[cfg(has_vocal_model)]
-fn infer_chunk(model: &all_rt::Model<Flex>, device: &FlexDevice, chunk: &[f32]) -> Vec<f32> {
+#[cfg(feature = "vocal-removal")]
+fn infer_chunk(model: &RtDttModel, fft_device: &FftWgpuDevice, chunk: &[f32]) -> Vec<f32> {
     debug_assert_eq!(chunk.len(), INF_CHUNK * 2);
 
     // 1. De-interleave.
@@ -211,7 +203,7 @@ fn infer_chunk(model: &all_rt::Model<Flex>, device: &FlexDevice, chunk: &[f32]) 
     }
 
     // 2. GPU STFT.
-    let stft = stft_gpu(&left, &right);
+    let stft = stft_gpu(fft_device, &left, &right);
 
     // 3. Pack into input layout: (1, 4, DIM_F, DIM_T)
     //    Channel layout: [ch0_re, ch0_im, ch1_re, ch1_im]
@@ -229,11 +221,7 @@ fn infer_chunk(model: &all_rt::Model<Flex>, device: &FlexDevice, chunk: &[f32]) 
     // 4. Run Burn inference.
     //    Input:  [1, 4, DIM_F, DIM_T]
     //    Output: [1, 4, 4, DIM_F, DIM_T]  (batch, source, cri, freq, time)
-    let input =
-        Tensor::<Flex, 4>::from_data(TensorData::new(onnx_in, [1, 4, DIM_F, DIM_T]), device);
-    let output = model.forward(input);
-    let output_data = output.into_data();
-    let out_vec: Vec<f32> = output_data.to_vec().expect("burn tensor to vec");
+    let out_vec = model.forward(onnx_in, [1, 4, DIM_F, DIM_T]);
 
     // 5. Unpack the vocal source spectrogram.
     let src_stride = 4 * DIM_F * DIM_T; // 4 * 384 * 64 = 98 304
@@ -256,7 +244,7 @@ fn infer_chunk(model: &all_rt::Model<Flex>, device: &FlexDevice, chunk: &[f32]) 
     }
 
     // 6. GPU iSTFT for vocal channels → INF_CHUNK samples each.
-    let vocal_waveforms = istft_gpu(&vocal_specs);
+    let vocal_waveforms = istft_gpu(fft_device, &vocal_specs);
 
     // 7. Instrumental = mix − vocals.
     let mut output = vec![0.0f32; INF_CHUNK * 2];
@@ -283,8 +271,10 @@ fn infer_chunk(model: &all_rt::Model<Flex>, device: &FlexDevice, chunk: &[f32]) 
 // ── State ─────────────────────────────────────────────────────────────────────
 
 struct State {
-    #[cfg(has_vocal_model)]
-    model: all_rt::Model<Flex>,
+    #[cfg(feature = "vocal-removal")]
+    model: Option<RtDttModel>,
+    #[cfg(feature = "vocal-removal")]
+    fft_device: FftWgpuDevice,
     input_buffer: Vec<f32>,
     output_buffer: Vec<f32>,
 }
@@ -295,20 +285,23 @@ impl State {
         self.output_buffer.clear();
     }
 
-    #[cfg(has_vocal_model)]
+    #[cfg(feature = "vocal-removal")]
     fn process_impl(&mut self, chunk_data: &[f32]) {
+        let Some(model) = self.model.as_ref() else {
+            self.output_buffer.extend_from_slice(chunk_data);
+            return;
+        };
+
         let chunk_samples = GEN_SIZE * MODEL_CHANNELS;
         let mut chunk = vec![0.0f32; INF_CHUNK * MODEL_CHANNELS];
         let off = OVERLAP * MODEL_CHANNELS;
         chunk[off..off + chunk_samples].copy_from_slice(chunk_data);
 
-        // Each State needs its own device for thread safety.
-        let device = default_device();
-        let processed = infer_chunk(&self.model, &device, &chunk);
+        let processed = infer_chunk(model, &self.fft_device, &chunk);
         self.output_buffer.extend_from_slice(&processed);
     }
 
-    #[cfg(not(has_vocal_model))]
+    #[cfg(not(feature = "vocal-removal"))]
     fn process_impl(&mut self, chunk_data: &[f32]) {
         self.output_buffer.extend_from_slice(chunk_data);
     }
@@ -328,6 +321,18 @@ impl State {
             return None;
         }
         Some(self.output_buffer.drain(..out_len).collect())
+    }
+
+    /// Zero-pad the remaining input to a full chunk, run inference, and return
+    /// everything in the output buffer. Called when the source is exhausted.
+    fn flush_interleaved(&mut self) -> Vec<f32> {
+        let chunk_samples = GEN_SIZE * MODEL_CHANNELS;
+        if !self.input_buffer.is_empty() {
+            self.input_buffer.resize(chunk_samples, 0.0);
+            let chunk_data: Vec<f32> = self.input_buffer.drain(..chunk_samples).collect();
+            self.process_impl(&chunk_data);
+        }
+        std::mem::take(&mut self.output_buffer)
     }
 }
 
@@ -358,7 +363,7 @@ fn should_process<const CHANNELS: usize, const SAMPLE_RATE: u32>(
 
 /// Removes vocals from stereo 44 100 Hz f32 audio using RT-DTT + GPU acceleration.
 ///
-/// - **Inference**: Burn Flex (pure-Rust SIMD-accelerated CPU backend).
+/// - **Inference**: Burn Wgpu
 /// - **STFT / iSTFT**: gpu-fft (CubeCL / wgpu — GPU accelerated).
 /// - **Latency**: ≈ 0.71 s (one `GEN_SIZE = 31 232` sample chunk at 44 100 Hz).
 pub struct VocalRemover<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
@@ -372,24 +377,14 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     VocalRemover<Sample, CHANNELS, SAMPLE_RATE>
 {
     pub fn new(enabled: Arc<AtomicBool>) -> Self {
-        #[cfg(has_vocal_model)]
-        let state = {
-            let device = default_device();
-            // Zero-copy aligned include of burnpack weights.
-            let aligned_bpk: &'static [u8] =
-                include_bytes_aligned!(32, concat!(env!("OUT_DIR"), "/model/all_rt.bpk"));
-            let mut model = all_rt::Model::<Flex>::new(&device);
-            let mut store = burn_store::BurnpackStore::from_static(aligned_bpk);
-            model
-                .load_from(&mut store)
-                .expect("Failed to load burnpack weights");
-            State {
-                model,
-                input_buffer: Vec::new(),
-                output_buffer: Vec::new(),
-            }
+        #[cfg(feature = "vocal-removal")]
+        let state = State {
+            model: RtDttModel::new(),
+            fft_device: default_fft_device(),
+            input_buffer: Vec::new(),
+            output_buffer: Vec::new(),
         };
-        #[cfg(not(has_vocal_model))]
+        #[cfg(not(feature = "vocal-removal"))]
         let state = State {
             input_buffer: Vec::new(),
             output_buffer: Vec::new(),
@@ -448,24 +443,18 @@ pub struct DecodedVocalRemover<const CHANNELS: usize, const SAMPLE_RATE: u32> {
 
 impl<const CHANNELS: usize, const SAMPLE_RATE: u32> DecodedVocalRemover<CHANNELS, SAMPLE_RATE> {
     pub fn new(enabled: Arc<AtomicBool>) -> Self {
-        #[cfg(has_vocal_model)]
-        let state = {
-            let device = default_device();
-            // Zero-copy aligned include of burnpack weights.
-            let aligned_bpk: &'static [u8] =
-                include_bytes_aligned!(32, concat!(env!("OUT_DIR"), "/model/all_rt.bpk"));
-            let mut model = all_rt::Model::<Flex>::new(&device);
-            let mut store = burn_store::BurnpackStore::from_static(aligned_bpk);
-            model
-                .load_from(&mut store)
-                .expect("Failed to load burnpack weights");
-            State {
-                model,
-                input_buffer: Vec::new(),
-                output_buffer: Vec::new(),
-            }
+        debug!(
+            "DecodedVocalRemover::new, enabled={}",
+            enabled.load(Ordering::Relaxed)
+        );
+        #[cfg(feature = "vocal-removal")]
+        let state = State {
+            model: RtDttModel::new(),
+            fft_device: default_fft_device(),
+            input_buffer: Vec::new(),
+            output_buffer: Vec::new(),
         };
-        #[cfg(not(has_vocal_model))]
+        #[cfg(not(feature = "vocal-removal"))]
         let state = State {
             input_buffer: Vec::new(),
             output_buffer: Vec::new(),
@@ -481,6 +470,27 @@ impl<const CHANNELS: usize, const SAMPLE_RATE: u32> DecodedVocalRemover<CHANNELS
     pub fn reset(&self) {
         self.state.lock().unwrap().reset();
     }
+
+    /// Flush remaining buffered input (zero-padded) and return whatever audio
+    /// the model produces. Call this when the source is exhausted and no more
+    /// input will arrive.
+    pub fn flush(&self) -> Option<DecodedAudio> {
+        if !should_process::<CHANNELS, SAMPLE_RATE>(&self.enabled, &self.invalid_config_warned) {
+            return None;
+        }
+        let flushed = self.state.lock().unwrap().flush_interleaved();
+        if flushed.is_empty() {
+            return None;
+        }
+        let num_frames = flushed.len() / CHANNELS;
+        let mut channels = vec![Vec::with_capacity(num_frames); CHANNELS];
+        for frame in flushed.chunks_exact(CHANNELS) {
+            for ch in 0..CHANNELS {
+                channels[ch].push(frame[ch]);
+            }
+        }
+        Some(DecodedAudio { channels })
+    }
 }
 
 impl<const CHANNELS: usize, const SAMPLE_RATE: u32> Node
@@ -491,11 +501,13 @@ impl<const CHANNELS: usize, const SAMPLE_RATE: u32> Node
 
     fn process(&self, input: Self::Input) -> Option<Self::Output> {
         if !should_process::<CHANNELS, SAMPLE_RATE>(&self.enabled, &self.invalid_config_warned) {
+            debug!("DecodedVocalRemover::process should not process");
             self.reset();
             return Some(input);
         }
 
         let num_frames = input.channels.first().map_or(0, |channel| channel.len());
+        debug!("DecodedVocalRemover::process num_frames={}", num_frames);
         if num_frames == 0 {
             return None;
         }
@@ -509,6 +521,7 @@ impl<const CHANNELS: usize, const SAMPLE_RATE: u32> Node
 
         let mut state = self.state.lock().unwrap();
         state.process_interleaved(&interleaved);
+        debug!("DecodedVocalRemover::process draining interleaved");
         let output = state.drain_interleaved(num_frames * CHANNELS)?;
 
         let mut channels = (0..CHANNELS)
@@ -644,28 +657,26 @@ mod tests {
         (out_l, out_r)
     }
 
-    #[cfg(has_vocal_model)]
+    #[cfg(feature = "vocal-removal")]
     #[test]
     fn infer_chunk_timing() {
-        let device = super::default_device();
-        let aligned_bpk: &'static [u8] =
-            include_bytes_aligned!(32, concat!(env!("OUT_DIR"), "/model/all_rt.bpk"));
-        let mut model = all_rt::Model::<Flex>::new(&device);
-        let mut store = burn_store::BurnpackStore::from_static(aligned_bpk);
-        model
-            .load_from(&mut store)
-            .expect("Failed to load burnpack weights");
+        let Some(model) = RtDttModel::new() else {
+            eprintln!("vocal model is not available; skipping timing test");
+            return;
+        };
 
         let dummy_chunk = vec![0.0f32; super::INF_CHUNK * 2];
 
-        println!("Warming up (Burn Flex)...");
+        println!("Warming up (Burn Wgpu)...");
         let t_warmup = Instant::now();
-        let _ = super::infer_chunk(&model, &device, &dummy_chunk);
+        let fft_device = super::default_fft_device();
+        let _ = super::infer_chunk(&model, &fft_device, &dummy_chunk);
         println!("Warmup: {:.1}ms", t_warmup.elapsed().as_secs_f64() * 1000.0);
+        profile_infer_chunk(&model, &fft_device, &dummy_chunk);
 
         for i in 0..3 {
             let t0 = Instant::now();
-            let _ = super::infer_chunk(&model, &device, &dummy_chunk);
+            let _ = super::infer_chunk(&model, &fft_device, &dummy_chunk);
             let ms = t0.elapsed().as_secs_f64() * 1000.0;
             println!(
                 "Run {i}: {ms:.1}ms / chunk ({:.1}s audio / {:.2}x RT)",
@@ -673,6 +684,96 @@ mod tests {
                 (super::GEN_SIZE as f64 / 44100.0) / t0.elapsed().as_secs_f64()
             );
         }
+    }
+
+    #[cfg(feature = "vocal-removal")]
+    fn profile_infer_chunk(model: &RtDttModel, fft_device: &FftWgpuDevice, chunk: &[f32]) {
+        let total = Instant::now();
+
+        let t = Instant::now();
+        let mut left = vec![0.0f32; super::INF_CHUNK];
+        let mut right = vec![0.0f32; super::INF_CHUNK];
+        for i in 0..super::INF_CHUNK {
+            left[i] = chunk[i * 2];
+            right[i] = chunk[i * 2 + 1];
+        }
+        let deinterleave_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        let t = Instant::now();
+        let stft = super::stft_gpu(fft_device, &left, &right);
+        let stft_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        let t = Instant::now();
+        let mut onnx_in = vec![0.0f32; 4 * super::DIM_F * super::DIM_T];
+        for ch in 0..2usize {
+            for frame_idx in 0..super::DIM_T {
+                let (ref re, ref im) = stft[ch * super::DIM_T + frame_idx];
+                for freq in 0..super::DIM_F {
+                    onnx_in[(ch * 2) * super::DIM_F * super::DIM_T
+                        + freq * super::DIM_T
+                        + frame_idx] = re[freq];
+                    onnx_in[(ch * 2 + 1) * super::DIM_F * super::DIM_T
+                        + freq * super::DIM_T
+                        + frame_idx] = im[freq];
+                }
+            }
+        }
+        let pack_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        let t = Instant::now();
+        let out_vec = model.forward(onnx_in, [1, 4, super::DIM_F, super::DIM_T]);
+        let forward_readback_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        let t = Instant::now();
+        let src_stride = 4 * super::DIM_F * super::DIM_T;
+        let cri_stride = super::DIM_F * super::DIM_T;
+        let vocal_stride = super::VOCALS_IDX * src_stride;
+        let mut vocal_specs: Vec<(Vec<f32>, Vec<f32>)> = Vec::with_capacity(2);
+        for ch in 0..2usize {
+            let mut re_bins = vec![0.0f32; super::N_FREQS * super::DIM_T];
+            let mut im_bins = vec![0.0f32; super::N_FREQS * super::DIM_T];
+            for freq in 0..super::DIM_F {
+                for t in 0..super::DIM_T {
+                    re_bins[freq * super::DIM_T + t] =
+                        out_vec[vocal_stride + (ch * 2) * cri_stride + freq * super::DIM_T + t];
+                    im_bins[freq * super::DIM_T + t] =
+                        out_vec[vocal_stride + (ch * 2 + 1) * cri_stride + freq * super::DIM_T + t];
+                }
+            }
+            vocal_specs.push((re_bins, im_bins));
+        }
+        let unpack_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        let t = Instant::now();
+        let vocal_waveforms = super::istft_gpu(fft_device, &vocal_specs);
+        let istft_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        let t = Instant::now();
+        let mut output = vec![0.0f32; super::INF_CHUNK * 2];
+        for i in 0..super::INF_CHUNK {
+            output[i * 2] = (left[i] - vocal_waveforms[0][i]).clamp(-1.0, 1.0);
+            output[i * 2 + 1] = (right[i] - vocal_waveforms[1][i]).clamp(-1.0, 1.0);
+        }
+        let mut trimmed = Vec::with_capacity(super::GEN_SIZE * 2);
+        for i in super::OVERLAP..super::OVERLAP + super::GEN_SIZE {
+            trimmed.push(output[i * 2]);
+            trimmed.push(output[i * 2 + 1]);
+        }
+        let post_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        println!(
+            "Profile: total={:.1}ms deinterleave={:.1}ms stft={:.1}ms pack={:.1}ms forward+readback={:.1}ms unpack={:.1}ms istft={:.1}ms post={:.1}ms",
+            total.elapsed().as_secs_f64() * 1000.0,
+            deinterleave_ms,
+            stft_ms,
+            pack_ms,
+            forward_readback_ms,
+            unpack_ms,
+            istft_ms,
+            post_ms
+        );
+
+        drop(trimmed);
     }
 
     #[test]

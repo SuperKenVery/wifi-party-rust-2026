@@ -22,7 +22,7 @@ use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::audio::decoders::{CompressedPacket, FftResampler, Interleaver, SymphoniaDecoder};
 use crate::audio::effects::DecodedVocalRemover;
@@ -536,27 +536,30 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     }
 
     fn process_raw(&mut self, raw: &RawPacket) -> Vec<(u64, RawPacket)> {
+        debug!("process_raw: got raw packet");
+
         let Some(decoded) = self.decoder.process(CompressedPacket {
             dur: raw.dur,
             data: raw.data.clone(),
         }) else {
+            warn!("process_raw: Failed to decode raw data");
             return Vec::new();
         };
 
         let Some(model_rate) = self.to_model_rate.process(decoded) else {
-            warn!("share_music: Failed to process music data at step to_model_rate");
+            warn!("process_raw: Failed to process music data at step to_model_rate");
             return Vec::new();
         };
         let Some(no_vocal) = self.vocal_remover.process(model_rate) else {
-            warn!("share_music: Failed to process music data at step vocal_remover");
+            debug!("process_raw: waiting for vocal_remover output");
             return Vec::new();
         };
         let Some(output_rate) = self.to_output_rate.process(no_vocal) else {
-            warn!("share_music: Failed to process music data at step to_output_rate");
+            warn!("process_raw: Failed to process music data at step to_output_rate");
             return Vec::new();
         };
         let Some(interleaved) = self.interleaver.process(output_rate) else {
-            warn!("share_music: Failed to process music data at step interleaver");
+            warn!("process_raw: Failed to process music data at step interleaver");
             return Vec::new();
         };
 
@@ -938,6 +941,10 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
         let frame_dur_us = self.frame_dur_us.unwrap_or(20_000);
         let frames_to_send = (elapsed_us * SEND_RATE_MULTIPLIER as u64) / frame_dur_us;
 
+        // debug!(
+        //     "Sending original packets. frames_to_send={}",
+        //     frames_to_send
+        // );
         if frames_to_send == 0 {
             return;
         }
@@ -986,6 +993,10 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
         let frame_dur_us = NO_VOCAL_OPUS_FRAME_MS as u64 * 1000;
         let frames_to_send = (elapsed_us * SEND_RATE_MULTIPLIER as u64) / frame_dur_us;
 
+        // debug!(
+        //     "Sending no vocal packets, frames_to_send={}",
+        //     frames_to_send
+        // );
         if frames_to_send == 0 {
             return;
         }
@@ -993,6 +1004,7 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
         let target_seq = self.next_no_vocal_seq_to_send + frames_to_send - 1;
         self.process_no_vocal_packets_until(target_seq);
 
+        let mut sent_frames = 0u64;
         for _ in 0..frames_to_send {
             if let Some(packet) = self.no_vocal_vault.get(&self.next_no_vocal_seq_to_send) {
                 let seq = self.next_no_vocal_seq_to_send;
@@ -1021,13 +1033,22 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
                 self.synced_stream.receive(LOCAL_ADDR, local);
 
                 self.next_no_vocal_seq_to_send += 1;
+                sent_frames += 1;
             } else if self.is_complete {
+                info!("send_no_vocal_packets: completed, not sending anymore");
                 break;
             } else {
+                // warn!("send_no_vocal_packets: Failed to get packet for sending");
                 break;
             }
         }
-        self.last_no_vocal_send_time = now;
+
+        if sent_frames == frames_to_send {
+            self.last_no_vocal_send_time = now;
+        } else if sent_frames > 0 {
+            let advanced_us = sent_frames * frame_dur_us / SEND_RATE_MULTIPLIER as u64;
+            self.last_no_vocal_send_time += Duration::from_micros(advanced_us);
+        }
     }
 }
 

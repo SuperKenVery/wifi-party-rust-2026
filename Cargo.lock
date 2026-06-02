@@ -2821,6 +2821,7 @@ dependencies = [
  "cfg_aliases",
  "cubecl-common 0.10.0",
  "cubecl-core 0.10.0",
+ "cubecl-cpp 0.10.0",
  "cubecl-ir 0.10.0",
  "cubecl-runtime 0.10.0",
  "derive-new",
@@ -11916,13 +11917,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "audiopus_sys",
- "burn",
- "burn-flex",
- "burn-onnx",
- "burn-store",
  "chrono",
  "cpal",
  "crossbeam",
+ "cubecl 0.9.0",
  "cubecl-common 0.9.0",
  "dashmap",
  "dasp_sample",
@@ -11930,7 +11928,6 @@ dependencies = [
  "dioxus",
  "gpu-fft",
  "hound",
- "include_bytes_aligned",
  "jni 0.21.1",
  "libc",
  "media-mp4-atom",
@@ -11956,6 +11953,19 @@ dependencies = [
  "url",
  "uuid",
  "wgpu 29.0.1",
+ "wifi-party-vocal-model",
+]
+
+[[package]]
+name = "wifi-party-vocal-model"
+version = "0.1.0"
+dependencies = [
+ "burn",
+ "burn-onnx",
+ "burn-store",
+ "burn-wgpu",
+ "include_bytes_aligned",
+ "tracing",
 ]
 
 [[package]]
