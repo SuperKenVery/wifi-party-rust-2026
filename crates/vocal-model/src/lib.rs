@@ -1,14 +1,17 @@
 use burn::tensor::{Tensor, TensorData};
-use burn_store::ModuleSnapshot;
+use burn_store::{BurnpackStore, HalfPrecisionAdapter, ModuleSnapshot};
 use burn_wgpu::{Wgpu, WgpuDevice};
 use cubecl::wgpu::{WgpuDevice as FftWgpuDevice, WgpuRuntime};
+use half::f16;
 use include_bytes_aligned::include_bytes_aligned;
 use tracing::debug;
+
+type WgpuF16 = Wgpu<f16, i32>;
 
 #[cfg(has_vocal_model)]
 #[allow(dead_code, unused_variables)]
 mod all_rt {
-    include!(concat!(env!("OUT_DIR"), "/model/all_rt.rs"));
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/model/all_rt.rs"));
 }
 
 pub const HAS_MODEL: bool = cfg!(has_vocal_model);
@@ -30,7 +33,7 @@ pub const MODEL_CHANNELS: usize = 2;
 
 pub struct RtDttModel {
     #[cfg(has_vocal_model)]
-    model: all_rt::Model<Wgpu>,
+    model: all_rt::Model<WgpuF16>,
     #[cfg(has_vocal_model)]
     device: WgpuDevice,
 }
@@ -42,11 +45,20 @@ impl RtDttModel {
             debug!("RtDttModel::new entry");
             let device = WgpuDevice::default();
             let aligned_bpk: &'static [u8] =
-                include_bytes_aligned!(32, concat!(env!("OUT_DIR"), "/model/all_rt.bpk"));
+                include_bytes_aligned!(32, concat!(env!("CARGO_MANIFEST_DIR"), "/model/all_rt.bpk"));
             debug!("RtDttModel::new creating model struct");
-            let mut model = all_rt::Model::<Wgpu>::new(&device);
+            let mut model = all_rt::Model::<WgpuF16>::new(&device);
             debug!("RtDttModel::new loading model weights");
-            let mut store = burn_store::BurnpackStore::from_static(aligned_bpk);
+            // The bpk stores f32 weights; HalfPrecisionAdapter auto-detects F32 and
+            // converts to F16 for each module type listed below.
+            let adapter = HalfPrecisionAdapter::new()
+                .with_module("Lstm")
+                .with_module("Submodule1")
+                .with_module("Submodule2")
+                .with_module("Submodule3")
+                .with_module("Submodule4")
+                .with_module("Model");
+            let mut store = BurnpackStore::from_static(aligned_bpk).with_from_adapter(adapter);
             debug!("RtDttModel::new loading model");
             model
                 .load_from(&mut store)
@@ -64,9 +76,14 @@ impl RtDttModel {
     pub fn forward(&self, input: Vec<f32>, shape: [usize; 4]) -> Vec<f32> {
         #[cfg(has_vocal_model)]
         {
-            let input = Tensor::<Wgpu, 4>::from_data(TensorData::new(input, shape), &self.device);
-            let output = self.model.forward(input);
-            output.into_data().to_vec().expect("burn tensor to vec")
+            let input_f16: Vec<f16> = input.iter().map(|&x| f16::from_f32(x)).collect();
+            let tensor = Tensor::<WgpuF16, 4>::from_data(
+                TensorData::new(input_f16, shape),
+                &self.device,
+            );
+            let output = self.model.forward(tensor);
+            // iter::<f32>() auto-converts F16 → F32
+            output.into_data().iter::<f32>().collect()
         }
 
         #[cfg(not(has_vocal_model))]
