@@ -1,4 +1,6 @@
 // Generated from ONNX "/Users/ken/Codes/wifi-party/crates/vocal-model/../../assets/all_rt.onnx" by burn-onnx
+// Pre-projection LSTM optimization: batches all input projections into one matmul
+// and reduces hidden projections from 4 per step to 1 per step.
 use burn::prelude::*;
 use burn::nn::InstanceNorm;
 use burn::nn::InstanceNormConfig;
@@ -1436,17 +1438,14 @@ impl<B: Backend> Submodule3<B> {
             constant240_out1.expand(shape)
         };
         let (lstm1_out1, lstm1_out2, lstm1_out3) = {
-            let (output_seq, final_state) = self
-                .lstm1
-                .forward(
-                    transpose4_out1,
-                    Some(
-                        LstmState::new(
-                            expand2_out1.squeeze_dim(0),
-                            expand1_out1.squeeze_dim(0),
-                        ),
-                    ),
-                );
+            let (output_seq, final_state) = lstm_preproj(
+                &self.lstm1,
+                transpose4_out1,
+                Some(LstmState::new(
+                    expand2_out1.squeeze_dim(0),
+                    expand1_out1.squeeze_dim(0),
+                )),
+            );
             (
                 output_seq.unsqueeze_dims::<4>(&[1]),
                 final_state.hidden.unsqueeze_dims::<3>(&[0]),
@@ -1539,17 +1538,14 @@ impl<B: Backend> Submodule3<B> {
             constant252_out1.expand(shape)
         };
         let (lstm2_out1, lstm2_out2, lstm2_out3) = {
-            let (output_seq, final_state) = self
-                .lstm2
-                .forward(
-                    transpose8_out1,
-                    Some(
-                        LstmState::new(
-                            expand4_out1.squeeze_dim(0),
-                            expand3_out1.squeeze_dim(0),
-                        ),
-                    ),
-                );
+            let (output_seq, final_state) = lstm_preproj(
+                &self.lstm2,
+                transpose8_out1,
+                Some(LstmState::new(
+                    expand4_out1.squeeze_dim(0),
+                    expand3_out1.squeeze_dim(0),
+                )),
+            );
             (
                 output_seq.unsqueeze_dims::<4>(&[1]),
                 final_state.hidden.unsqueeze_dims::<3>(&[0]),
@@ -1642,17 +1638,14 @@ impl<B: Backend> Submodule3<B> {
             constant264_out1.expand(shape)
         };
         let (lstm3_out1, lstm3_out2, lstm3_out3) = {
-            let (output_seq, final_state) = self
-                .lstm3
-                .forward(
-                    transpose12_out1,
-                    Some(
-                        LstmState::new(
-                            expand6_out1.squeeze_dim(0),
-                            expand5_out1.squeeze_dim(0),
-                        ),
-                    ),
-                );
+            let (output_seq, final_state) = lstm_preproj(
+                &self.lstm3,
+                transpose12_out1,
+                Some(LstmState::new(
+                    expand6_out1.squeeze_dim(0),
+                    expand5_out1.squeeze_dim(0),
+                )),
+            );
             (
                 output_seq.unsqueeze_dims::<4>(&[1]),
                 final_state.hidden.unsqueeze_dims::<3>(&[0]),
@@ -1746,17 +1739,14 @@ impl<B: Backend> Submodule3<B> {
             constant276_out1.expand(shape)
         };
         let (lstm4_out1, lstm4_out2, lstm4_out3) = {
-            let (output_seq, final_state) = self
-                .lstm4
-                .forward(
-                    transpose16_out1,
-                    Some(
-                        LstmState::new(
-                            expand8_out1.squeeze_dim(0),
-                            expand7_out1.squeeze_dim(0),
-                        ),
-                    ),
-                );
+            let (output_seq, final_state) = lstm_preproj(
+                &self.lstm4,
+                transpose16_out1,
+                Some(LstmState::new(
+                    expand8_out1.squeeze_dim(0),
+                    expand7_out1.squeeze_dim(0),
+                )),
+            );
             (
                 output_seq.unsqueeze_dims::<4>(&[1]),
                 final_state.hidden.unsqueeze_dims::<3>(&[0]),
@@ -1850,17 +1840,14 @@ impl<B: Backend> Submodule3<B> {
             constant288_out1.expand(shape)
         };
         let (lstm5_out1, lstm5_out2, lstm5_out3) = {
-            let (output_seq, final_state) = self
-                .lstm5
-                .forward(
-                    transpose20_out1,
-                    Some(
-                        LstmState::new(
-                            expand10_out1.squeeze_dim(0),
-                            expand9_out1.squeeze_dim(0),
-                        ),
-                    ),
-                );
+            let (output_seq, final_state) = lstm_preproj(
+                &self.lstm5,
+                transpose20_out1,
+                Some(LstmState::new(
+                    expand10_out1.squeeze_dim(0),
+                    expand9_out1.squeeze_dim(0),
+                )),
+            );
             (
                 output_seq.unsqueeze_dims::<4>(&[1]),
                 final_state.hidden.unsqueeze_dims::<3>(&[0]),
@@ -1954,17 +1941,14 @@ impl<B: Backend> Submodule3<B> {
             constant300_out1.expand(shape)
         };
         let (lstm6_out1, lstm6_out2, lstm6_out3) = {
-            let (output_seq, final_state) = self
-                .lstm6
-                .forward(
-                    transpose24_out1,
-                    Some(
-                        LstmState::new(
-                            expand12_out1.squeeze_dim(0),
-                            expand11_out1.squeeze_dim(0),
-                        ),
-                    ),
-                );
+            let (output_seq, final_state) = lstm_preproj(
+                &self.lstm6,
+                transpose24_out1,
+                Some(LstmState::new(
+                    expand12_out1.squeeze_dim(0),
+                    expand11_out1.squeeze_dim(0),
+                )),
+            );
             (
                 output_seq.unsqueeze_dims::<4>(&[1]),
                 final_state.hidden.unsqueeze_dims::<3>(&[0]),
@@ -2532,4 +2516,122 @@ impl<B: Backend> Model<B> {
         let reshape81_out1 = self.submodule4.forward(mul25_out1);
         reshape81_out1
     }
+}
+
+/// Optimized LSTM forward pass.
+///
+/// Reduces GPU dispatches from ~11/step to ~3/step by:
+/// 1. Pre-projecting all input steps in ONE batched matmul (amortised over seq_len)
+/// 2. Concatenating all 4 gate hidden weights so hidden projection is ONE matmul/step
+///
+/// Input/output convention: `batch_first = false`, i.e. `[seq, batch, features]`.
+fn lstm_preproj<B: Backend>(
+    lstm: &burn::nn::Lstm<B>,
+    input: Tensor<B, 3>,             // [seq, batch, input_size]
+    state: Option<LstmState<B, 2>>,  // h/c each [batch, hidden]
+) -> (Tensor<B, 3>, LstmState<B, 2>) {
+    let [seq, batch, input_size] = input.dims();
+    let hidden = lstm.d_hidden;
+    let device = input.device();
+
+    // ── 1. Pre-project all seq steps in one GEMM ──────────────────────────────
+    // LinearLayout::Row stores weight as [d_input, d_output].
+    // Concat along dim=1: [d_input, 4*d_output] = [input_size, 4*hidden]
+    let w_x = Tensor::cat(
+        vec![
+            lstm.input_gate.input_transform.weight.val(),
+            lstm.forget_gate.input_transform.weight.val(),
+            lstm.cell_gate.input_transform.weight.val(),
+            lstm.output_gate.input_transform.weight.val(),
+        ],
+        1,
+    ); // [input_size, 4*hidden]
+    // Flatten seq*batch; reshape handles non-contiguous inputs (implicit contiguous copy)
+    let input_flat = input.reshape([seq * batch, input_size]); // [seq*batch, input_size]
+    // [seq*batch, input_size] @ [input_size, 4*hidden]  →  [seq*batch, 4*hidden]
+    let mut x_proj_flat = input_flat.matmul(w_x);
+    // Add input biases (all 4 gates combined)
+    if let Some(b) = lstm.input_gate.input_transform.bias.as_ref() {
+        let b_x = Tensor::cat(
+            vec![
+                b.val(),
+                lstm.forget_gate.input_transform.bias.as_ref().unwrap().val(),
+                lstm.cell_gate.input_transform.bias.as_ref().unwrap().val(),
+                lstm.output_gate.input_transform.bias.as_ref().unwrap().val(),
+            ],
+            0,
+        ); // [4*hidden]
+        x_proj_flat = x_proj_flat + b_x.unsqueeze_dims::<2>(&[0]); // broadcast over batch
+    }
+    let x_proj = x_proj_flat.reshape([seq, batch, 4 * hidden]); // [seq, batch, 4*hidden]
+
+    // ── 2. Concat hidden weights (computed once, shared across all steps) ──────
+    // [d_input=hidden, 4*d_output=4*hidden] after dim=1 concat
+    let w_h = Tensor::cat(
+        vec![
+            lstm.input_gate.hidden_transform.weight.val(),
+            lstm.forget_gate.hidden_transform.weight.val(),
+            lstm.cell_gate.hidden_transform.weight.val(),
+            lstm.output_gate.hidden_transform.weight.val(),
+        ],
+        1,
+    ); // [hidden, 4*hidden]
+
+    let b_h = lstm.input_gate.hidden_transform.bias.as_ref().map(|_| {
+        Tensor::cat(
+            vec![
+                lstm.input_gate.hidden_transform.bias.as_ref().unwrap().val(),
+                lstm.forget_gate.hidden_transform.bias.as_ref().unwrap().val(),
+                lstm.cell_gate.hidden_transform.bias.as_ref().unwrap().val(),
+                lstm.output_gate.hidden_transform.bias.as_ref().unwrap().val(),
+            ],
+            0,
+        ) // [4*hidden]
+    });
+
+    // ── 3. Initialise h, c ────────────────────────────────────────────────────
+    let (mut h, mut c) = match state {
+        Some(s) => (s.hidden, s.cell),
+        None => (
+            Tensor::zeros([batch, hidden], &device),
+            Tensor::zeros([batch, hidden], &device),
+        ),
+    };
+
+    // ── 4. Sequential recurrence over time steps ──────────────────────────────
+    let mut output_steps = Vec::with_capacity(seq);
+
+    for t in 0..seq {
+        // Pre-projected input for step t: [batch, 4*hidden]
+        let x_t = x_proj.clone().narrow(0, t, 1).squeeze_dims::<2>(&[0]);
+
+        // Hidden projection: ONE matmul → [batch, 4*hidden]
+        let mut gates = x_t + h.clone().matmul(w_h.clone());
+        if let Some(ref b) = b_h {
+            gates = gates + b.clone().unsqueeze_dims::<2>(&[0]);
+        }
+
+        // The generated model uses the default LSTM activations: sigmoid for
+        // input/forget/output gates and tanh for cell/hidden state. Applying
+        // each activation to the packed gate tensor trades a little extra math
+        // for fewer tiny GPU dispatches in the recurrent loop.
+        let gates_sigmoid = burn::tensor::activation::sigmoid(gates.clone());
+        let gates_tanh = gates.tanh();
+        let i = gates_sigmoid.clone().narrow(1, 0, hidden);
+        let f = gates_sigmoid.clone().narrow(1, hidden, hidden);
+        let g = gates_tanh.narrow(1, 2 * hidden, hidden);
+        let o = gates_sigmoid.narrow(1, 3 * hidden, hidden);
+
+        c = f * c + i * g;
+        if let Some(clip) = lstm.clip {
+            c = c.clamp(-clip as f32, clip as f32);
+        }
+        h = o * c.clone().tanh();
+
+        output_steps.push(h.clone().unsqueeze_dims::<3>(&[0]));
+    }
+
+    let output = Tensor::cat(output_steps, 0);
+
+    (output, LstmState::new(c, h))
 }
