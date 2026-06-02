@@ -2635,3 +2635,42 @@ fn lstm_preproj<B: Backend>(
 
     (output, LstmState::new(c, h))
 }
+
+#[cfg(test)]
+pub(super) fn lstm_preproj_equivalence_error<B: Backend>(device: &B::Device) -> f32 {
+    let seq = 5;
+    let batch = 3;
+    let input_size = 16;
+    let hidden = 32;
+
+    let lstm = LstmConfig::new(input_size, hidden, true)
+        .with_batch_first(false)
+        .with_input_forget(false)
+        .init(device);
+    let input = Tensor::<B, 3>::ones([seq, batch, input_size], device);
+    let cell = Tensor::<B, 2>::ones([batch, hidden], device) * 0.125;
+    let hidden_state = Tensor::<B, 2>::ones([batch, hidden], device) * -0.25;
+
+    let (expected_output, expected_state) = lstm.forward(
+        input.clone(),
+        Some(LstmState::new(cell.clone(), hidden_state.clone())),
+    );
+    let (actual_output, actual_state) = lstm_preproj(
+        &lstm,
+        input,
+        Some(LstmState::new(cell, hidden_state)),
+    );
+
+    fn max_abs_diff<B: Backend, const D: usize>(lhs: Tensor<B, D>, rhs: Tensor<B, D>) -> f32 {
+        let lhs = lhs.into_data().iter::<f32>().collect::<Vec<_>>();
+        let rhs = rhs.into_data().iter::<f32>().collect::<Vec<_>>();
+        lhs.iter()
+            .zip(rhs.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max)
+    }
+
+    max_abs_diff(expected_output, actual_output)
+        .max(max_abs_diff(expected_state.cell, actual_state.cell))
+        .max(max_abs_diff(expected_state.hidden, actual_state.hidden))
+}

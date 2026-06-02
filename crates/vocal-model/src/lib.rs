@@ -1,12 +1,11 @@
 use burn::tensor::{Tensor, TensorData};
-use burn_store::{BurnpackStore, HalfPrecisionAdapter, ModuleSnapshot};
+use burn_store::{BurnpackStore, ModuleSnapshot};
 use burn_wgpu::{Wgpu, WgpuDevice};
 use cubecl::wgpu::{WgpuDevice as FftWgpuDevice, WgpuRuntime};
-use half::f16;
 use include_bytes_aligned::include_bytes_aligned;
 use tracing::debug;
 
-type WgpuF16 = Wgpu<f16, i32>;
+type WgpuModel = Wgpu<f32, i32>;
 
 #[cfg(has_vocal_model)]
 #[allow(dead_code, unused_variables)]
@@ -33,7 +32,7 @@ pub const MODEL_CHANNELS: usize = 2;
 
 pub struct RtDttModel {
     #[cfg(has_vocal_model)]
-    model: all_rt::Model<WgpuF16>,
+    model: all_rt::Model<WgpuModel>,
     #[cfg(has_vocal_model)]
     device: WgpuDevice,
 }
@@ -44,21 +43,14 @@ impl RtDttModel {
         {
             debug!("RtDttModel::new entry");
             let device = WgpuDevice::default();
-            let aligned_bpk: &'static [u8] =
-                include_bytes_aligned!(32, concat!(env!("CARGO_MANIFEST_DIR"), "/model/all_rt.bpk"));
+            let aligned_bpk: &'static [u8] = include_bytes_aligned!(
+                32,
+                concat!(env!("CARGO_MANIFEST_DIR"), "/model/all_rt.bpk")
+            );
             debug!("RtDttModel::new creating model struct");
-            let mut model = all_rt::Model::<WgpuF16>::new(&device);
+            let mut model = all_rt::Model::<WgpuModel>::new(&device);
             debug!("RtDttModel::new loading model weights");
-            // The bpk stores f32 weights; HalfPrecisionAdapter auto-detects F32 and
-            // converts to F16 for each module type listed below.
-            let adapter = HalfPrecisionAdapter::new()
-                .with_module("Lstm")
-                .with_module("Submodule1")
-                .with_module("Submodule2")
-                .with_module("Submodule3")
-                .with_module("Submodule4")
-                .with_module("Model");
-            let mut store = BurnpackStore::from_static(aligned_bpk).with_from_adapter(adapter);
+            let mut store = BurnpackStore::from_static(aligned_bpk);
             debug!("RtDttModel::new loading model");
             model
                 .load_from(&mut store)
@@ -76,13 +68,9 @@ impl RtDttModel {
     pub fn forward(&self, input: Vec<f32>, shape: [usize; 4]) -> Vec<f32> {
         #[cfg(has_vocal_model)]
         {
-            let input_f16: Vec<f16> = input.iter().map(|&x| f16::from_f32(x)).collect();
-            let tensor = Tensor::<WgpuF16, 4>::from_data(
-                TensorData::new(input_f16, shape),
-                &self.device,
-            );
+            let tensor =
+                Tensor::<WgpuModel, 4>::from_data(TensorData::new(input, shape), &self.device);
             let output = self.model.forward(tensor);
-            // iter::<f32>() auto-converts F16 → F32
             output.into_data().iter::<f32>().collect()
         }
 
@@ -292,6 +280,9 @@ fn istft_gpu(fft_device: &FftWgpuDevice, spectrograms: &[(Vec<f32>, Vec<f32>)]) 
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command;
     use std::time::{Duration, Instant};
 
     use super::*;
@@ -323,6 +314,230 @@ mod tests {
             elapsed_secs * 1000.0,
             audio_secs / elapsed_secs
         );
+    }
+
+    fn rms(samples: &[f32]) -> f64 {
+        (samples
+            .iter()
+            .map(|sample| {
+                let sample = *sample as f64;
+                sample * sample
+            })
+            .sum::<f64>()
+            / samples.len().max(1) as f64)
+            .sqrt()
+    }
+
+    fn trim_interleaved(left: &[f32], right: &[f32]) -> Vec<f32> {
+        let mut trimmed = Vec::with_capacity(GEN_SIZE * MODEL_CHANNELS);
+        for i in OVERLAP..OVERLAP + GEN_SIZE {
+            trimmed.push(left[i]);
+            trimmed.push(right[i]);
+        }
+        trimmed
+    }
+
+    fn model_input_from_padded(
+        fft_device: &FftWgpuDevice,
+        padded: &[f32],
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let mut left = vec![0.0f32; INF_CHUNK];
+        let mut right = vec![0.0f32; INF_CHUNK];
+        for i in 0..INF_CHUNK {
+            left[i] = padded[i * 2];
+            right[i] = padded[i * 2 + 1];
+        }
+
+        let stft = stft_gpu(fft_device, &left, &right);
+        let mut onnx_in = vec![0.0f32; 4 * DIM_F * DIM_T];
+        for ch in 0..MODEL_CHANNELS {
+            for frame_idx in 0..DIM_T {
+                let (ref re, ref im) = stft[ch * DIM_T + frame_idx];
+                for freq in 0..DIM_F {
+                    onnx_in[(ch * 2) * DIM_F * DIM_T + freq * DIM_T + frame_idx] = re[freq];
+                    onnx_in[(ch * 2 + 1) * DIM_F * DIM_T + freq * DIM_T + frame_idx] = im[freq];
+                }
+            }
+        }
+
+        (onnx_in, left, right)
+    }
+
+    fn source_waveforms(
+        fft_device: &FftWgpuDevice,
+        out_vec: &[f32],
+        source_idx: usize,
+    ) -> Vec<Vec<f32>> {
+        let src_stride = 4 * DIM_F * DIM_T;
+        let cri_stride = DIM_F * DIM_T;
+        let source_stride = source_idx * src_stride;
+
+        let mut source_specs: Vec<(Vec<f32>, Vec<f32>)> = Vec::with_capacity(MODEL_CHANNELS);
+        for ch in 0..MODEL_CHANNELS {
+            let mut re_bins = vec![0.0f32; N_FREQS * DIM_T];
+            let mut im_bins = vec![0.0f32; N_FREQS * DIM_T];
+            for freq in 0..DIM_F {
+                for t in 0..DIM_T {
+                    re_bins[freq * DIM_T + t] =
+                        out_vec[source_stride + (ch * 2) * cri_stride + freq * DIM_T + t];
+                    im_bins[freq * DIM_T + t] =
+                        out_vec[source_stride + (ch * 2 + 1) * cri_stride + freq * DIM_T + t];
+                }
+            }
+            source_specs.push((re_bins, im_bins));
+        }
+
+        istft_gpu(fft_device, &source_specs)
+    }
+
+    fn read_i16_wav_interleaved(path: &Path) -> Vec<f32> {
+        let bytes = fs::read(path).expect("failed to read wav");
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+
+        let mut offset = 12usize;
+        let mut format_ok = false;
+        let mut data = None;
+        while offset + 8 <= bytes.len() {
+            let id = &bytes[offset..offset + 4];
+            let len =
+                u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+            let start = offset + 8;
+            let end = start + len;
+            assert!(end <= bytes.len(), "invalid wav chunk length");
+
+            if id == b"fmt " {
+                let audio_format = u16::from_le_bytes(bytes[start..start + 2].try_into().unwrap());
+                let channels = u16::from_le_bytes(bytes[start + 2..start + 4].try_into().unwrap());
+                let sample_rate =
+                    u32::from_le_bytes(bytes[start + 4..start + 8].try_into().unwrap());
+                let bits_per_sample =
+                    u16::from_le_bytes(bytes[start + 14..start + 16].try_into().unwrap());
+                format_ok = (audio_format == 1 || audio_format == 0xfffe)
+                    && channels as usize == MODEL_CHANNELS
+                    && sample_rate == MODEL_SAMPLE_RATE
+                    && bits_per_sample == 16;
+            } else if id == b"data" {
+                data = Some((start, end));
+                break;
+            }
+
+            offset = end + (len & 1);
+        }
+
+        assert!(format_ok, "expected 44.1 kHz stereo 16-bit PCM WAV");
+        let (start, end) = data.expect("wav data chunk missing");
+        bytes[start..end]
+            .chunks_exact(2)
+            .map(|sample| i16::from_le_bytes(sample.try_into().unwrap()) as f32 / i16::MAX as f32)
+            .collect()
+    }
+
+    fn read_real_audio_chunk() -> Vec<f32> {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let src = manifest_dir.join("../../assets/read_you.m4a");
+        let wav = std::env::temp_dir().join("wifi_party_read_you_44100_s16.wav");
+        let status = Command::new("/usr/bin/afconvert")
+            .args(["-f", "WAVE", "-d", "LEI16@44100", "-c", "2"])
+            .arg(&src)
+            .arg(&wav)
+            .status()
+            .expect("failed to run afconvert");
+        assert!(status.success(), "afconvert failed");
+
+        let samples = read_i16_wav_interleaved(&wav);
+        let start_frame = 60 * MODEL_SAMPLE_RATE as usize;
+        let start = start_frame * MODEL_CHANNELS;
+        let len = GEN_SIZE * MODEL_CHANNELS;
+        assert!(samples.len() >= start + len);
+        samples[start..start + len].to_vec()
+    }
+
+    #[cfg(has_vocal_model)]
+    fn forward_model_direct(input: Vec<f32>) -> Vec<f32> {
+        let device = WgpuDevice::default();
+        let aligned_bpk: &'static [u8] =
+            include_bytes_aligned!(32, concat!(env!("CARGO_MANIFEST_DIR"), "/model/all_rt.bpk"));
+        let mut model = all_rt::Model::<WgpuModel>::new(&device);
+        let mut store = BurnpackStore::from_static(aligned_bpk);
+        model
+            .load_from(&mut store)
+            .expect("Failed to load burnpack weights");
+        let tensor = Tensor::<WgpuModel, 4>::from_data(
+            TensorData::new(input, [1, 4, DIM_F, DIM_T]),
+            &device,
+        );
+        model.forward(tensor).into_data().iter::<f32>().collect()
+    }
+
+    fn print_source_diagnostics(
+        label: &str,
+        fft_device: &FftWgpuDevice,
+        out_vec: &[f32],
+        mix_left: &[f32],
+        mix_right: &[f32],
+    ) -> Vec<f32> {
+        let mix = trim_interleaved(mix_left, mix_right);
+        let mut sum_left = vec![0.0f32; INF_CHUNK];
+        let mut sum_right = vec![0.0f32; INF_CHUNK];
+        let mut vocals = Vec::new();
+
+        println!("{label}: mix RMS {:.6}", rms(&mix));
+        for source_idx in 0..N_SOURCES {
+            let waveforms = source_waveforms(fft_device, out_vec, source_idx);
+            for i in 0..INF_CHUNK {
+                sum_left[i] += waveforms[0][i];
+                sum_right[i] += waveforms[1][i];
+            }
+
+            let stem = trim_interleaved(&waveforms[0], &waveforms[1]);
+            if source_idx == VOCALS_IDX {
+                vocals = stem.clone();
+            }
+            println!(
+                "{label}: source {source_idx} RMS {:.6}, source/mix {:.2}%",
+                rms(&stem),
+                rms(&stem) * 100.0 / rms(&mix).max(f64::EPSILON),
+            );
+        }
+
+        let summed = trim_interleaved(&sum_left, &sum_right);
+        let sum_error = summed
+            .iter()
+            .zip(mix.iter())
+            .map(|(actual, expected)| actual - expected)
+            .collect::<Vec<_>>();
+        let instrumental = mix
+            .iter()
+            .zip(vocals.iter())
+            .map(|(sample, vocal)| sample - vocal)
+            .collect::<Vec<_>>();
+        let changed = mix
+            .iter()
+            .zip(instrumental.iter())
+            .map(|(input, output)| input - output)
+            .collect::<Vec<_>>();
+        println!(
+            "{label}: sum-stems err RMS {:.6}; vocal diff RMS {:.6}; instrumental RMS {:.6}",
+            rms(&sum_error),
+            rms(&changed),
+            rms(&instrumental),
+        );
+
+        vocals
+    }
+
+    fn print_spectrogram_diagnostics(label: &str, out_vec: &[f32]) {
+        let src_stride = 4 * DIM_F * DIM_T;
+        println!("{label}: output tensor RMS {:.6}", rms(out_vec));
+        for source_idx in 0..N_SOURCES {
+            let start = source_idx * src_stride;
+            let end = start + src_stride;
+            println!(
+                "{label}: source {source_idx} spectrogram RMS {:.6}",
+                rms(&out_vec[start..end])
+            );
+        }
     }
 
     fn profile_one_chunk(separator: &RtDttSeparator, chunk_data: &[f32]) -> Vec<f32> {
@@ -406,6 +621,115 @@ mod tests {
         print_profile_phase("subtract + trim", start.elapsed(), audio_secs_per_chunk);
 
         trimmed
+    }
+
+    #[test]
+    fn optimized_lstm_matches_burn_lstm() {
+        #[cfg(has_vocal_model)]
+        {
+            let device = WgpuDevice::default();
+            let max_error = all_rt::lstm_preproj_equivalence_error::<WgpuModel>(&device);
+            assert!(
+                max_error < 1e-2,
+                "optimized LSTM diverges from Burn LSTM; max abs error {max_error}"
+            );
+        }
+    }
+
+    #[test]
+    fn stft_istft_roundtrip_preserves_audio() {
+        let fft_device = FftWgpuDevice::default();
+        let chunk = test_music_chunk();
+        let mut padded = vec![0.0f32; INF_CHUNK * MODEL_CHANNELS];
+        let offset = OVERLAP * MODEL_CHANNELS;
+        padded[offset..offset + chunk.len()].copy_from_slice(&chunk);
+
+        let mut left = vec![0.0f32; INF_CHUNK];
+        let mut right = vec![0.0f32; INF_CHUNK];
+        for i in 0..INF_CHUNK {
+            left[i] = padded[i * 2];
+            right[i] = padded[i * 2 + 1];
+        }
+
+        let stft = stft_gpu(&fft_device, &left, &right);
+        let mut specs = Vec::with_capacity(MODEL_CHANNELS);
+        for ch in 0..MODEL_CHANNELS {
+            let mut re_bins = vec![0.0f32; N_FREQS * DIM_T];
+            let mut im_bins = vec![0.0f32; N_FREQS * DIM_T];
+            for frame_idx in 0..DIM_T {
+                let (re, im) = &stft[ch * DIM_T + frame_idx];
+                for freq in 0..N_FREQS {
+                    re_bins[freq * DIM_T + frame_idx] = re[freq];
+                    im_bins[freq * DIM_T + frame_idx] = im[freq];
+                }
+            }
+            specs.push((re_bins, im_bins));
+        }
+        let reconstructed = istft_gpu(&fft_device, &specs);
+
+        let left_error = reconstructed[0]
+            .iter()
+            .zip(left.iter())
+            .map(|(actual, expected)| actual - expected)
+            .collect::<Vec<_>>();
+        let right_error = reconstructed[1]
+            .iter()
+            .zip(right.iter())
+            .map(|(actual, expected)| actual - expected)
+            .collect::<Vec<_>>();
+
+        println!(
+            "STFT/iSTFT RMS: left in {:.6}, out {:.6}, err {:.6}; right in {:.6}, out {:.6}, err {:.6}",
+            rms(&left),
+            rms(&reconstructed[0]),
+            rms(&left_error),
+            rms(&right),
+            rms(&reconstructed[1]),
+            rms(&right_error),
+        );
+
+        assert!(rms(&left_error) < 1e-3, "left roundtrip error too high");
+        assert!(rms(&right_error) < 1e-3, "right roundtrip error too high");
+    }
+
+    #[test]
+    fn real_audio_vocal_removal_diagnostics() {
+        #[cfg(has_vocal_model)]
+        {
+            println!("loading real audio chunk");
+            let chunk = read_real_audio_chunk();
+            let mut padded = vec![0.0f32; INF_CHUNK * MODEL_CHANNELS];
+            let offset = OVERLAP * MODEL_CHANNELS;
+            padded[offset..offset + chunk.len()].copy_from_slice(&chunk);
+
+            let fft_device = FftWgpuDevice::default();
+            println!("building model input");
+            let (onnx_in, left, right) = model_input_from_padded(&fft_device, &padded);
+
+            println!("running model forward");
+            let f32_out = forward_model_direct(onnx_in);
+            println!("f32 model forward done");
+            print_spectrogram_diagnostics("f32", &f32_out);
+            let vocals = print_source_diagnostics("f32", &fft_device, &f32_out, &left, &right);
+            let mix = trim_interleaved(&left, &right);
+            let instrumental = mix
+                .iter()
+                .zip(vocals.iter())
+                .map(|(sample, vocal)| sample - vocal)
+                .collect::<Vec<_>>();
+            assert!(
+                rms(&vocals) > rms(&mix) * 0.25,
+                "vocal stem is too small; mix RMS {:.6}, vocal RMS {:.6}",
+                rms(&mix),
+                rms(&vocals),
+            );
+            assert!(
+                rms(&instrumental) < rms(&mix) * 0.8,
+                "instrumental output is too close to input; mix RMS {:.6}, instrumental RMS {:.6}",
+                rms(&mix),
+                rms(&instrumental),
+            );
+        }
     }
 
     #[test]

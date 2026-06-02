@@ -253,13 +253,13 @@ impl<const CHANNELS: usize, const SAMPLE_RATE: u32> Node
 
     fn process(&self, input: Self::Input) -> Option<Self::Output> {
         if !should_process::<CHANNELS, SAMPLE_RATE>(&self.enabled, &self.invalid_config_warned) {
-            debug!("DecodedVocalRemover::process should not process");
+            // debug!("DecodedVocalRemover::process should not process");
             self.reset();
             return Some(input);
         }
 
         let num_frames = input.channels.first().map_or(0, |channel| channel.len());
-        debug!("DecodedVocalRemover::process num_frames={}", num_frames);
+        // debug!("DecodedVocalRemover::process num_frames={}", num_frames);
         if num_frames == 0 {
             return None;
         }
@@ -273,7 +273,7 @@ impl<const CHANNELS: usize, const SAMPLE_RATE: u32> Node
 
         let mut state = self.state.lock().unwrap();
         state.process_interleaved(&interleaved);
-        debug!("DecodedVocalRemover::process draining interleaved");
+        // debug!("DecodedVocalRemover::process draining interleaved");
         let output = state.drain_interleaved(num_frames * CHANNELS)?;
 
         let mut channels = (0..CHANNELS)

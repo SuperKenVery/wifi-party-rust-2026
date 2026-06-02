@@ -536,7 +536,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     }
 
     fn process_raw(&mut self, raw: &RawPacket) -> Vec<(u64, RawPacket)> {
-        debug!("process_raw: got raw packet");
+        // debug!("process_raw: got raw packet");
 
         let Some(decoded) = self.decoder.process(CompressedPacket {
             dur: raw.dur,
@@ -551,7 +551,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
             return Vec::new();
         };
         let Some(no_vocal) = self.vocal_remover.process(model_rate) else {
-            debug!("process_raw: waiting for vocal_remover output");
+            // debug!("process_raw: waiting for vocal_remover output");
             return Vec::new();
         };
         let Some(output_rate) = self.to_output_rate.process(no_vocal) else {
