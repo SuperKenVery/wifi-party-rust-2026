@@ -6,6 +6,10 @@ edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[workspace]
+members = [".", "crates/vocal-model"]
+resolver = "3"
+
 [dependencies]
 dioxus = { version = "0.7.9", default-features = false, features = ["router"] }
 chrono = "0.4"
@@ -59,8 +63,27 @@ desktop = ["dioxus/default", "dioxus/desktop"]
 mobile = ["dioxus/default", "dioxus/mobile", "vocal-removal"]
 vocal-removal = ["dep:wifi-party-vocal-model"]
 
-[profile.dev.package."*"]
-opt-level = 3
+# [profile.dev.package."*"]
+# opt-level = 3
+# debug-assertions = false
 
-[profile.test.package."*"]
+# [profile.test.package."*"]
+# opt-level = 3
+# debug-assertions = false
+
+[profile.desktop-dev]
+inherits = "dev"
+strip = false
+opt-level = 1
+
+[profile.desktop-dev.package."*"]
 opt-level = 3
+debug-assertions = false
+
+[profile.desktop-dev.package.wifi-party-vocal-model]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+codegen-units = 1
+incremental = false
+debug = "line-tables-only"

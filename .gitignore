@@ -2,6 +2,7 @@
 # will have compiled files and executables
 /target
 /target-doc
+crates/*/target
 .DS_Store
 /assets/tailwind_output.css
 node_modules/

@@ -124,8 +124,7 @@ impl RtDttSeparator {
                 let (ref re, ref im) = stft[ch * DIM_T + frame_idx];
                 for freq in 0..DIM_F {
                     onnx_in[(ch * 2) * DIM_F * DIM_T + freq * DIM_T + frame_idx] = re[freq];
-                    onnx_in[(ch * 2 + 1) * DIM_F * DIM_T + freq * DIM_T + frame_idx] =
-                        im[freq];
+                    onnx_in[(ch * 2 + 1) * DIM_F * DIM_T + freq * DIM_T + frame_idx] = im[freq];
                 }
             }
         }
@@ -272,4 +271,200 @@ fn istft_gpu(fft_device: &FftWgpuDevice, spectrograms: &[(Vec<f32>, Vec<f32>)]) 
     }
 
     waveforms
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    const MEASURED_RUNS: usize = 5;
+
+    fn test_music_chunk() -> Vec<f32> {
+        let mut chunk = Vec::with_capacity(GEN_SIZE * MODEL_CHANNELS);
+        for sample_idx in 0..GEN_SIZE {
+            let t = sample_idx as f32 / MODEL_SAMPLE_RATE as f32;
+            let left = (2.0 * std::f32::consts::PI * 220.0 * t).sin() * 0.35
+                + (2.0 * std::f32::consts::PI * 880.0 * t).sin() * 0.08;
+            let right = (2.0 * std::f32::consts::PI * 330.0 * t).sin() * 0.35
+                + (2.0 * std::f32::consts::PI * 660.0 * t).sin() * 0.08;
+            chunk.push(left);
+            chunk.push(right);
+        }
+        chunk
+    }
+
+    fn duration_secs(duration: Duration) -> f64 {
+        duration.as_secs_f64()
+    }
+
+    fn print_profile_phase(name: &str, elapsed: Duration, audio_secs: f64) {
+        let elapsed_secs = duration_secs(elapsed);
+        println!(
+            "  {name}: {:.1}ms, {:.2}x real-time",
+            elapsed_secs * 1000.0,
+            audio_secs / elapsed_secs
+        );
+    }
+
+    fn profile_one_chunk(separator: &RtDttSeparator, chunk_data: &[f32]) -> Vec<f32> {
+        let audio_secs_per_chunk = GEN_SIZE as f64 / MODEL_SAMPLE_RATE as f64;
+
+        let start = Instant::now();
+        let mut padded = vec![0.0f32; INF_CHUNK * MODEL_CHANNELS];
+        let offset = OVERLAP * MODEL_CHANNELS;
+        padded[offset..offset + chunk_data.len()].copy_from_slice(chunk_data);
+
+        let mut left = vec![0.0f32; INF_CHUNK];
+        let mut right = vec![0.0f32; INF_CHUNK];
+        for i in 0..INF_CHUNK {
+            left[i] = padded[i * 2];
+            right[i] = padded[i * 2 + 1];
+        }
+        print_profile_phase("pad + deinterleave", start.elapsed(), audio_secs_per_chunk);
+
+        let start = Instant::now();
+        let stft = stft_gpu(&separator.fft_device, &left, &right);
+        print_profile_phase("STFT", start.elapsed(), audio_secs_per_chunk);
+
+        let start = Instant::now();
+        let mut onnx_in = vec![0.0f32; 4 * DIM_F * DIM_T];
+        for ch in 0..MODEL_CHANNELS {
+            for frame_idx in 0..DIM_T {
+                let (ref re, ref im) = stft[ch * DIM_T + frame_idx];
+                for freq in 0..DIM_F {
+                    onnx_in[(ch * 2) * DIM_F * DIM_T + freq * DIM_T + frame_idx] = re[freq];
+                    onnx_in[(ch * 2 + 1) * DIM_F * DIM_T + freq * DIM_T + frame_idx] = im[freq];
+                }
+            }
+        }
+        print_profile_phase("pack model input", start.elapsed(), audio_secs_per_chunk);
+
+        let start = Instant::now();
+        let out_vec = separator.model.forward(onnx_in, [1, 4, DIM_F, DIM_T]);
+        print_profile_phase("Burn model forward", start.elapsed(), audio_secs_per_chunk);
+
+        let start = Instant::now();
+        let src_stride = 4 * DIM_F * DIM_T;
+        let cri_stride = DIM_F * DIM_T;
+        let vocal_stride = VOCALS_IDX * src_stride;
+
+        let mut vocal_specs: Vec<(Vec<f32>, Vec<f32>)> = Vec::with_capacity(MODEL_CHANNELS);
+        for ch in 0..MODEL_CHANNELS {
+            let mut re_bins = vec![0.0f32; N_FREQS * DIM_T];
+            let mut im_bins = vec![0.0f32; N_FREQS * DIM_T];
+            for freq in 0..DIM_F {
+                for t in 0..DIM_T {
+                    re_bins[freq * DIM_T + t] =
+                        out_vec[vocal_stride + (ch * 2) * cri_stride + freq * DIM_T + t];
+                    im_bins[freq * DIM_T + t] =
+                        out_vec[vocal_stride + (ch * 2 + 1) * cri_stride + freq * DIM_T + t];
+                }
+            }
+            vocal_specs.push((re_bins, im_bins));
+        }
+        print_profile_phase(
+            "unpack vocal spectrogram",
+            start.elapsed(),
+            audio_secs_per_chunk,
+        );
+
+        let start = Instant::now();
+        let vocal_waveforms = istft_gpu(&separator.fft_device, &vocal_specs);
+        print_profile_phase("iSTFT", start.elapsed(), audio_secs_per_chunk);
+
+        let start = Instant::now();
+        let mut output = vec![0.0f32; INF_CHUNK * MODEL_CHANNELS];
+        for i in 0..INF_CHUNK {
+            output[i * 2] = (left[i] - vocal_waveforms[0][i]).clamp(-1.0, 1.0);
+            output[i * 2 + 1] = (right[i] - vocal_waveforms[1][i]).clamp(-1.0, 1.0);
+        }
+
+        let mut trimmed = Vec::with_capacity(GEN_SIZE * MODEL_CHANNELS);
+        for i in OVERLAP..OVERLAP + GEN_SIZE {
+            trimmed.push(output[i * 2]);
+            trimmed.push(output[i * 2 + 1]);
+        }
+        print_profile_phase("subtract + trim", start.elapsed(), audio_secs_per_chunk);
+
+        trimmed
+    }
+
+    #[test]
+    fn vocal_removal_inference_realtime_ratio() {
+        println!("Creating RtDttSeparator...");
+        let init_start = Instant::now();
+        let Some(separator) = RtDttSeparator::new() else {
+            eprintln!("vocal model is not available; skipping inference speed test");
+            return;
+        };
+        println!(
+            "RtDttSeparator init: {:.1}ms",
+            duration_secs(init_start.elapsed()) * 1000.0
+        );
+
+        let chunk = test_music_chunk();
+        let audio_secs_per_chunk = GEN_SIZE as f64 / MODEL_SAMPLE_RATE as f64;
+
+        println!(
+            "Measuring vocal remover inference: {GEN_SIZE} frames/chunk, {:.3}s audio/chunk",
+            audio_secs_per_chunk
+        );
+        println!("1.00x real-time means inference takes exactly as long as playback.");
+
+        let warmup_start = Instant::now();
+        let warmup_output = separator.process_interleaved_chunk(&chunk);
+        let warmup_elapsed = warmup_start.elapsed();
+        assert_eq!(warmup_output.len(), chunk.len());
+        println!("Warmup: {:.1}ms", duration_secs(warmup_elapsed) * 1000.0);
+
+        println!("Phase breakdown after warmup:");
+        let profiled_output = profile_one_chunk(&separator, &chunk);
+        assert_eq!(profiled_output.len(), chunk.len());
+
+        let mut timings = Vec::with_capacity(MEASURED_RUNS);
+        for run_idx in 0..MEASURED_RUNS {
+            let start = Instant::now();
+            let output = separator.process_interleaved_chunk(&chunk);
+            let elapsed = start.elapsed();
+            assert_eq!(output.len(), chunk.len());
+
+            let realtime_ratio = audio_secs_per_chunk / duration_secs(elapsed);
+            println!(
+                "Run {}: {:.1}ms/chunk, {:.2}x real-time",
+                run_idx + 1,
+                duration_secs(elapsed) * 1000.0,
+                realtime_ratio
+            );
+            timings.push(elapsed);
+        }
+
+        let total_elapsed_secs = timings.iter().copied().map(duration_secs).sum::<f64>();
+        let processed_audio_secs = audio_secs_per_chunk * timings.len() as f64;
+        let realtime_ratio = processed_audio_secs / total_elapsed_secs;
+        let avg_ms = total_elapsed_secs * 1000.0 / timings.len() as f64;
+        let min_ms = timings
+            .iter()
+            .copied()
+            .map(duration_secs)
+            .fold(f64::INFINITY, f64::min)
+            * 1000.0;
+        let max_ms = timings
+            .iter()
+            .copied()
+            .map(duration_secs)
+            .fold(0.0, f64::max)
+            * 1000.0;
+
+        println!(
+            "Vocal remover inference speed: {:.2}x real-time; processed {:.3}s audio in {:.3}s; avg {:.1}ms/chunk, min {:.1}ms, max {:.1}ms",
+            realtime_ratio, processed_audio_secs, total_elapsed_secs, avg_ms, min_ms, max_ms
+        );
+
+        assert!(
+            realtime_ratio.is_finite() && realtime_ratio > 0.0,
+            "invalid real-time ratio: {realtime_ratio}"
+        );
+    }
 }

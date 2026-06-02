@@ -251,7 +251,7 @@ Main orchestrator. `Party::run()` sets up all pipelines:
 
 Environment is managed via nix flake and devshell. Try `nix develop --command cargo` for cargo.
 
-When using cargo commands, take these flags as reference:
+When using cargo commands (e.g. `cargo test`, `cargo build` etc.), take these flags as reference:
 
 ```
 11:26:41 [dev] Building with cargo rustc
@@ -277,4 +277,4 @@ When using cargo commands, take these flags as reference:
 11:26:41 [dev] : -Clink-arg=-Wl,-rpath,@executable_path
 ```
 
-Only by using these can you re-use the compile cache of dioxus.
+You should normally use the `dioxus-dev` profile, so that you can reuse compile cache of dioxus.
