@@ -20,6 +20,7 @@ ORT_CXX_STDLIB=c++_static dx serve --platform android
 # For iOS, we use the system apple sdk (instead of nix's):
 set -e DEVELOPER_DIR SDKROOT
 set -gx PATH /usr/bin /bin /usr/sbin /sbin $PATH
+export IPHONEOS_DEPLOYMENT_TARGET=10.0 # Prevent build/link target version mismatch
 dx serve --platform ios
 ```
 
