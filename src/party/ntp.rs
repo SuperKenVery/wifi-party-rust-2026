@@ -552,7 +552,11 @@ mod tests {
     fn test_service() -> Arc<NtpService> {
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         let addr = "127.0.0.1:9999".parse().unwrap();
-        let sender = NetworkSender::new(socket, addr);
+        let sender = NetworkSender::new(
+            socket,
+            addr,
+            Arc::new(std::sync::Mutex::new(crate::io::SendTarget::Multicast)),
+        );
         let service = NtpService::new(sender);
         service.start_task();
         service

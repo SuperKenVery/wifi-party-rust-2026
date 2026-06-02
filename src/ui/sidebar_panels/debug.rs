@@ -1,7 +1,37 @@
 use crate::party::NtpDebugInfo;
 use dioxus::prelude::*;
+use network_interface::NetworkInterfaceConfig;
+use std::net::IpAddr;
 
 use super::PanelHeader;
+
+#[derive(Clone, Debug)]
+struct SelfInterfaceInfo {
+    name: String,
+    index: u32,
+    addresses: Vec<IpAddr>,
+}
+
+fn get_self_interfaces() -> Vec<SelfInterfaceInfo> {
+    network_interface::NetworkInterface::show()
+        .map(|interfaces| {
+            interfaces
+                .into_iter()
+                .map(|iface| {
+                    let mut addresses: Vec<IpAddr> =
+                        iface.addr.iter().map(|addr| addr.ip()).collect();
+                    addresses.sort_by_key(|addr| addr.to_string());
+
+                    SelfInterfaceInfo {
+                        name: iface.name,
+                        index: iface.index,
+                        addresses,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 #[allow(non_snake_case)]
 #[component]
@@ -9,6 +39,8 @@ pub fn DebugPanel(
     ntp_info: Option<NtpDebugInfo>,
     #[props(default)] on_back: Option<EventHandler<()>>,
 ) -> Element {
+    let self_interfaces = use_signal(get_self_interfaces);
+
     rsx! {
         div {
             class: "flex-1 flex flex-col relative overflow-hidden bg-slate-900",
@@ -20,6 +52,69 @@ pub fn DebugPanel(
 
                 div {
                     class: "max-w-2xl space-y-8",
+
+                    div {
+                        class: "glass-card p-6 rounded-2xl",
+
+                        div {
+                            class: "text-xs font-bold text-slate-500 uppercase tracking-wider mb-6",
+                            "Self IP Addresses"
+                        }
+
+                        if self_interfaces.read().is_empty() {
+                            div {
+                                class: "text-slate-500 text-sm",
+                                "No network interfaces found."
+                            }
+                        } else {
+                            div {
+                                class: "space-y-3",
+
+                                for iface in self_interfaces.read().iter() {
+                                    div {
+                                        class: "rounded-lg bg-slate-800/50 border border-slate-700/50 p-3",
+
+                                        div {
+                                            class: "flex items-center justify-between gap-3 mb-2",
+                                            div {
+                                                class: "text-sm font-medium text-slate-200",
+                                                "{iface.name}"
+                                            }
+                                            div {
+                                                class: "text-xs font-mono text-slate-500",
+                                                "#{iface.index}"
+                                            }
+                                        }
+
+                                        if iface.addresses.is_empty() {
+                                            div {
+                                                class: "text-xs text-slate-500",
+                                                "No assigned IP address"
+                                            }
+                                        } else {
+                                            div {
+                                                class: "space-y-1",
+
+                                                for addr in iface.addresses.iter() {
+                                                    div {
+                                                        class: "flex items-center gap-2 text-sm",
+                                                        span {
+                                                            class: "w-10 text-[10px] font-bold uppercase text-slate-500",
+                                                            if addr.is_ipv4() { "IPv4" } else { "IPv6" }
+                                                        }
+                                                        span {
+                                                            class: "font-mono text-slate-300 break-all",
+                                                            "{addr}"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     div {
                         class: "glass-card p-6 rounded-2xl",

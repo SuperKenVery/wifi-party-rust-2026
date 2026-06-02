@@ -11,7 +11,7 @@ ios_entitlements = "assets/Entitlements.ios.plist"
 identifier = "com.ken.WifiPartyRust"
 publisher = "ken"
 icon = []
-resources = []
+resources = ["assets/LaunchScreen.storyboard"]
 
 [bundle.macos]
 info_plist_path = "assets/Info.plist"

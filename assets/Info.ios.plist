@@ -1,14 +1,44 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
 	<key>CFBundleDisplayName</key>
 	<string>Wi-Fi Party</string>
+
 	<key>CFBundleName</key>
 	<string>Wi-Fi Party</string>
+
+	<key>CFBundleIdentifier</key>
+	<string>com.ken.WifiPartyRust</string>
+
+	<key>CFBundleExecutable</key>
+	<string>wifi-party-rust</string>
+
+	<key>CFBundleIconFile</key>
+	<string>icon.icns</string>
+
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+
+	<key>CFBundleShortVersionString</key>
+	<string>7.4.0</string>
+
+	<key>CFBundleVersion</key>
+	<string>1</string>
+
+	<key>UILaunchStoryboardName</key>
+	<string>LaunchScreen</string>
+
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Wi-Fi Party needs access to the local network to discover nearby participants and share audio over multicast.</string>
+	<string
+        >Wi-Fi Party needs access to the local network to discover nearby participants and share audio over multicast.</string>
+
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Wi-Fi Party needs microphone access to send your voice to nearby participants.</string>
+	<string
+        >Wi-Fi Party needs microphone access to send your voice to nearby participants.</string>
 </dict>
 </plist>

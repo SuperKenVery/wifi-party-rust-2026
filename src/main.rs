@@ -32,7 +32,7 @@ use tracing::{Level, error, info};
     all(feature = "mobile", any(target_os = "android", target_os = "ios"))
 ))]
 const CUSTOM_HEAD: &str =
-    r#"<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">"#;
+    r#"<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">"#;
 
 fn main() {
     dioxus::logger::init(Level::DEBUG).expect("failed to init logger");
