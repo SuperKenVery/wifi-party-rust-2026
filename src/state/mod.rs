@@ -10,6 +10,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex};
 
+use crate::io::SendTarget;
 use crate::music_provider::ProviderFactory;
 use crate::party::{Party, PartyConfig};
 
@@ -114,6 +115,7 @@ pub struct AppState {
     pub vocal_removal_enabled: Arc<AtomicBool>,
     pub view_state: Arc<PartyViewState>,
     pub music_progress: Arc<MusicStreamProgress>,
+    pub send_target: Arc<Mutex<SendTarget>>,
     pub party: Mutex<Option<Party<f32, 2, 48000>>>,
     pub music_provider_factories: &'static [ProviderFactory],
 }
@@ -131,6 +133,7 @@ impl AppState {
             vocal_removal_enabled: Arc::new(AtomicBool::new(false)),
             view_state: Arc::new(PartyViewState::new()),
             music_progress: Arc::new(MusicStreamProgress::new()),
+            send_target: Arc::new(Mutex::new(SendTarget::Multicast)),
             party: Mutex::new(None),
             music_provider_factories: &[
                 crate::music_provider::local_file::factory,
@@ -215,5 +218,30 @@ impl AppState {
             .as_ref()
             .context("Party not initialized")?
             .set_music_vocal_removal(stream_id, enabled)
+    }
+
+    pub fn send_target(&self) -> SendTarget {
+        self.send_target
+            .lock()
+            .map(|target| target.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn set_send_target(&self, target: SendTarget) -> Result<()> {
+        if let SendTarget::Unicast(ip) = target {
+            let party_guard = self.party.lock().expect("Party lock poisoned");
+            if let Some(party) = party_guard.as_ref() {
+                let uses_ipv6 = party.uses_ipv6();
+                if uses_ipv6 != ip.is_ipv6() {
+                    anyhow::bail!(
+                        "Target IP family does not match the active {} socket",
+                        if uses_ipv6 { "IPv6" } else { "IPv4" }
+                    );
+                }
+            }
+        }
+
+        *self.send_target.lock().expect("Send target lock poisoned") = target;
+        Ok(())
     }
 }

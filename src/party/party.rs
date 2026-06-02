@@ -13,7 +13,8 @@ use tracing::{error, info};
 use crate::audio::effects::Switch;
 use crate::audio::{AudioBatcher, AudioSample, Gain, LevelMeter, OpusEncoder, SimpleBuffer};
 use crate::io::{
-    AudioInput, AudioOutput, LoopbackInput, MulticastLock, NetworkSender, create_multicast_socket,
+    AudioInput, AudioOutput, LoopbackInput, MulticastLock, NetworkSender, SendTarget,
+    create_multicast_socket,
 };
 use crate::pipeline::Pushable;
 use crate::state::{AppState, MusicStreamProgress};
@@ -69,6 +70,10 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
         self.mic_input.as_ref()
     }
 
+    pub fn uses_ipv6(&self) -> bool {
+        self.config.ipv6
+    }
+
     pub fn pause_music(&self, stream_id: SyncedStreamId) -> Result<()> {
         self.share_music()?.pause(stream_id)
     }
@@ -102,6 +107,7 @@ impl<
         info!("Starting Party pipelines with config {:#?}", self.config);
 
         self.multicast_lock = MulticastLock::acquire();
+        self.normalize_send_target_for_config();
 
         let (socket, multicast_addr, local_ips) =
             create_multicast_socket(self.config.ipv6, self.config.send_interface_index)?;
@@ -109,7 +115,8 @@ impl<
         let send_socket: UdpSocket = socket
             .try_clone()
             .context("Failed to clone socket for sender")?;
-        let network_sender = NetworkSender::new(send_socket, multicast_addr);
+        let network_sender =
+            NetworkSender::new(send_socket, multicast_addr, self.state.send_target.clone());
 
         let stream_bundle = self.build_stream_bundle(network_sender.clone());
 
@@ -280,6 +287,26 @@ impl<
             ntp_service,
             share_music,
             registry: Arc::new(StreamRegistry::from_streams(streams)),
+        }
+    }
+
+    fn normalize_send_target_for_config(&self) {
+        let Ok(mut send_target) = self.state.send_target.lock() else {
+            return;
+        };
+
+        let SendTarget::Unicast(ip) = &*send_target else {
+            return;
+        };
+        let ip = *ip;
+
+        if ip.is_ipv6() != self.config.ipv6 {
+            info!(
+                "Resetting incompatible unicast target {} after switching to {}",
+                ip,
+                if self.config.ipv6 { "IPv6" } else { "IPv4" }
+            );
+            *send_target = SendTarget::Multicast;
         }
     }
 }

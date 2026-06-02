@@ -173,10 +173,12 @@ fn AppLayout() -> Element {
 
     rsx! {
         div {
-            class: "flex h-screen w-full bg-slate-900 text-slate-100 font-sans overflow-hidden selection:bg-indigo-500 selection:text-white safe-area-layout",
+            // app-shell flex
+            class: "h-screen flex w-full bg-slate-900 text-slate-100 font-sans overflow-hidden selection:bg-indigo-500 selection:text-white safe-area-layout",
 
             if (ui.is_narrow)() {
                 div {
+                    // class: "app-mobile-shell flex flex-col w-full",
                     class: "flex flex-col h-full w-full max-h-screen",
                     div {
                         class: "flex-1 flex flex-col min-h-0 overflow-hidden",

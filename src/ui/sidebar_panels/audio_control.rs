@@ -1,3 +1,4 @@
+use crate::io::SendTarget;
 use crate::party::PartyConfig;
 use crate::state::AppState;
 use cpal::traits::{DeviceTrait, HostTrait};
@@ -91,6 +92,30 @@ fn get_network_interfaces() -> Vec<NetworkInterfaceInfo> {
         .unwrap_or_default()
 }
 
+fn apply_send_target(state: &AppState, send_to_peer: bool, peer_ip: &str) -> Option<String> {
+    if !send_to_peer {
+        return state
+            .set_send_target(SendTarget::Multicast)
+            .err()
+            .map(|error| error.to_string());
+    }
+
+    let trimmed = peer_ip.trim();
+    if trimmed.is_empty() {
+        return Some("Enter a peer IP address.".to_string());
+    }
+
+    let ip = match trimmed.parse::<IpAddr>() {
+        Ok(ip) => ip,
+        Err(_) => return Some("Enter a valid IPv4 or IPv6 address.".to_string()),
+    };
+
+    state
+        .set_send_target(SendTarget::Unicast(ip))
+        .err()
+        .map(|error| error.to_string())
+}
+
 #[allow(deprecated)]
 fn device_display_name(device: &Device) -> String {
     match device.description() {
@@ -112,6 +137,16 @@ pub fn AudioControlPanel(
 ) -> Element {
     let state_arc = use_context::<Arc<AppState>>();
     let mut mic_enabled = use_signal(|| false);
+    let initial_send_target = state_arc.send_target();
+    let initial_send_target_for_mode = initial_send_target.clone();
+    let initial_send_target_for_ip = initial_send_target.clone();
+    let mut send_to_peer =
+        use_signal(move || matches!(initial_send_target_for_mode, SendTarget::Unicast(_)));
+    let mut peer_ip = use_signal(move || match initial_send_target_for_ip {
+        SendTarget::Unicast(ip) => ip.to_string(),
+        SendTarget::Multicast => String::new(),
+    });
+    let mut target_error = use_signal(|| None::<String>);
 
     let state_mic = state_arc.clone();
     let on_mic_toggle = move |_| {
@@ -165,6 +200,31 @@ pub fn AudioControlPanel(
             .listen_enabled
             .store(!current, std::sync::atomic::Ordering::Relaxed);
     };
+
+    let state_target_multicast = state_arc.clone();
+    let on_multicast_target = move |_| {
+        send_to_peer.set(false);
+        target_error.set(apply_send_target(&state_target_multicast, false, ""));
+    };
+
+    let state_target_peer = state_arc.clone();
+    let on_peer_target = move |_| {
+        send_to_peer.set(true);
+        let value = peer_ip();
+        target_error.set(apply_send_target(&state_target_peer, true, &value));
+    };
+
+    let state_target_input = state_arc.clone();
+    let on_peer_ip_input = move |evt: Event<FormData>| {
+        let value = evt.value();
+        peer_ip.set(value.clone());
+        if send_to_peer() {
+            target_error.set(apply_send_target(&state_target_input, true, &value));
+        }
+    };
+
+    let peer_ip_value = peer_ip();
+    let target_error_value = target_error();
 
     rsx! {
         div {
@@ -236,6 +296,60 @@ pub fn AudioControlPanel(
 
                         div {
                             class: "space-y-6",
+
+                            div {
+                                class: "space-y-3 pb-6 border-b border-slate-800",
+
+                                div {
+                                    class: "text-sm font-medium text-slate-300",
+                                    "Send Destination"
+                                }
+
+                                div {
+                                    class: "grid gap-2",
+
+                                    label {
+                                        class: "flex items-center gap-3 rounded-lg border border-slate-700 bg-slate-800/60 px-4 py-3 text-sm text-slate-200",
+                                        input {
+                                            r#type: "radio",
+                                            name: "send-target",
+                                            class: "w-4 h-4 border-slate-600 bg-slate-800 text-indigo-500 focus:ring-indigo-500 focus:ring-offset-slate-900",
+                                            checked: !send_to_peer(),
+                                            onchange: on_multicast_target,
+                                        }
+                                        span { "Send to all others (multicast)" }
+                                    }
+
+                                    label {
+                                        class: "flex items-center gap-3 rounded-lg border border-slate-700 bg-slate-800/60 px-4 py-3 text-sm text-slate-200",
+                                        input {
+                                            r#type: "radio",
+                                            name: "send-target",
+                                            class: "w-4 h-4 border-slate-600 bg-slate-800 text-indigo-500 focus:ring-indigo-500 focus:ring-offset-slate-900",
+                                            checked: send_to_peer(),
+                                            onchange: on_peer_target,
+                                        }
+                                        span { "Send to one peer" }
+                                    }
+                                }
+
+                                if send_to_peer() {
+                                    input {
+                                        r#type: "text",
+                                        class: "w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-sm font-mono text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500 transition-colors",
+                                        placeholder: "192.168.1.42",
+                                        value: "{peer_ip_value}",
+                                        oninput: on_peer_ip_input,
+                                    }
+
+                                    if let Some(error) = target_error_value {
+                                        div {
+                                            class: "text-xs text-amber-400",
+                                            "{error}"
+                                        }
+                                    }
+                                }
+                            }
 
                             div {
                                 div {

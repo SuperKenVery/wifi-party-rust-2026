@@ -17,7 +17,7 @@
 //! - Hop limit: `1` (local network only)
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use network_interface::NetworkInterfaceConfig;
@@ -33,6 +33,27 @@ pub const MULTICAST_PORT: u16 = 7667;
 pub const TTL: u32 = 1;
 
 const DSCP_EF: u32 = 0xB8;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendTarget {
+    Multicast,
+    Unicast(IpAddr),
+}
+
+impl Default for SendTarget {
+    fn default() -> Self {
+        Self::Multicast
+    }
+}
+
+impl SendTarget {
+    fn socket_addr(&self, multicast_addr: SocketAddr) -> SocketAddr {
+        match self {
+            SendTarget::Multicast => multicast_addr,
+            SendTarget::Unicast(ip) => SocketAddr::new(*ip, multicast_addr.port()),
+        }
+    }
+}
 
 fn set_socket_dscp(socket: &Socket, ipv6: bool) {
     #[cfg(unix)]
@@ -303,10 +324,10 @@ pub fn create_multicast_socket(
     }
 }
 
-/// Sends audio packets to all peers via UDP multicast.
+/// Sends audio packets to all peers via UDP multicast or to one peer via UDP unicast.
 ///
 /// Implements [`Pushable`] so it can be used directly in the audio pipeline.
-/// Packets are serialized with `rkyv` and broadcast to the multicast group.
+/// Packets are serialized with `rkyv` and sent to the current target.
 ///
 /// # Cloning
 ///
@@ -316,15 +337,21 @@ pub fn create_multicast_socket(
 pub struct NetworkSender {
     socket: Arc<UdpSocket>,
     multicast_addr: SocketAddr,
+    send_target: Arc<Mutex<SendTarget>>,
 }
 
 impl NetworkSender {
-    pub fn new(socket: UdpSocket, multicast_addr: SocketAddr) -> Self {
+    pub fn new(
+        socket: UdpSocket,
+        multicast_addr: SocketAddr,
+        send_target: Arc<Mutex<SendTarget>>,
+    ) -> Self {
         info!("Network sender initialized for {:?}", multicast_addr);
 
         Self {
             socket: Arc::new(socket),
             multicast_addr,
+            send_target,
         }
     }
 
@@ -338,7 +365,11 @@ impl NetworkSender {
         let serialized =
             rkyv::to_bytes::<rkyv::rancor::Error>(packet).context("Failed to serialize packet")?;
 
-        let addr = self.multicast_addr;
+        let addr = self
+            .send_target
+            .lock()
+            .map(|target| target.socket_addr(self.multicast_addr))
+            .unwrap_or(self.multicast_addr);
         let sent_length = self
             .socket
             .send_to(&serialized, addr)

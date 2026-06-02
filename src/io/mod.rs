@@ -17,6 +17,6 @@ pub use audio::{AudioInput, AudioOutput, LoopbackInput};
 pub use file_picker::{FilePickerResult, pick_audio_file};
 pub use multicast_lock::MulticastLock;
 pub use network::{
-    MULTICAST_ADDR_V4, MULTICAST_ADDR_V6, MULTICAST_PORT, NetworkSender, TTL,
+    MULTICAST_ADDR_V4, MULTICAST_ADDR_V6, MULTICAST_PORT, NetworkSender, SendTarget, TTL,
     create_multicast_socket,
 };
