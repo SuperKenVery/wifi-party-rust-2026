@@ -250,3 +250,31 @@ Main orchestrator. `Party::run()` sets up all pipelines:
 ## Environment
 
 Environment is managed via nix flake and devshell. Try `nix develop --command cargo` for cargo.
+
+When using cargo commands, take these flags as reference:
+
+```
+11:26:41 [dev] Building with cargo rustc
+11:26:41 [dev] : DIOXUS_PRODUCT_NAME=WifiPartyRust
+11:26:41 [dev] : --config
+11:26:41 [dev] : profile.desktop-dev.strip=false
+11:26:41 [dev] : --config
+11:26:41 [dev] : profile.desktop-dev.inherits="dev"
+11:26:41 [dev] : --profile
+11:26:41 [dev] : desktop-dev
+11:26:41 [dev] : --target
+11:26:41 [dev] : aarch64-apple-darwin
+11:26:41 [dev] : --verbose
+11:26:41 [dev] : --no-default-features
+11:26:41 [dev] : --features
+11:26:41 [dev] : vocal-removal desktop
+11:26:41 [dev] : -p
+11:26:41 [dev] : wifi-party-rust
+11:26:41 [dev] : --bin
+11:26:41 [dev] : wifi-party-rust
+11:26:41 [dev] : --
+11:26:41 [dev] : -Clink-arg=-Wl,-rpath,@executable_path/../Frameworks
+11:26:41 [dev] : -Clink-arg=-Wl,-rpath,@executable_path
+```
+
+Only by using these can you re-use the compile cache of dioxus.

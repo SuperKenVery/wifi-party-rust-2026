@@ -1,31 +1,18 @@
-//! Vocal remover effect using the RT-DTT model via Burn (Wgpu backend) + gpu-fft.
+//! Vocal remover effect using the RT-DTT separator from `wifi-party-vocal-model`.
 //!
 //! ## How it works
 //!
 //! At **build time** `wifi-party-vocal-model` converts `all_rt.onnx` into Burn
 //! Rust code. At **run time** the Wgpu backend runs the
-//! separation network, and `gpu-fft` (CubeCL / wgpu) does STFT/iSTFT.
+//! separation network, and `gpu-fft` (CubeCL / wgpu) does STFT/iSTFT inside
+//! that crate.
 //!
 //! When the model is not available at build time (no ONNX file found) the node
 //! compiles as a pass-through and emits a tracing warning on first use.
 //!
-//! ## Algorithm  (matches `infer.py` exactly)
-//!
-//! For each chunk of `GEN_SIZE = 31 232` input samples:
-//!
-//! 1. Zero-pad OVERLAP=512 on each side → `INF_CHUNK = 32 256` samples.
-//! 2. GPU STFT: batch all frames × channels with `gpu_fft::fft_batch`.
-//!    Periodic Hann window, `n_fft=1024`, `hop=512`, `center=True`.
-//! 3. Pack first `DIM_F=384` bins into a Burn tensor `[1,4,384,64]`.
-//! 4. Inference with Burn Wgpu backend → output `[1,4,4,384,64]`.
-//! 5. GPU iSTFT: reconstruct the vocal waveform with `gpu_fft::ifft_batch` + OLA.
-//! 6. `instrumental = mix − vocals` (source index 3), trim overlap.
-
-#[cfg(feature = "vocal-removal")]
-use cubecl::wgpu::{WgpuDevice as FftWgpuDevice, WgpuRuntime};
 use tracing::debug;
 #[cfg(feature = "vocal-removal")]
-use wifi_party_vocal_model::RtDttModel;
+use wifi_party_vocal_model::{GEN_SIZE, MODEL_CHANNELS, MODEL_SAMPLE_RATE, RtDttSeparator};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -35,246 +22,18 @@ use crate::audio::decoders::DecodedAudio;
 use crate::audio::frame::AudioBuffer;
 use crate::pipeline::Node;
 
-// ── Model hyper-parameters ────────────────────────────────────────────────────
-
-const N_FFT: usize = 1024;
-const HOP_LENGTH: usize = 512;
-const DIM_F: usize = 384; // frequency bins used by the model
-const DIM_T: usize = 64; // time frames per chunk
-const N_FREQS: usize = N_FFT / 2 + 1; // 513 one-sided bins
-const OVERLAP: usize = N_FFT / 2; // 512 — center=True padding
-/// Total samples per chunk including OVERLAP on each side.
-const INF_CHUNK: usize = HOP_LENGTH * (DIM_T - 1); // 32 256
-/// Usable audio samples written per chunk.
-const GEN_SIZE: usize = INF_CHUNK - 2 * OVERLAP; // 31 232
-const N_SOURCES: usize = 4; // bass / drums / other / vocals
-const VOCALS_IDX: usize = 3;
+#[cfg(not(feature = "vocal-removal"))]
+const GEN_SIZE: usize = 31_232;
+#[cfg(not(feature = "vocal-removal"))]
 const MODEL_SAMPLE_RATE: u32 = 44_100;
+#[cfg(not(feature = "vocal-removal"))]
 const MODEL_CHANNELS: usize = 2;
-
-#[cfg(feature = "vocal-removal")]
-fn default_fft_device() -> FftWgpuDevice {
-    FftWgpuDevice::default()
-}
-
-// ── Hann window ───────────────────────────────────────────────────────────────
-
-/// Periodic Hann window matching `torch.hann_window(N, periodic=True)`.
-#[cfg(feature = "vocal-removal")]
-fn hann_window(size: usize) -> Vec<f32> {
-    (0..size)
-        .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / size as f32).cos()))
-        .collect()
-}
-
-// ── STFT (GPU) ────────────────────────────────────────────────────────────────
-
-/// Compute STFT for both channels using batched GPU FFTs.
-///
-/// Returns `stft[ch * DIM_T + frame] = (real_1024, imag_1024)`.
-/// (`gpu_fft::fft` zero-pads to next power of 2; 1024 is already a power of 2.)
-#[cfg(feature = "vocal-removal")]
-fn stft_gpu(fft_device: &FftWgpuDevice, left: &[f32], right: &[f32]) -> Vec<(Vec<f32>, Vec<f32>)> {
-    debug_assert_eq!(left.len(), INF_CHUNK);
-    debug_assert_eq!(right.len(), INF_CHUNK);
-
-    let window = hann_window(N_FFT);
-
-    // Build 2×DIM_T windowed frames (ch0 first, then ch1).
-    let mut signals: Vec<Vec<f32>> = Vec::with_capacity(2 * DIM_T);
-    for samples in [left, right] {
-        for frame_idx in 0..DIM_T {
-            // center=True: frame window is aligned so hop 0 starts at -OVERLAP.
-            let frame_start = frame_idx as isize * HOP_LENGTH as isize - OVERLAP as isize;
-            let mut frame = vec![0.0f32; N_FFT];
-            for i in 0..N_FFT {
-                let src = frame_start + i as isize;
-                if src >= 0 && (src as usize) < INF_CHUNK {
-                    frame[i] = samples[src as usize] * window[i];
-                }
-                // out-of-range → zero (already 0 from vec initialisation)
-            }
-            signals.push(frame);
-        }
-    }
-
-    // Batch FFT on GPU — returns one (real, imag) pair per signal, each length 1024.
-    gpu_fft::fft::fft_batch::<WgpuRuntime>(fft_device, &signals)
-}
-
-// ── iSTFT (GPU) ───────────────────────────────────────────────────────────────
-
-/// Compute iSTFT for N_SOURCES × 2 channels using batched GPU IFFTs + CPU OLA.
-///
-/// `spectrograms[src * 2 + ch]` = flat `[N_FREQS × DIM_T]` (real, imag) pair.
-/// Returns `waveforms[src * 2 + ch]` = `INF_CHUNK` samples.
-#[cfg(feature = "vocal-removal")]
-fn istft_gpu(fft_device: &FftWgpuDevice, spectrograms: &[(Vec<f32>, Vec<f32>)]) -> Vec<Vec<f32>> {
-    let n_items = spectrograms.len(); // N_SOURCES * 2
-
-    // Build full conjugate-symmetric N_FFT-point spectra for each frame.
-    // Batch index: item * DIM_T + frame_idx.
-    let mut ifft_in: Vec<(Vec<f32>, Vec<f32>)> = Vec::with_capacity(n_items * DIM_T);
-    for (re_bins, im_bins) in spectrograms {
-        for frame_idx in 0..DIM_T {
-            let mut re = vec![0.0f32; N_FFT];
-            let mut im = vec![0.0f32; N_FFT];
-
-            // One-sided bins (DIM_F = 384 used, DIM_F..N_FREQS zero-padded, N_FREQS..N_FFT mirrored).
-            for freq in 0..N_FREQS {
-                let r = if freq < DIM_F {
-                    re_bins[freq * DIM_T + frame_idx]
-                } else {
-                    0.0
-                };
-                let m = if freq < DIM_F {
-                    im_bins[freq * DIM_T + frame_idx]
-                } else {
-                    0.0
-                };
-                re[freq] = r;
-                im[freq] = m;
-            }
-            // Conjugate mirror: X[N-k] = conj(X[k]) for k = 1..N/2-1.
-            for freq in 1..(N_FFT / 2) {
-                re[N_FFT - freq] = re[freq];
-                im[N_FFT - freq] = -im[freq];
-            }
-
-            ifft_in.push((re, im));
-        }
-    }
-
-    // Batch IFFT on GPU.
-    // Output: each element is Vec<f32> of length 2*N_FFT = 2048.
-    //   [0..N_FFT]       = real part (already 1/N normalised by gpu-fft)
-    //   [N_FFT..2*N_FFT] = imag part (≈ 0 for symmetric spectra)
-    let ifft_out = gpu_fft::ifft::ifft_batch::<WgpuRuntime>(fft_device, &ifft_in);
-
-    // Overlap-add on CPU (sequential by nature).
-    let window = hann_window(N_FFT);
-    let padded_len = N_FFT + HOP_LENGTH * (DIM_T - 1); // 33 280
-
-    let mut waveforms = Vec::with_capacity(n_items);
-    for item_idx in 0..n_items {
-        let mut output = vec![0.0f32; padded_len];
-        let mut win_sum = vec![0.0f32; padded_len];
-
-        for frame_idx in 0..DIM_T {
-            let frame_data = &ifft_out[item_idx * DIM_T + frame_idx];
-            // Real part lives in [0..N_FFT].
-            let start = frame_idx * HOP_LENGTH;
-            for i in 0..N_FFT {
-                let w = window[i];
-                output[start + i] += frame_data[i] * w;
-                win_sum[start + i] += w * w;
-            }
-        }
-
-        // Normalize OLA by window-squared envelope.
-        for i in 0..padded_len {
-            if win_sum[i] > 1e-8 {
-                output[i] /= win_sum[i];
-            }
-        }
-
-        // Trim center=True padding: [OVERLAP .. padded_len - OVERLAP] = INF_CHUNK samples.
-        waveforms.push(output[OVERLAP..padded_len - OVERLAP].to_vec());
-    }
-
-    waveforms
-}
-
-// ── Inference ─────────────────────────────────────────────────────────────────
-
-/// Process one INF_CHUNK stereo chunk through the separation model.
-///
-/// Returns `GEN_SIZE * 2` interleaved stereo f32 samples (vocal-removed).
-#[cfg(feature = "vocal-removal")]
-fn infer_chunk(model: &RtDttModel, fft_device: &FftWgpuDevice, chunk: &[f32]) -> Vec<f32> {
-    debug_assert_eq!(chunk.len(), INF_CHUNK * 2);
-
-    // 1. De-interleave.
-    let mut left = vec![0.0f32; INF_CHUNK];
-    let mut right = vec![0.0f32; INF_CHUNK];
-    for i in 0..INF_CHUNK {
-        left[i] = chunk[i * 2];
-        right[i] = chunk[i * 2 + 1];
-    }
-
-    // 2. GPU STFT.
-    let stft = stft_gpu(fft_device, &left, &right);
-
-    // 3. Pack into input layout: (1, 4, DIM_F, DIM_T)
-    //    Channel layout: [ch0_re, ch0_im, ch1_re, ch1_im]
-    let mut onnx_in = vec![0.0f32; 4 * DIM_F * DIM_T];
-    for ch in 0..2usize {
-        for frame_idx in 0..DIM_T {
-            let (ref re, ref im) = stft[ch * DIM_T + frame_idx];
-            for freq in 0..DIM_F {
-                onnx_in[(ch * 2) * DIM_F * DIM_T + freq * DIM_T + frame_idx] = re[freq];
-                onnx_in[(ch * 2 + 1) * DIM_F * DIM_T + freq * DIM_T + frame_idx] = im[freq];
-            }
-        }
-    }
-
-    // 4. Run Burn inference.
-    //    Input:  [1, 4, DIM_F, DIM_T]
-    //    Output: [1, 4, 4, DIM_F, DIM_T]  (batch, source, cri, freq, time)
-    let out_vec = model.forward(onnx_in, [1, 4, DIM_F, DIM_T]);
-
-    // 5. Unpack the vocal source spectrogram.
-    let src_stride = 4 * DIM_F * DIM_T; // 4 * 384 * 64 = 98 304
-    let cri_stride = DIM_F * DIM_T; //     384 * 64 = 24 576
-    let vocal_stride = VOCALS_IDX * src_stride;
-
-    let mut vocal_specs: Vec<(Vec<f32>, Vec<f32>)> = Vec::with_capacity(2);
-    for ch in 0..2usize {
-        let mut re_bins = vec![0.0f32; N_FREQS * DIM_T];
-        let mut im_bins = vec![0.0f32; N_FREQS * DIM_T];
-        for freq in 0..DIM_F {
-            for t in 0..DIM_T {
-                re_bins[freq * DIM_T + t] =
-                    out_vec[vocal_stride + (ch * 2) * cri_stride + freq * DIM_T + t];
-                im_bins[freq * DIM_T + t] =
-                    out_vec[vocal_stride + (ch * 2 + 1) * cri_stride + freq * DIM_T + t];
-            }
-        }
-        vocal_specs.push((re_bins, im_bins));
-    }
-
-    // 6. GPU iSTFT for vocal channels → INF_CHUNK samples each.
-    let vocal_waveforms = istft_gpu(fft_device, &vocal_specs);
-
-    // 7. Instrumental = mix − vocals.
-    let mut output = vec![0.0f32; INF_CHUNK * 2];
-    for i in 0..INF_CHUNK {
-        let mix_l = left[i];
-        let mix_r = right[i];
-        let voc_l = vocal_waveforms[0][i];
-        let voc_r = vocal_waveforms[1][i];
-
-        output[i * 2] = (mix_l - voc_l).clamp(-1.0, 1.0);
-        output[i * 2 + 1] = (mix_r - voc_r).clamp(-1.0, 1.0);
-    }
-
-    // 8. Trim center=True padding → GEN_SIZE samples per channel.
-    let mut trimmed = Vec::with_capacity(GEN_SIZE * 2);
-    for i in OVERLAP..OVERLAP + GEN_SIZE {
-        trimmed.push(output[i * 2]);
-        trimmed.push(output[i * 2 + 1]);
-    }
-
-    trimmed
-}
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
 struct State {
     #[cfg(feature = "vocal-removal")]
-    model: Option<RtDttModel>,
-    #[cfg(feature = "vocal-removal")]
-    fft_device: FftWgpuDevice,
+    separator: Option<RtDttSeparator>,
     input_buffer: Vec<f32>,
     output_buffer: Vec<f32>,
 }
@@ -287,17 +46,12 @@ impl State {
 
     #[cfg(feature = "vocal-removal")]
     fn process_impl(&mut self, chunk_data: &[f32]) {
-        let Some(model) = self.model.as_ref() else {
+        let Some(separator) = self.separator.as_ref() else {
             self.output_buffer.extend_from_slice(chunk_data);
             return;
         };
 
-        let chunk_samples = GEN_SIZE * MODEL_CHANNELS;
-        let mut chunk = vec![0.0f32; INF_CHUNK * MODEL_CHANNELS];
-        let off = OVERLAP * MODEL_CHANNELS;
-        chunk[off..off + chunk_samples].copy_from_slice(chunk_data);
-
-        let processed = infer_chunk(model, &self.fft_device, &chunk);
+        let processed = separator.process_interleaved_chunk(chunk_data);
         self.output_buffer.extend_from_slice(&processed);
     }
 
@@ -379,8 +133,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     pub fn new(enabled: Arc<AtomicBool>) -> Self {
         #[cfg(feature = "vocal-removal")]
         let state = State {
-            model: RtDttModel::new(),
-            fft_device: default_fft_device(),
+            separator: RtDttSeparator::new(),
             input_buffer: Vec::new(),
             output_buffer: Vec::new(),
         };
@@ -449,8 +202,7 @@ impl<const CHANNELS: usize, const SAMPLE_RATE: u32> DecodedVocalRemover<CHANNELS
         );
         #[cfg(feature = "vocal-removal")]
         let state = State {
-            model: RtDttModel::new(),
-            fft_device: default_fft_device(),
+            separator: RtDttSeparator::new(),
             input_buffer: Vec::new(),
             output_buffer: Vec::new(),
         };
@@ -660,120 +412,28 @@ mod tests {
     #[cfg(feature = "vocal-removal")]
     #[test]
     fn infer_chunk_timing() {
-        let Some(model) = RtDttModel::new() else {
+        let Some(separator) = RtDttSeparator::new() else {
             eprintln!("vocal model is not available; skipping timing test");
             return;
         };
 
-        let dummy_chunk = vec![0.0f32; super::INF_CHUNK * 2];
+        let dummy_chunk = vec![0.0f32; GEN_SIZE * MODEL_CHANNELS];
 
-        println!("Warming up (Burn Wgpu)...");
+        println!("Warming up vocal separator...");
         let t_warmup = Instant::now();
-        let fft_device = super::default_fft_device();
-        let _ = super::infer_chunk(&model, &fft_device, &dummy_chunk);
+        let _ = separator.process_interleaved_chunk(&dummy_chunk);
         println!("Warmup: {:.1}ms", t_warmup.elapsed().as_secs_f64() * 1000.0);
-        profile_infer_chunk(&model, &fft_device, &dummy_chunk);
 
         for i in 0..3 {
             let t0 = Instant::now();
-            let _ = super::infer_chunk(&model, &fft_device, &dummy_chunk);
+            let _ = separator.process_interleaved_chunk(&dummy_chunk);
             let ms = t0.elapsed().as_secs_f64() * 1000.0;
             println!(
                 "Run {i}: {ms:.1}ms / chunk ({:.1}s audio / {:.2}x RT)",
-                super::GEN_SIZE as f64 / 44100.0,
-                (super::GEN_SIZE as f64 / 44100.0) / t0.elapsed().as_secs_f64()
+                GEN_SIZE as f64 / MODEL_SAMPLE_RATE as f64,
+                (GEN_SIZE as f64 / MODEL_SAMPLE_RATE as f64) / t0.elapsed().as_secs_f64()
             );
         }
-    }
-
-    #[cfg(feature = "vocal-removal")]
-    fn profile_infer_chunk(model: &RtDttModel, fft_device: &FftWgpuDevice, chunk: &[f32]) {
-        let total = Instant::now();
-
-        let t = Instant::now();
-        let mut left = vec![0.0f32; super::INF_CHUNK];
-        let mut right = vec![0.0f32; super::INF_CHUNK];
-        for i in 0..super::INF_CHUNK {
-            left[i] = chunk[i * 2];
-            right[i] = chunk[i * 2 + 1];
-        }
-        let deinterleave_ms = t.elapsed().as_secs_f64() * 1000.0;
-
-        let t = Instant::now();
-        let stft = super::stft_gpu(fft_device, &left, &right);
-        let stft_ms = t.elapsed().as_secs_f64() * 1000.0;
-
-        let t = Instant::now();
-        let mut onnx_in = vec![0.0f32; 4 * super::DIM_F * super::DIM_T];
-        for ch in 0..2usize {
-            for frame_idx in 0..super::DIM_T {
-                let (ref re, ref im) = stft[ch * super::DIM_T + frame_idx];
-                for freq in 0..super::DIM_F {
-                    onnx_in[(ch * 2) * super::DIM_F * super::DIM_T
-                        + freq * super::DIM_T
-                        + frame_idx] = re[freq];
-                    onnx_in[(ch * 2 + 1) * super::DIM_F * super::DIM_T
-                        + freq * super::DIM_T
-                        + frame_idx] = im[freq];
-                }
-            }
-        }
-        let pack_ms = t.elapsed().as_secs_f64() * 1000.0;
-
-        let t = Instant::now();
-        let out_vec = model.forward(onnx_in, [1, 4, super::DIM_F, super::DIM_T]);
-        let forward_readback_ms = t.elapsed().as_secs_f64() * 1000.0;
-
-        let t = Instant::now();
-        let src_stride = 4 * super::DIM_F * super::DIM_T;
-        let cri_stride = super::DIM_F * super::DIM_T;
-        let vocal_stride = super::VOCALS_IDX * src_stride;
-        let mut vocal_specs: Vec<(Vec<f32>, Vec<f32>)> = Vec::with_capacity(2);
-        for ch in 0..2usize {
-            let mut re_bins = vec![0.0f32; super::N_FREQS * super::DIM_T];
-            let mut im_bins = vec![0.0f32; super::N_FREQS * super::DIM_T];
-            for freq in 0..super::DIM_F {
-                for t in 0..super::DIM_T {
-                    re_bins[freq * super::DIM_T + t] =
-                        out_vec[vocal_stride + (ch * 2) * cri_stride + freq * super::DIM_T + t];
-                    im_bins[freq * super::DIM_T + t] =
-                        out_vec[vocal_stride + (ch * 2 + 1) * cri_stride + freq * super::DIM_T + t];
-                }
-            }
-            vocal_specs.push((re_bins, im_bins));
-        }
-        let unpack_ms = t.elapsed().as_secs_f64() * 1000.0;
-
-        let t = Instant::now();
-        let vocal_waveforms = super::istft_gpu(fft_device, &vocal_specs);
-        let istft_ms = t.elapsed().as_secs_f64() * 1000.0;
-
-        let t = Instant::now();
-        let mut output = vec![0.0f32; super::INF_CHUNK * 2];
-        for i in 0..super::INF_CHUNK {
-            output[i * 2] = (left[i] - vocal_waveforms[0][i]).clamp(-1.0, 1.0);
-            output[i * 2 + 1] = (right[i] - vocal_waveforms[1][i]).clamp(-1.0, 1.0);
-        }
-        let mut trimmed = Vec::with_capacity(super::GEN_SIZE * 2);
-        for i in super::OVERLAP..super::OVERLAP + super::GEN_SIZE {
-            trimmed.push(output[i * 2]);
-            trimmed.push(output[i * 2 + 1]);
-        }
-        let post_ms = t.elapsed().as_secs_f64() * 1000.0;
-
-        println!(
-            "Profile: total={:.1}ms deinterleave={:.1}ms stft={:.1}ms pack={:.1}ms forward+readback={:.1}ms unpack={:.1}ms istft={:.1}ms post={:.1}ms",
-            total.elapsed().as_secs_f64() * 1000.0,
-            deinterleave_ms,
-            stft_ms,
-            pack_ms,
-            forward_readback_ms,
-            unpack_ms,
-            istft_ms,
-            post_ms
-        );
-
-        drop(trimmed);
     }
 
     #[test]
