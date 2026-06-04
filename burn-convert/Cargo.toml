@@ -4,6 +4,8 @@ version = "0.0.0"
 edition = "2024"
 publish = false
 
+[workspace]
+
 [dependencies]
 burn = { version = "0.21", features = ["ndarray", "std"] }
 burn-ndarray = "0.21"
