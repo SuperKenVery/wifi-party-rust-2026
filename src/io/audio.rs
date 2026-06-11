@@ -107,7 +107,7 @@ impl<Sample: AudioSample + cpal::SizedSample, const CHANNELS: usize, const SAMPL
 
         let sink = self.sink.clone();
         let stream = input_device.build_input_stream(
-            &config,
+            config,
             move |data: &[Sample], _: &cpal::InputCallbackInfo| {
                 let owned: Vec<Sample> = Vec::from(data);
                 if let Ok(frame) = AudioBuffer::<Sample, CHANNELS, SAMPLE_RATE>::new(owned) {
@@ -177,7 +177,7 @@ impl<Sample: AudioSample + cpal::SizedSample, const CHANNELS: usize, const SAMPL
 
         let sink = self.sink;
         let stream = output_device.build_input_stream(
-            &config,
+            config,
             move |data: &[Sample], _: &cpal::InputCallbackInfo| {
                 let owned: Vec<Sample> = Vec::from(data);
                 if let Ok(frame) = AudioBuffer::<Sample, CHANNELS, SAMPLE_RATE>::new(owned) {
@@ -233,7 +233,7 @@ impl<Sample: AudioSample + cpal::SizedSample, const CHANNELS: usize, const SAMPL
         let source = self.source;
         debug!("Building output stream");
         let stream = output_device.build_output_stream(
-            &config,
+            config,
             move |data: &mut [Sample], _: &cpal::OutputCallbackInfo| {
                 if let Some(frame) = source.pull(data.len()) {
                     let src = frame.data();

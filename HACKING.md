@@ -15,7 +15,7 @@ You need two terminals running:
 dx serve
 
 # For android:
-ORT_CXX_STDLIB=c++_static dx serve --platform android
+dx serve --platform android
 
 # For iOS, we use the system apple sdk (instead of nix's):
 set -e DEVELOPER_DIR SDKROOT

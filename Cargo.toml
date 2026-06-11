@@ -13,7 +13,7 @@ resolver = "3"
 [dependencies]
 dioxus = { version = "0.7.9", default-features = false, features = ["router"] }
 chrono = "0.4"
-cpal = { git = "https://github.com/SuperKenVery/cpal", branch = "fix/superkenvery/desc-name" }
+cpal = { git="https://github.com/RustAudio/cpal.git", features = ["asio", "jack", "pipewire", "pulseaudio", "realtime", "realtime-dbus"] }
 rkyv = "0.8"
 rtrb = "0.3"
 socket2 = { version = "0.5", features = ["all"] }
