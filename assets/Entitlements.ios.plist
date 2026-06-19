@@ -2,7 +2,18 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>com.apple.developer.networking.multicast</key>
-	<true/>
+  <key>application-identifier</key>
+  <string>2SY72R44WU.com.ken.WifiPartyRust</string>
+  <key>com.apple.developer.team-identifier</key>
+  <string>2SY72R44WU</string>
+  <key>get-task-allow</key>
+  <true/>
+  <key>keychain-access-groups</key>
+  <array>
+    <string>2SY72R44WU.*</string>
+  </array>
+  <key>com.apple.developer.networking.multicast</key>
+  <true/>
 </dict>
 </plist>
+

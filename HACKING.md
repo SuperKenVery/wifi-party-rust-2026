@@ -59,7 +59,7 @@ dx serve --platform android
 set -e DEVELOPER_DIR SDKROOT
 set -gx PATH /usr/bin /bin /usr/sbin /sbin $PATH
 export IPHONEOS_DEPLOYMENT_TARGET=10.0 # Prevent build/link target version mismatch
-dx serve --platform ios
+dx serve --platform ios --apple-entitlements assets/Entitlements.ios.plist
 ```
 
 **Terminal 2** — Tailwind CSS watcher:

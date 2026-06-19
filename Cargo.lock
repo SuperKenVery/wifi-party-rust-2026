@@ -3120,6 +3120,19 @@ dependencies = [
 
 [[package]]
 name = "dashmap"
+version = "5.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "978747c1d849a7d2ee5e8adc0159961c48fb7e5db2f06af6723b80123bb53856"
+dependencies = [
+ "cfg-if",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
+]
+
+[[package]]
+name = "dashmap"
 version = "6.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
@@ -4927,7 +4940,7 @@ version = "23.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27850097e1ff9515f46a0dad0f5f9c9d020e972727772dabab9450690c4adb22"
 dependencies = [
- "dashmap",
+ "dashmap 6.1.0",
  "gix-fs",
  "libc",
  "parking_lot",
@@ -7526,6 +7539,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2c1f9f56e534ac6a9b8a4600bdf0f530fb393b5f393e7b4d03489c3cf0c3f01"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "oslog"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "80d2043d1f61d77cb2f4b1f7b7b2295f40507f5f8e9d1c8bf10a1ca5f97a3969"
+dependencies = [
+ "cc",
+ "dashmap 5.5.3",
+ "log",
 ]
 
 [[package]]
@@ -11939,19 +11963,21 @@ dependencies = [
  "cpal",
  "crossbeam",
  "cubecl-common 0.9.0",
- "dashmap",
+ "dashmap 6.1.0",
  "dasp_sample",
  "deloxide",
  "dioxus",
  "hound",
  "jni 0.21.1",
  "libc",
+ "log",
  "media-mp4-atom",
  "ndk-context",
  "neteq",
  "network-interface",
  "num-traits",
  "opus",
+ "oslog",
  "pollster",
  "rand 0.8.6",
  "regex",

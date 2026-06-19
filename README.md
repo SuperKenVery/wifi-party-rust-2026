@@ -41,6 +41,6 @@ Tested on:
 
 - macOS
 - Android
-- iOS (music sending not working)
+- iOS
 
 Windows and Linux **should** work with full function like macOS.

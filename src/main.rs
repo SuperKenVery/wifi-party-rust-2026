@@ -25,7 +25,7 @@ mod ui;
 use anyhow::{Context, Result};
 use party::PartyConfig;
 use state::AppState;
-use tracing::{Level, error, info};
+use tracing::{error, info};
 
 #[cfg(any(
     feature = "desktop",
@@ -35,12 +35,25 @@ const CUSTOM_HEAD: &str =
     r#"<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">"#;
 
 fn main() {
-    dioxus::logger::init(Level::DEBUG).expect("failed to init logger");
+    init_logging();
 
     if let Err(e) = run() {
         error!("Application error: {:?}", e);
         std::process::exit(1);
     }
+}
+
+#[cfg(target_os = "ios")]
+fn init_logging() {
+    oslog::OsLogger::new("com.ken.WifiPartyRust")
+        .level_filter(log::LevelFilter::Debug)
+        .init()
+        .expect("failed to init oslog logger");
+}
+
+#[cfg(not(target_os = "ios"))]
+fn init_logging() {
+    dioxus::logger::init(tracing::Level::DEBUG).expect("failed to init logger");
 }
 
 fn run() -> Result<()> {
