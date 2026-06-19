@@ -784,7 +784,7 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
     }
 
     fn handle_seek(&mut self, pos_ms: u64) {
-        let seek_at = self.ntp_service.party_now() + 300_000;
+        let seek_at = self.ntp_service.party_now();
         let target_samples = pos_ms * self.sample_rate() as u64 / 1000;
         let seq = self.find_seq_at_samples(1, target_samples);
         let target_output_samples = pos_ms * SAMPLE_RATE as u64 / 1000;
@@ -988,6 +988,9 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
     }
 
     fn send_no_vocal_packets(&mut self) {
+        if self.is_complete {
+            return;
+        }
         let now = Instant::now();
         let elapsed_us = now.duration_since(self.last_no_vocal_send_time).as_micros() as u64;
         let frame_dur_us = NO_VOCAL_OPUS_FRAME_MS as u64 * 1000;
@@ -1035,10 +1038,10 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
                 self.next_no_vocal_seq_to_send += 1;
                 sent_frames += 1;
             } else if self.is_complete {
-                info!("send_no_vocal_packets: completed, not sending anymore");
+                // info!("send_no_vocal_packets: completed, not sending anymore");
                 break;
             } else {
-                // warn!("send_no_vocal_packets: Failed to get packet for sending");
+                warn!("send_no_vocal_packets: Failed to get packet for sending");
                 break;
             }
         }
