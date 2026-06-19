@@ -17,7 +17,7 @@ Wi-Fi Party lets everyone on your local network share audio in real-time. Grab a
 
 ## 🎯 Why This Exists
 
-Commercial KTV systems cost thousands. Bluetooth speakers have annoying latency. Screen mirroring is clunky. 
+Commercial KTV systems cost thousands. Bluetooth speakers have annoying latency. Screen mirroring is clunky.
 
 What if your existing devices could just... talk to each other? That's Wi-Fi Party — using UDP multicast, every device broadcasts and receives audio simultaneously, turning any local network into a karaoke room with latency low enough to actually sing along.
 
@@ -31,50 +31,16 @@ Real-time audio is hard. We obsessed over every millisecond:
 - **Zero-copy serialization** — rkyv for network packets
 - **DSCP/QoS marking** — Network priority for audio traffic
 
-## 🛠️ Tech Stack
-
-| Component | Technology |
-|-----------|------------|
-| UI | [Dioxus](https://dioxuslabs.com/) Desktop |
-| Audio | [cpal](https://github.com/RustAudio/cpal) + [Opus](https://opus-codec.org/) |
-| Music Decoding | [Symphonia](https://github.com/pdeljanov/Symphonia) (MP3, FLAC, OGG, WAV, AAC) |
-| Network | UDP Multicast |
-| Serialization | [rkyv](https://github.com/rkyv/rkyv) |
-
 ## 🚀 Quick Start
 
-Download from [Releases](#) or build from source (see [HACKING.md](HACKING.md)).
+Build from source (see [HACKING.md](HACKING.md)).
 
 Launch the app on each device. They'll automatically discover each other on the local network.
 
-## 🏗️ How It Works
+Tested on:
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Party (Orchestrator)                     │
-├─────────────────────────────────────────────────────────────────┤
-│  Mic Pipeline          System Audio Pipeline    Music Pipeline   │
-│  ┌──────────────┐      ┌──────────────┐        ┌──────────────┐ │
-│  │ AudioInput   │      │ LoopbackInput│        │ MusicStreamer│ │
-│  │ → LevelMeter │      │ → LevelMeter │        │ → Symphonia  │ │
-│  │ → Gain       │      │ → Switch     │        │ → NTP Sync   │ │
-│  │ → Switch     │      │ → Batcher    │        └──────────────┘ │
-│  │ → Tee ───────│      │ → Opus       │                         │
-│  │   ↓ Loopback │      │ → Network    │                         │
-│  │   ↓ Network  │      └──────────────┘                         │
-│  └──────────────┘                                               │
-├─────────────────────────────────────────────────────────────────┤
-│                    Network Layer (UDP Multicast)                 │
-│         IPv4: 239.255.43.2:7667  │  IPv6: ff02::7667:7667       │
-├─────────────────────────────────────────────────────────────────┤
-│  Receive Pipeline                                                │
-│  ┌──────────────────────────────────────────────────────────────┐│
-│  │ NetworkReceiver → JitterBuffer → OpusDecoder → Mixer → Out  ││
-│  │                 → SyncedStream (NTP-scheduled playback) ↗    ││
-│  └──────────────────────────────────────────────────────────────┘│
-└─────────────────────────────────────────────────────────────────┘
-```
+- macOS
+- Android
+- iOS (music sending not working)
 
-## 📄 License
-
-GPLv3
+Windows and Linux **should** work with full function like macOS.

@@ -1,5 +1,43 @@
 # Hacking on Wi-Fi Party
 
+## 🛠️ Tech Stack
+
+| Component      | Technology                                                                     |
+| -------------- | ------------------------------------------------------------------------------ |
+| UI             | [Dioxus](https://dioxuslabs.com/) Desktop                                      |
+| Audio          | [cpal](https://github.com/RustAudio/cpal) + [Opus](https://opus-codec.org/)    |
+| Music Decoding | [Symphonia](https://github.com/pdeljanov/Symphonia) (MP3, FLAC, OGG, WAV, AAC) |
+| Network        | UDP Multicast                                                                  |
+| Serialization  | [rkyv](https://github.com/rkyv/rkyv)                                           |
+
+## 🏗️ How It Works
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         Party (Orchestrator)                     │
+├─────────────────────────────────────────────────────────────────┤
+│  Mic Pipeline          System Audio Pipeline    Music Pipeline   │
+│  ┌──────────────┐      ┌──────────────┐        ┌──────────────┐ │
+│  │ AudioInput   │      │ LoopbackInput│        │ MusicStreamer│ │
+│  │ → LevelMeter │      │ → LevelMeter │        │ → Symphonia  │ │
+│  │ → Gain       │      │ → Switch     │        │ → NTP Sync   │ │
+│  │ → Switch     │      │ → Batcher    │        └──────────────┘ │
+│  │ → Tee ───────│      │ → Opus       │                         │
+│  │   ↓ Loopback │      │ → Network    │                         │
+│  │   ↓ Network  │      └──────────────┘                         │
+│  └──────────────┘                                               │
+├─────────────────────────────────────────────────────────────────┤
+│                    Network Layer (UDP Multicast)                 │
+│         IPv4: 239.255.43.2:7667  │  IPv6: ff02::7667:7667       │
+├─────────────────────────────────────────────────────────────────┤
+│  Receive Pipeline                                                │
+│  ┌──────────────────────────────────────────────────────────────┐│
+│  │ NetworkReceiver → JitterBuffer → OpusDecoder → Mixer → Out  ││
+│  │                 → SyncedStream (NTP-scheduled playback) ↗    ││
+│  └──────────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────────┘
+```
+
 ## Prerequisites
 
 - nix with flake support
