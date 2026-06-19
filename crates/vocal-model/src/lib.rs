@@ -3,9 +3,42 @@ use burn_store::{BurnpackStore, ModuleSnapshot};
 use burn_wgpu::{Wgpu, WgpuDevice};
 use cubecl::wgpu::{WgpuDevice as FftWgpuDevice, WgpuRuntime};
 use include_bytes_aligned::include_bytes_aligned;
+#[cfg(all(has_vocal_model, any(target_os = "ios", target_os = "macos")))]
+use std::sync::OnceLock;
 use tracing::debug;
 
 type WgpuModel = Wgpu<f32, i32>;
+
+#[cfg(all(has_vocal_model, any(target_os = "ios", target_os = "macos")))]
+static BURN_WGPU_METAL_INIT: OnceLock<()> = OnceLock::new();
+#[cfg(all(has_vocal_model, any(target_os = "ios", target_os = "macos")))]
+static FFT_WGPU_METAL_INIT: OnceLock<()> = OnceLock::new();
+
+#[cfg(all(has_vocal_model, any(target_os = "ios", target_os = "macos")))]
+fn init_burn_wgpu_for_apple(device: &WgpuDevice) {
+    BURN_WGPU_METAL_INIT.get_or_init(|| {
+        let _ = burn_wgpu::init_setup::<burn_wgpu::graphics::Metal>(
+            device,
+            burn_wgpu::RuntimeOptions::default(),
+        );
+    });
+}
+
+#[cfg(not(all(has_vocal_model, any(target_os = "ios", target_os = "macos"))))]
+fn init_burn_wgpu_for_apple(_device: &WgpuDevice) {}
+
+#[cfg(all(has_vocal_model, any(target_os = "ios", target_os = "macos")))]
+fn init_fft_wgpu_for_apple(device: &FftWgpuDevice) {
+    FFT_WGPU_METAL_INIT.get_or_init(|| {
+        let _ = cubecl::wgpu::init_setup::<cubecl::wgpu::Metal>(
+            device,
+            cubecl::wgpu::RuntimeOptions::default(),
+        );
+    });
+}
+
+#[cfg(not(all(has_vocal_model, any(target_os = "ios", target_os = "macos"))))]
+fn init_fft_wgpu_for_apple(_device: &FftWgpuDevice) {}
 
 #[cfg(has_vocal_model)]
 #[allow(dead_code, unused_variables)]
@@ -32,7 +65,7 @@ pub const MODEL_CHANNELS: usize = 2;
 
 pub struct RtDttModel {
     #[cfg(has_vocal_model)]
-    model: all_rt::Model<WgpuModel>,
+    model: Box<all_rt::Model<WgpuModel>>,
     #[cfg(has_vocal_model)]
     device: WgpuDevice,
 }
@@ -43,12 +76,13 @@ impl RtDttModel {
         {
             debug!("RtDttModel::new entry");
             let device = WgpuDevice::default();
+            init_burn_wgpu_for_apple(&device);
             let aligned_bpk: &'static [u8] = include_bytes_aligned!(
                 32,
                 concat!(env!("CARGO_MANIFEST_DIR"), "/model/all_rt.bpk")
             );
             debug!("RtDttModel::new creating model struct");
-            let mut model = all_rt::Model::<WgpuModel>::new(&device);
+            let mut model = Box::new(all_rt::Model::<WgpuModel>::new(&device));
             debug!("RtDttModel::new loading model weights");
             let mut store = BurnpackStore::from_static(aligned_bpk);
             debug!("RtDttModel::new loading model");
@@ -83,16 +117,19 @@ impl RtDttModel {
 }
 
 pub struct RtDttSeparator {
-    model: RtDttModel,
+    model: Box<RtDttModel>,
     fft_device: FftWgpuDevice,
 }
 
 impl RtDttSeparator {
-    pub fn new() -> Option<Self> {
-        Some(Self {
-            model: RtDttModel::new()?,
-            fft_device: FftWgpuDevice::default(),
-        })
+    pub fn new() -> Option<Box<Self>> {
+        let fft_device = FftWgpuDevice::default();
+        init_fft_wgpu_for_apple(&fft_device);
+
+        Some(Box::new(Self {
+            model: Box::new(RtDttModel::new()?),
+            fft_device,
+        }))
     }
 
     /// Process one `GEN_SIZE` stereo chunk and return interleaved instrumental samples.

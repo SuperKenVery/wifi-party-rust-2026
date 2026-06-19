@@ -1,9 +1,9 @@
-//! Android file picker via JNI.
+//! Native file picker support.
 //!
-//! On Android, HTML file inputs don't work properly in WebView due to security restrictions.
-//! This module provides native file picker functionality via JNI.
+//! On mobile, HTML file inputs don't work properly in WebView due to platform restrictions.
+//! This module provides native file picker functionality for Android and iOS.
 //!
-//! Architecture:
+//! Android architecture:
 //! 1. Rust calls `pick_audio_file()` which launches an Intent via JNI
 //! 2. The Intent opens Android's file picker
 //! 3. When user selects a file, Android calls `onActivityResult` on the Activity
@@ -289,14 +289,66 @@ mod android {
 #[cfg(target_os = "android")]
 pub use android::{FILE_PICKER_REQUEST_CODE, FilePickerResult, pick_audio_file};
 
-#[cfg(not(target_os = "android"))]
+#[cfg(target_os = "ios")]
+mod ios {
+    use apple_utils::file_type::FileType;
+    use apple_utils::ios::FilePicker;
+    use tracing::{error, info};
+
+    #[derive(Debug, Clone)]
+    pub struct FilePickerResult {
+        pub name: String,
+        pub data: Vec<u8>,
+    }
+
+    /// Opens the iOS document picker for audio files.
+    /// Returns the selected file's name and contents, or None if cancelled.
+    pub async fn pick_audio_file() -> Option<FilePickerResult> {
+        let picker = FilePicker {
+            filters: vec![FileType::UniformTypeIdentifier("public.audio".to_string())],
+            multiple_selection: false,
+            show_file_extensions: true,
+            copy_files: true,
+            ..Default::default()
+        };
+
+        info!("Opening iOS document picker...");
+        let mut paths = picker.open().await;
+        let Some(path) = paths.pop() else {
+            info!("iOS document picker was cancelled");
+            return None;
+        };
+
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        match std::fs::read(&path) {
+            Ok(data) => {
+                info!("Read {} bytes from {}", data.len(), path.display());
+                Some(FilePickerResult { name, data })
+            }
+            Err(e) => {
+                error!("Failed to read selected iOS file {}: {}", path.display(), e);
+                None
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "ios")]
+pub use ios::{FilePickerResult, pick_audio_file};
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[derive(Debug, Clone)]
 pub struct FilePickerResult {
     pub name: String,
     pub data: Vec<u8>,
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub async fn pick_audio_file() -> Option<FilePickerResult> {
     None
 }

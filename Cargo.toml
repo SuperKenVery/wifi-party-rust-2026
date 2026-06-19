@@ -10,6 +10,10 @@ edition = "2024"
 members = [".", "crates/vocal-model"]
 resolver = "3"
 
+[patch.crates-io]
+cubecl-wgpu-010 = { package = "cubecl-wgpu", path = "crates/patches/cubecl-wgpu-0.10.0" }
+cubecl-wgpu-009 = { package = "cubecl-wgpu", path = "crates/patches/cubecl-wgpu-0.9.0" }
+
 [dependencies]
 dioxus = { version = "0.7.9", default-features = false, features = ["router"] }
 chrono = "0.4"
@@ -49,6 +53,7 @@ jni = "0.21"
 cubecl-common = { version = "=0.9.0", default-features = false, features = ["serde"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
+apple-utils = { git = "https://github.com/maun/apple-utils.git", rev = "ae73fa9e31890e55f2ef74e81ac2a18805f43cd5" }
 cubecl-common = { version = "=0.9.0", default-features = false, features = ["serde"] }
 log = "0.4"
 oslog = "0.2"

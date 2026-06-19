@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 use std::sync::Arc;
-use tracing::error;
+use tracing::warn;
 
 use crate::music_provider::MusicProvider;
 use crate::state::AppState;
@@ -41,7 +41,7 @@ fn local_file_content(state: Arc<AppState>) -> Element {
 const FILE_SELECT_BUTTON_CLASS: &str = "w-full p-6 rounded-2xl flex items-center justify-center gap-4 transition-all duration-200 border bg-pink-500/10 border-pink-500/50 text-pink-400 hover:bg-pink-500/20 cursor-pointer";
 
 fn file_select_button(state: Arc<AppState>) -> Element {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         let on_click = {
             use crate::io::pick_audio_file;
@@ -58,7 +58,7 @@ fn file_select_button(state: Arc<AppState>) -> Element {
 
                     info!("Got file: {}", result.name);
                     if let Err(e) = state_clone.start_music_stream(result.data, result.name) {
-                        error!("Failed to start music stream: {}", e);
+                        warn!("Failed to start music stream: {}", e);
                     }
                 });
             }
@@ -74,7 +74,7 @@ fn file_select_button(state: Arc<AppState>) -> Element {
         };
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let on_change = move |evt: Event<FormData>| {
             let state_clone = state.clone();
@@ -91,7 +91,7 @@ fn file_select_button(state: Arc<AppState>) -> Element {
                 };
 
                 if let Err(e) = state_clone.start_music_stream(bytes.to_vec(), file_name) {
-                    error!("Failed to start music stream: {}", e);
+                    warn!("Failed to start music stream: {}", e);
                 }
             });
         };

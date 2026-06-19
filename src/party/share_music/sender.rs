@@ -22,7 +22,7 @@ use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::audio::decoders::{CompressedPacket, FftResampler, Interleaver, SymphoniaDecoder};
 use crate::audio::effects::DecodedVocalRemover;
@@ -100,7 +100,6 @@ impl MusicStream {
         };
         let no_vocal_encoder =
             NoVocalOpusTrack::<Sample, CHANNELS, SAMPLE_RATE>::new(meta.codec_params.clone())?;
-
         {
             let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&meta)
                 .expect("SyncedMeta ser")
@@ -165,6 +164,7 @@ impl MusicStream {
             command_rx,
             frames_read: 0,
             is_complete: false,
+            no_vocal_complete: false,
             next_original_seq_to_send: 1,
             next_no_vocal_seq_to_send: 1,
             next_original_seq_for_no_vocal: 1,
@@ -179,11 +179,15 @@ impl MusicStream {
             frame_dur_us: None,
         };
 
-        let handle = thread::spawn(move || {
-            if let Err(e) = ctx.run() {
-                warn!("Music stream error: {}", e);
-            }
-        });
+        let handle = thread::Builder::new()
+            .name("music-stream-worker".to_string())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                if let Err(e) = ctx.run() {
+                    warn!("Music stream error: {}", e);
+                }
+            })
+            .context("spawn music stream worker")?;
 
         Ok(Self {
             stream_id,
@@ -488,12 +492,12 @@ impl AudioSource {
 /// resamples back to the app output rate, batches to Opus-valid 20 ms frames,
 /// and emits packets with an independent no-vocal sequence.
 struct NoVocalOpusTrack<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
-    decoder: SymphoniaDecoder<CHANNELS>,
-    to_model_rate: FftResampler<CHANNELS, VOCAL_REMOVER_SAMPLE_RATE>,
-    vocal_remover: DecodedVocalRemover<CHANNELS, VOCAL_REMOVER_SAMPLE_RATE>,
-    to_output_rate: FftResampler<CHANNELS, SAMPLE_RATE>,
-    interleaver: Interleaver<Sample, CHANNELS, SAMPLE_RATE>,
-    encoder: OpusEncoder<Sample, CHANNELS, SAMPLE_RATE>,
+    decoder: Box<SymphoniaDecoder<CHANNELS>>,
+    to_model_rate: Box<FftResampler<CHANNELS, VOCAL_REMOVER_SAMPLE_RATE>>,
+    vocal_remover: Box<DecodedVocalRemover<CHANNELS, VOCAL_REMOVER_SAMPLE_RATE>>,
+    to_output_rate: Box<FftResampler<CHANNELS, SAMPLE_RATE>>,
+    interleaver: Box<Interleaver<Sample, CHANNELS, SAMPLE_RATE>>,
+    encoder: Box<OpusEncoder<Sample, CHANNELS, SAMPLE_RATE>>,
     pending_pcm: Vec<Sample>,
     next_seq: u64,
 }
@@ -501,28 +505,34 @@ struct NoVocalOpusTrack<Sample: AudioSample, const CHANNELS: usize, const SAMPLE
 impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
     NoVocalOpusTrack<Sample, CHANNELS, SAMPLE_RATE>
 {
-    fn new(codec_params: WireCodecParams) -> Result<Self> {
+    fn new(codec_params: WireCodecParams) -> Result<Box<Self>> {
         let decoder = symphonia::default::get_codecs()
             .make(&codec_params.to_symphonia(), &DecoderOptions::default())
             .context("create no-vocal source decoder")?;
 
-        Ok(Self {
-            decoder: SymphoniaDecoder::<CHANNELS>::new(decoder),
-            to_model_rate: FftResampler::<CHANNELS, VOCAL_REMOVER_SAMPLE_RATE>::new(
-                codec_params.sample_rate,
-            )
-            .context("create no-vocal model-rate resampler")?,
-            vocal_remover: DecodedVocalRemover::<CHANNELS, VOCAL_REMOVER_SAMPLE_RATE>::new(
-                Arc::new(AtomicBool::new(true)),
+        Ok(Box::new(Self {
+            decoder: Box::new(SymphoniaDecoder::<CHANNELS>::new(decoder)),
+            to_model_rate: Box::new(
+                FftResampler::<CHANNELS, VOCAL_REMOVER_SAMPLE_RATE>::new(codec_params.sample_rate)
+                    .context("create no-vocal model-rate resampler")?,
             ),
-            to_output_rate: FftResampler::<CHANNELS, SAMPLE_RATE>::new(VOCAL_REMOVER_SAMPLE_RATE)
-                .context("create no-vocal output-rate resampler")?,
-            interleaver: Interleaver::<Sample, CHANNELS, SAMPLE_RATE>::new(),
-            encoder: OpusEncoder::<Sample, CHANNELS, SAMPLE_RATE>::new()
-                .context("create no-vocal Opus encoder")?,
+            vocal_remover: Box::new(
+                DecodedVocalRemover::<CHANNELS, VOCAL_REMOVER_SAMPLE_RATE>::new(Arc::new(
+                    AtomicBool::new(true),
+                )),
+            ),
+            to_output_rate: Box::new(
+                FftResampler::<CHANNELS, SAMPLE_RATE>::new(VOCAL_REMOVER_SAMPLE_RATE)
+                    .context("create no-vocal output-rate resampler")?,
+            ),
+            interleaver: Box::new(Interleaver::<Sample, CHANNELS, SAMPLE_RATE>::new()),
+            encoder: Box::new(
+                OpusEncoder::<Sample, CHANNELS, SAMPLE_RATE>::new()
+                    .context("create no-vocal Opus encoder")?,
+            ),
             pending_pcm: Vec::new(),
             next_seq: 1,
-        })
+        }))
     }
 
     fn reset(&mut self, next_seq: u64) {
@@ -560,6 +570,22 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
         };
         let Some(interleaved) = self.interleaver.process(output_rate) else {
             warn!("process_raw: Failed to process music data at step interleaver");
+            return Vec::new();
+        };
+
+        self.encode_available(interleaved)
+    }
+
+    fn finish(&mut self) -> Vec<(u64, RawPacket)> {
+        let Some(no_vocal) = self.vocal_remover.flush() else {
+            return Vec::new();
+        };
+        let Some(output_rate) = self.to_output_rate.process(no_vocal) else {
+            warn!("finish_no_vocal: Failed to process music data at step to_output_rate");
+            return Vec::new();
+        };
+        let Some(interleaved) = self.interleaver.process(output_rate) else {
+            warn!("finish_no_vocal: Failed to process music data at step interleaver");
             return Vec::new();
         };
 
@@ -609,7 +635,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
 struct StreamContext<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     source: AudioSource,
     meta: SyncedStreamMeta,
-    no_vocal_encoder: NoVocalOpusTrack<Sample, CHANNELS, SAMPLE_RATE>,
+    no_vocal_encoder: Box<NoVocalOpusTrack<Sample, CHANNELS, SAMPLE_RATE>>,
 
     ntp_service: Arc<NtpService>,
     network_sender: NetworkSender,
@@ -623,6 +649,7 @@ struct StreamContext<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RA
 
     frames_read: u64,
     is_complete: bool,
+    no_vocal_complete: bool,
     next_original_seq_to_send: u64,
     next_no_vocal_seq_to_send: u64,
     next_original_seq_for_no_vocal: u64,
@@ -827,6 +854,7 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
         self.next_original_seq_to_send = seq;
         self.next_no_vocal_seq_to_send = no_vocal_seq;
         self.next_original_seq_for_no_vocal = seq;
+        self.no_vocal_complete = false;
     }
 
     fn find_seq_at_samples(&self, start_seq: u64, target_samples: u64) -> u64 {
@@ -934,6 +962,20 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
         }
     }
 
+    fn finish_no_vocal_packets_if_source_complete(&mut self) {
+        if !self.is_complete
+            || self.no_vocal_complete
+            || self.next_original_seq_for_no_vocal <= self.frames_read
+        {
+            return;
+        }
+
+        for (seq, no_vocal_packet) in self.no_vocal_encoder.finish() {
+            self.no_vocal_vault.insert(seq, no_vocal_packet);
+        }
+        self.no_vocal_complete = true;
+    }
+
     fn send_original_packets(&mut self) {
         let now = Instant::now();
         let elapsed_us = now.duration_since(self.last_original_send_time).as_micros() as u64;
@@ -988,7 +1030,11 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
     }
 
     fn send_no_vocal_packets(&mut self) {
-        if self.is_complete {
+        if self.no_vocal_complete
+            && !self
+                .no_vocal_vault
+                .contains_key(&self.next_no_vocal_seq_to_send)
+        {
             return;
         }
         let now = Instant::now();
@@ -1006,6 +1052,7 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
 
         let target_seq = self.next_no_vocal_seq_to_send + frames_to_send - 1;
         self.process_no_vocal_packets_until(target_seq);
+        self.finish_no_vocal_packets_if_source_complete();
 
         let mut sent_frames = 0u64;
         for _ in 0..frames_to_send {
@@ -1037,8 +1084,7 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
 
                 self.next_no_vocal_seq_to_send += 1;
                 sent_frames += 1;
-            } else if self.is_complete {
-                // info!("send_no_vocal_packets: completed, not sending anymore");
+            } else if self.no_vocal_complete {
                 break;
             } else {
                 warn!("send_no_vocal_packets: Failed to get packet for sending");

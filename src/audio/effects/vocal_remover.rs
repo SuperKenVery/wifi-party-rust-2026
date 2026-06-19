@@ -33,7 +33,7 @@ const MODEL_CHANNELS: usize = 2;
 
 struct State {
     #[cfg(feature = "vocal-removal")]
-    separator: Option<RtDttSeparator>,
+    separator: Option<Box<RtDttSeparator>>,
     input_buffer: Vec<f32>,
     output_buffer: Vec<f32>,
 }

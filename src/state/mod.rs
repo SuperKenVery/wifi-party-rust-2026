@@ -7,6 +7,7 @@
 
 use anyhow::{Context, Result};
 use std::net::{IpAddr, SocketAddr};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex};
 
@@ -168,12 +169,62 @@ impl AppState {
     }
 
     pub fn start_music_stream(&self, data: Vec<u8>, file_name: String) -> Result<()> {
-        self.party
-            .lock()
-            .expect("Party lock poisoned")
-            .as_ref()
-            .context("Party not initialized")?
-            .start_music_stream(data, file_name, self.music_progress.clone())
+        let progress = self.music_progress.clone();
+        let panic_report = Arc::new(Mutex::new(None));
+
+        std::thread::scope(|scope| {
+            let panic_report_for_thread = panic_report.clone();
+            std::thread::Builder::new()
+                .name("music-stream-start".to_string())
+                .stack_size(8 * 1024 * 1024)
+                .spawn_scoped(scope, move || {
+                    let previous_hook = std::panic::take_hook();
+                    let panic_report_for_hook = panic_report_for_thread.clone();
+                    std::panic::set_hook(Box::new(move |info| {
+                        let backtrace = std::backtrace::Backtrace::force_capture();
+                        if let Ok(mut report) = panic_report_for_hook.lock() {
+                            *report = Some(format!("{info}\n{backtrace}"));
+                        }
+                    }));
+
+                    let result = catch_unwind(AssertUnwindSafe(|| {
+                        self.party
+                            .lock()
+                            .expect("Party lock poisoned")
+                            .as_ref()
+                            .context("Party not initialized")?
+                            .start_music_stream(data, file_name, progress)
+                    }));
+
+                    std::panic::set_hook(previous_hook);
+
+                    match result {
+                        Ok(result) => result,
+                        Err(payload) => {
+                            let payload = payload
+                                .downcast_ref::<&str>()
+                                .map(|s| (*s).to_string())
+                                .or_else(|| payload.downcast_ref::<String>().cloned())
+                                .unwrap_or_else(|| "non-string panic payload".to_string());
+
+                            let report = panic_report_for_thread
+                                .lock()
+                                .ok()
+                                .and_then(|report| report.clone())
+                                .unwrap_or_else(|| {
+                                    "panic hook did not capture a report".to_string()
+                                });
+
+                            Err(anyhow::anyhow!(
+                                "Music stream starter panicked: {payload}\n{report}"
+                            ))
+                        }
+                    }
+                })
+                .context("Failed to spawn music stream starter")?
+                .join()
+                .map_err(|e| anyhow::anyhow!("Music stream starter panicked: {:?}", e))?
+        })
     }
 
     pub fn pause_music(&self, stream_id: crate::party::SyncedStreamId) -> Result<()> {
