@@ -32,8 +32,11 @@ pub const MODEL_SAMPLE_RATE: u32 = 44_100;
 pub const MODEL_CHANNELS: usize = 2;
 
 pub struct RtDttModel {
+    // The model is ~180 KB by value; box it so it lives on the heap and is never
+    // copied through the (nested) `RtDttModel`/`RtDttSeparator` constructors,
+    // which would otherwise blow the stack on stack-constrained targets (iOS).
     #[cfg(has_vocal_model)]
-    model: all_rt::Model<WgpuModel>,
+    model: Box<all_rt::Model<WgpuModel>>,
     #[cfg(has_vocal_model)]
     device: WgpuDevice,
 }
@@ -49,7 +52,7 @@ impl RtDttModel {
                 concat!(env!("CARGO_MANIFEST_DIR"), "/src/model/all_rt.bpk")
             );
             debug!("RtDttModel::new creating model struct");
-            let mut model = all_rt::Model::<WgpuModel>::new(&device);
+            let mut model = Box::new(all_rt::Model::<WgpuModel>::new(&device));
             debug!("RtDttModel::new loading model weights");
             let mut store = BurnpackStore::from_static(aligned_bpk);
             debug!("RtDttModel::new loading model");
@@ -118,73 +121,96 @@ impl RtDttSeparator {
         debug_assert_eq!(chunk.len(), INF_CHUNK * MODEL_CHANNELS);
 
         // 1. De-interleave.
-        let mut left = vec![0.0f32; INF_CHUNK];
-        let mut right = vec![0.0f32; INF_CHUNK];
-        for i in 0..INF_CHUNK {
-            left[i] = chunk[i * 2];
-            right[i] = chunk[i * 2 + 1];
-        }
+        let (left, right) = deinterleave_stereo(chunk);
 
-        // 2. GPU STFT.
+        // 2. GPU STFT, then pack into the model input layout (1, 4, DIM_F, DIM_T).
         let stft = stft_gpu(&self.fft_device, &left, &right);
+        let onnx_in = pack_stft_input(&stft);
 
-        // 3. Pack into input layout: (1, 4, DIM_F, DIM_T)
-        //    Channel layout: [ch0_re, ch0_im, ch1_re, ch1_im]
-        let mut onnx_in = vec![0.0f32; 4 * DIM_F * DIM_T];
-        for ch in 0..MODEL_CHANNELS {
-            for frame_idx in 0..DIM_T {
-                let (ref re, ref im) = stft[ch * DIM_T + frame_idx];
-                for freq in 0..DIM_F {
-                    onnx_in[(ch * 2) * DIM_F * DIM_T + freq * DIM_T + frame_idx] = re[freq];
-                    onnx_in[(ch * 2 + 1) * DIM_F * DIM_T + freq * DIM_T + frame_idx] = im[freq];
-                }
-            }
-        }
-
-        // 4. Run Burn inference.
-        //    Input:  [1, 4, DIM_F, DIM_T]
-        //    Output: [1, 4, 4, DIM_F, DIM_T]  (batch, source, cri, freq, time)
+        // 3. Run Burn inference. Output: [1, 4, 4, DIM_F, DIM_T] (source, cri, f, t).
         let out_vec = self.model.forward(onnx_in, [1, 4, DIM_F, DIM_T]);
 
-        // 5. Unpack the vocal source spectrogram.
-        let src_stride = 4 * DIM_F * DIM_T;
-        let cri_stride = DIM_F * DIM_T;
-        let vocal_stride = VOCALS_IDX * src_stride;
-
-        let mut vocal_specs: Vec<(Vec<f32>, Vec<f32>)> = Vec::with_capacity(MODEL_CHANNELS);
-        for ch in 0..MODEL_CHANNELS {
-            let mut re_bins = vec![0.0f32; N_FREQS * DIM_T];
-            let mut im_bins = vec![0.0f32; N_FREQS * DIM_T];
-            for freq in 0..DIM_F {
-                for t in 0..DIM_T {
-                    re_bins[freq * DIM_T + t] =
-                        out_vec[vocal_stride + (ch * 2) * cri_stride + freq * DIM_T + t];
-                    im_bins[freq * DIM_T + t] =
-                        out_vec[vocal_stride + (ch * 2 + 1) * cri_stride + freq * DIM_T + t];
-                }
-            }
-            vocal_specs.push((re_bins, im_bins));
-        }
-
-        // 6. GPU iSTFT for vocal channels.
+        // 4. Unpack the vocal source spectrogram and iSTFT it back to waveforms.
+        let vocal_specs = unpack_source_spec(&out_vec, VOCALS_IDX);
         let vocal_waveforms = istft_gpu(&self.fft_device, &vocal_specs);
 
-        // 7. Instrumental = mix - vocals.
-        let mut output = vec![0.0f32; INF_CHUNK * MODEL_CHANNELS];
-        for i in 0..INF_CHUNK {
-            output[i * 2] = (left[i] - vocal_waveforms[0][i]).clamp(-1.0, 1.0);
-            output[i * 2 + 1] = (right[i] - vocal_waveforms[1][i]).clamp(-1.0, 1.0);
-        }
+        // 5. Instrumental = mix - vocals (per channel), clamped to [-1, 1].
+        let instrumental_left: Vec<f32> = (0..INF_CHUNK)
+            .map(|i| (left[i] - vocal_waveforms[0][i]).clamp(-1.0, 1.0))
+            .collect();
+        let instrumental_right: Vec<f32> = (0..INF_CHUNK)
+            .map(|i| (right[i] - vocal_waveforms[1][i]).clamp(-1.0, 1.0))
+            .collect();
 
-        // 8. Trim center=True padding.
-        let mut trimmed = Vec::with_capacity(GEN_SIZE * MODEL_CHANNELS);
-        for i in OVERLAP..OVERLAP + GEN_SIZE {
-            trimmed.push(output[i * 2]);
-            trimmed.push(output[i * 2 + 1]);
-        }
-
-        trimmed
+        // 6. Trim center=True padding and re-interleave the usable region.
+        trim_interleaved(&instrumental_left, &instrumental_right)
     }
+}
+
+/// Split interleaved stereo `[L, R, L, R, ...]` into separate channel buffers.
+pub fn deinterleave_stereo(interleaved: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    let frames = interleaved.len() / MODEL_CHANNELS;
+    let mut left = vec![0.0f32; frames];
+    let mut right = vec![0.0f32; frames];
+    for i in 0..frames {
+        left[i] = interleaved[i * 2];
+        right[i] = interleaved[i * 2 + 1];
+    }
+    (left, right)
+}
+
+/// Pack per-channel STFT frames into the model input layout `(1, 4, DIM_F,
+/// DIM_T)`, where the 4 channels are `[ch0_re, ch0_im, ch1_re, ch1_im]`.
+/// `stft` is indexed `[channel * DIM_T + frame]`.
+pub fn pack_stft_input(stft: &[(Vec<f32>, Vec<f32>)]) -> Vec<f32> {
+    let mut onnx_in = vec![0.0f32; 4 * DIM_F * DIM_T];
+    for ch in 0..MODEL_CHANNELS {
+        for frame_idx in 0..DIM_T {
+            let (ref re, ref im) = stft[ch * DIM_T + frame_idx];
+            for freq in 0..DIM_F {
+                onnx_in[(ch * 2) * DIM_F * DIM_T + freq * DIM_T + frame_idx] = re[freq];
+                onnx_in[(ch * 2 + 1) * DIM_F * DIM_T + freq * DIM_T + frame_idx] = im[freq];
+            }
+        }
+    }
+    onnx_in
+}
+
+/// Extract one separated source's per-channel spectrogram from the model output
+/// tensor `[1, 4, 4, DIM_F, DIM_T]` (source, complex-real-imag, freq, time).
+/// Returns `MODEL_CHANNELS` `(re_bins, im_bins)` pairs sized `N_FREQS * DIM_T`
+/// (only the lower `DIM_F` bins are populated; the rest stay zero for iSTFT).
+pub fn unpack_source_spec(out_vec: &[f32], source_idx: usize) -> Vec<(Vec<f32>, Vec<f32>)> {
+    let src_stride = 4 * DIM_F * DIM_T;
+    let cri_stride = DIM_F * DIM_T;
+    let source_stride = source_idx * src_stride;
+
+    let mut specs: Vec<(Vec<f32>, Vec<f32>)> = Vec::with_capacity(MODEL_CHANNELS);
+    for ch in 0..MODEL_CHANNELS {
+        let mut re_bins = vec![0.0f32; N_FREQS * DIM_T];
+        let mut im_bins = vec![0.0f32; N_FREQS * DIM_T];
+        for freq in 0..DIM_F {
+            for t in 0..DIM_T {
+                re_bins[freq * DIM_T + t] =
+                    out_vec[source_stride + (ch * 2) * cri_stride + freq * DIM_T + t];
+                im_bins[freq * DIM_T + t] =
+                    out_vec[source_stride + (ch * 2 + 1) * cri_stride + freq * DIM_T + t];
+            }
+        }
+        specs.push((re_bins, im_bins));
+    }
+    specs
+}
+
+/// Trim the `center=True` STFT padding from two channel buffers and interleave
+/// the usable `GEN_SIZE` region into `[L, R, L, R, ...]`.
+pub fn trim_interleaved(left: &[f32], right: &[f32]) -> Vec<f32> {
+    let mut trimmed = Vec::with_capacity(GEN_SIZE * MODEL_CHANNELS);
+    for i in OVERLAP..OVERLAP + GEN_SIZE {
+        trimmed.push(left[i]);
+        trimmed.push(right[i]);
+    }
+    trimmed
 }
 
 /// Periodic Hann window matching `torch.hann_window(N, periodic=True)`.

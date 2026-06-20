@@ -39,38 +39,13 @@ fn rms(samples: &[f32]) -> f64 {
         .sqrt()
 }
 
-fn trim_interleaved(left: &[f32], right: &[f32]) -> Vec<f32> {
-    let mut trimmed = Vec::with_capacity(GEN_SIZE * MODEL_CHANNELS);
-    for i in OVERLAP..OVERLAP + GEN_SIZE {
-        trimmed.push(left[i]);
-        trimmed.push(right[i]);
-    }
-    trimmed
-}
-
 fn model_input_from_padded(
     fft_device: &FftWgpuDevice,
     padded: &[f32],
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
-    let mut left = vec![0.0f32; INF_CHUNK];
-    let mut right = vec![0.0f32; INF_CHUNK];
-    for i in 0..INF_CHUNK {
-        left[i] = padded[i * 2];
-        right[i] = padded[i * 2 + 1];
-    }
-
+    let (left, right) = deinterleave_stereo(padded);
     let stft = stft_gpu(fft_device, &left, &right);
-    let mut onnx_in = vec![0.0f32; 4 * DIM_F * DIM_T];
-    for ch in 0..MODEL_CHANNELS {
-        for frame_idx in 0..DIM_T {
-            let (ref re, ref im) = stft[ch * DIM_T + frame_idx];
-            for freq in 0..DIM_F {
-                onnx_in[(ch * 2) * DIM_F * DIM_T + freq * DIM_T + frame_idx] = re[freq];
-                onnx_in[(ch * 2 + 1) * DIM_F * DIM_T + freq * DIM_T + frame_idx] = im[freq];
-            }
-        }
-    }
-
+    let onnx_in = pack_stft_input(&stft);
     (onnx_in, left, right)
 }
 
@@ -79,25 +54,7 @@ fn source_waveforms(
     out_vec: &[f32],
     source_idx: usize,
 ) -> Vec<Vec<f32>> {
-    let src_stride = 4 * DIM_F * DIM_T;
-    let cri_stride = DIM_F * DIM_T;
-    let source_stride = source_idx * src_stride;
-
-    let mut source_specs: Vec<(Vec<f32>, Vec<f32>)> = Vec::with_capacity(MODEL_CHANNELS);
-    for ch in 0..MODEL_CHANNELS {
-        let mut re_bins = vec![0.0f32; N_FREQS * DIM_T];
-        let mut im_bins = vec![0.0f32; N_FREQS * DIM_T];
-        for freq in 0..DIM_F {
-            for t in 0..DIM_T {
-                re_bins[freq * DIM_T + t] =
-                    out_vec[source_stride + (ch * 2) * cri_stride + freq * DIM_T + t];
-                im_bins[freq * DIM_T + t] =
-                    out_vec[source_stride + (ch * 2 + 1) * cri_stride + freq * DIM_T + t];
-            }
-        }
-        source_specs.push((re_bins, im_bins));
-    }
-
+    let source_specs = unpack_source_spec(out_vec, source_idx);
     istft_gpu(fft_device, &source_specs)
 }
 

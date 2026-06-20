@@ -115,25 +115,25 @@ fn launch_lstm_step_f32(
     }
 }
 
-/// Optimized LSTM forward pass.
+/// All four gate projections of an LSTM, batched for the optimised forward pass.
 ///
-/// Reduces GPU dispatches from ~11/step to ~3/step by:
-/// 1. Pre-projecting all input steps in ONE batched matmul (amortised over seq_len)
-/// 2. Concatenating all 4 gate hidden weights so hidden projection is ONE matmul/step
-///
-/// Input/output convention: `batch_first = false`, i.e. `[seq, batch, features]`.
-fn lstm_preproj_burn<B: Backend>(
-    lstm: &burn::nn::Lstm<B>,
-    input: Tensor<B, 3>,            // [seq, batch, input_size]
-    state: Option<LstmState<B, 2>>, // h/c each [batch, hidden]
-) -> (Tensor<B, 3>, LstmState<B, 2>) {
+/// `x_proj` is every input step pre-projected in one GEMM (`[seq, batch,
+/// 4*hidden]`, input biases folded in); `w_h`/`b_h` are the concatenated hidden
+/// weight/bias so the recurrent step needs a single matmul. Shared verbatim by
+/// both the pure-Burn fallback and the fused cube kernel path.
+struct GateProjection<B: Backend> {
+    x_proj: Tensor<B, 3>,
+    w_h: Tensor<B, 2>,
+    b_h: Option<Tensor<B, 1>>,
+}
+
+fn project_gates<B: Backend>(lstm: &burn::nn::Lstm<B>, input: Tensor<B, 3>) -> GateProjection<B> {
     let [seq, batch, input_size] = input.dims();
     let hidden = lstm.d_hidden;
-    let device = input.device();
 
-    // ── 1. Pre-project all seq steps in one GEMM ──────────────────────────────
-    // LinearLayout::Row stores weight as [d_input, d_output].
-    // Concat along dim=1: [d_input, 4*d_output] = [input_size, 4*hidden]
+    // ── Pre-project all seq steps in one GEMM ─────────────────────────────────
+    // LinearLayout::Row stores weight as [d_input, d_output]; concat along dim=1
+    // gives [input_size, 4*hidden].
     let w_x = Tensor::cat(
         vec![
             lstm.input_gate.input_transform.weight.val(),
@@ -142,12 +142,10 @@ fn lstm_preproj_burn<B: Backend>(
             lstm.output_gate.input_transform.weight.val(),
         ],
         1,
-    ); // [input_size, 4*hidden]
-       // Flatten seq*batch; reshape handles non-contiguous inputs (implicit contiguous copy)
-    let input_flat = input.reshape([seq * batch, input_size]); // [seq*batch, input_size]
-                                                               // [seq*batch, input_size] @ [input_size, 4*hidden]  →  [seq*batch, 4*hidden]
-    let mut x_proj_flat = input_flat.matmul(w_x);
-    // Add input biases (all 4 gates combined)
+    );
+    // Flatten seq*batch; reshape handles non-contiguous inputs (implicit copy).
+    let input_flat = input.reshape([seq * batch, input_size]);
+    let mut x_proj_flat = input_flat.matmul(w_x); // [seq*batch, 4*hidden]
     if let Some(b) = lstm.input_gate.input_transform.bias.as_ref() {
         let b_x = Tensor::cat(
             vec![
@@ -167,13 +165,12 @@ fn lstm_preproj_burn<B: Backend>(
                     .val(),
             ],
             0,
-        ); // [4*hidden]
+        );
         x_proj_flat = x_proj_flat + b_x.unsqueeze_dims::<2>(&[0]); // broadcast over batch
     }
-    let x_proj = x_proj_flat.reshape([seq, batch, 4 * hidden]); // [seq, batch, 4*hidden]
+    let x_proj = x_proj_flat.reshape([seq, batch, 4 * hidden]);
 
-    // ── 2. Concat hidden weights (computed once, shared across all steps) ──────
-    // [d_input=hidden, 4*d_output=4*hidden] after dim=1 concat
+    // ── Concatenated hidden weights/bias (one matmul per recurrent step) ──────
     let w_h = Tensor::cat(
         vec![
             lstm.input_gate.hidden_transform.weight.val(),
@@ -182,17 +179,11 @@ fn lstm_preproj_burn<B: Backend>(
             lstm.output_gate.hidden_transform.weight.val(),
         ],
         1,
-    ); // [hidden, 4*hidden]
-
-    let b_h = lstm.input_gate.hidden_transform.bias.as_ref().map(|_| {
+    );
+    let b_h = lstm.input_gate.hidden_transform.bias.as_ref().map(|b| {
         Tensor::cat(
             vec![
-                lstm.input_gate
-                    .hidden_transform
-                    .bias
-                    .as_ref()
-                    .unwrap()
-                    .val(),
+                b.val(),
                 lstm.forget_gate
                     .hidden_transform
                     .bias
@@ -208,10 +199,31 @@ fn lstm_preproj_burn<B: Backend>(
                     .val(),
             ],
             0,
-        ) // [4*hidden]
+        )
     });
 
-    // ── 3. Initialise h, c ────────────────────────────────────────────────────
+    GateProjection { x_proj, w_h, b_h }
+}
+
+/// Optimized LSTM forward pass (pure-Burn fallback).
+///
+/// Reduces GPU dispatches from ~11/step to ~3/step by:
+/// 1. Pre-projecting all input steps in ONE batched matmul (amortised over seq_len)
+/// 2. Concatenating all 4 gate hidden weights so hidden projection is ONE matmul/step
+///
+/// Input/output convention: `batch_first = false`, i.e. `[seq, batch, features]`.
+fn lstm_preproj_burn<B: Backend>(
+    lstm: &burn::nn::Lstm<B>,
+    input: Tensor<B, 3>,            // [seq, batch, input_size]
+    state: Option<LstmState<B, 2>>, // h/c each [batch, hidden]
+) -> (Tensor<B, 3>, LstmState<B, 2>) {
+    let [seq, batch, _input_size] = input.dims();
+    let hidden = lstm.d_hidden;
+    let device = input.device();
+
+    let GateProjection { x_proj, w_h, b_h } = project_gates(lstm, input);
+
+    // ── Initialise h, c ───────────────────────────────────────────────────────
     let (mut c, mut h) = match state {
         Some(s) => (s.cell, s.hidden),
         None => (
@@ -220,7 +232,7 @@ fn lstm_preproj_burn<B: Backend>(
         ),
     };
 
-    // ── 4. Sequential recurrence over time steps ──────────────────────────────
+    // ── Sequential recurrence over time steps ─────────────────────────────────
     let mut output_steps = Vec::with_capacity(seq);
 
     for t in 0..seq {
@@ -272,79 +284,14 @@ pub(super) fn lstm_preproj<B: CustomLstmBackend>(
         return lstm_preproj_burn(lstm, input, state);
     }
 
-    let [seq, batch, input_size] = input.dims();
+    let [seq, batch, _input_size] = input.dims();
     let hidden = lstm.d_hidden;
     let device = input.device();
     let dtype = input.dtype();
 
-    let w_x = Tensor::cat(
-        vec![
-            lstm.input_gate.input_transform.weight.val(),
-            lstm.forget_gate.input_transform.weight.val(),
-            lstm.cell_gate.input_transform.weight.val(),
-            lstm.output_gate.input_transform.weight.val(),
-        ],
-        1,
-    );
-    let input_flat = input.reshape([seq * batch, input_size]);
-    let mut x_proj_flat = input_flat.matmul(w_x);
-    if let Some(b) = lstm.input_gate.input_transform.bias.as_ref() {
-        let b_x = Tensor::cat(
-            vec![
-                b.val(),
-                lstm.forget_gate
-                    .input_transform
-                    .bias
-                    .as_ref()
-                    .unwrap()
-                    .val(),
-                lstm.cell_gate.input_transform.bias.as_ref().unwrap().val(),
-                lstm.output_gate
-                    .input_transform
-                    .bias
-                    .as_ref()
-                    .unwrap()
-                    .val(),
-            ],
-            0,
-        );
-        x_proj_flat = x_proj_flat + b_x.unsqueeze_dims::<2>(&[0]);
-    }
-    let x_proj = x_proj_flat.reshape([seq, batch, 4 * hidden]);
-
-    let w_h = Tensor::cat(
-        vec![
-            lstm.input_gate.hidden_transform.weight.val(),
-            lstm.forget_gate.hidden_transform.weight.val(),
-            lstm.cell_gate.hidden_transform.weight.val(),
-            lstm.output_gate.hidden_transform.weight.val(),
-        ],
-        1,
-    );
-    let b_h = Tensor::cat(
-        vec![
-            lstm.input_gate
-                .hidden_transform
-                .bias
-                .as_ref()
-                .unwrap()
-                .val(),
-            lstm.forget_gate
-                .hidden_transform
-                .bias
-                .as_ref()
-                .unwrap()
-                .val(),
-            lstm.cell_gate.hidden_transform.bias.as_ref().unwrap().val(),
-            lstm.output_gate
-                .hidden_transform
-                .bias
-                .as_ref()
-                .unwrap()
-                .val(),
-        ],
-        0,
-    );
+    let GateProjection { x_proj, w_h, b_h } = project_gates(lstm, input);
+    // The guard above guarantees the hidden bias is present.
+    let b_h = b_h.expect("hidden bias present");
 
     let (c, h) = match state {
         Some(s) => (s.cell, s.hidden),

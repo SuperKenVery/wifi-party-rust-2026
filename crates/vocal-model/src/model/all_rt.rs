@@ -48,6 +48,117 @@ fn profile_step<T>(name: &'static str, op: impl FnOnce() -> T) -> T {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared building blocks for the generated submodules.
+//
+// The ONNX→Burn exporter emits the same handful of patterns hundreds of times:
+// zero-initialised constant params, instance-norm configs with one fixed
+// epsilon, identically-configured convolutions, and a "reshape → instance-norm →
+// reshape back → scale → bias" affine block. These helpers collapse that
+// boilerplate while preserving the exact numerics (and, crucially, the struct
+// field names, since model weights are loaded from `all_rt.bpk` by field path).
+// ─────────────────────────────────────────────────────────────────────────────
+
+use burn::module::Param;
+use burn::tensor::activation::relu;
+
+/// Epsilon used by every `InstanceNorm` in the exported graph. This is the exact
+/// f64 value the exporter wrote (f32 `1e-5` widened to f64), kept verbatim so the
+/// normalisation matches the original bit-for-bit.
+const INSTANCE_NORM_EPS: f64 = 0.000009999999747378752;
+
+/// A zero-initialised f16 constant parameter (scale/bias for the affine blocks).
+fn const_param<B: Backend, const D: usize>(
+    shape: [usize; D],
+    device: &B::Device,
+) -> Param<Tensor<B, D>> {
+    Param::uninitialized(
+        burn::module::ParamId::new(),
+        move |device, _require_grad| {
+            Tensor::<B, D>::zeros(shape, (device, burn::tensor::DType::F16))
+        },
+        device.clone(),
+        false,
+        shape.into(),
+    )
+}
+
+/// An `InstanceNorm` over `channels` groups with the graph-wide epsilon.
+fn norm<B: Backend>(channels: usize, device: &B::Device) -> InstanceNorm<B> {
+    InstanceNormConfig::new(channels)
+        .with_epsilon(INSTANCE_NORM_EPS)
+        .init(device)
+}
+
+/// A `Conv2d` with the exporter's shared settings (unit stride/dilation, single
+/// group, bias enabled); only channel counts, kernel size and padding vary.
+fn conv<B: Backend>(
+    channels: [usize; 2],
+    kernel: [usize; 2],
+    padding: PaddingConfig2d,
+    device: &B::Device,
+) -> Conv2d<B> {
+    Conv2dConfig::new(channels, kernel)
+        .with_stride([1, 1])
+        .with_padding(padding)
+        .with_dilation([1, 1])
+        .with_groups(1)
+        .with_bias(true)
+        .init(device)
+}
+
+/// The static shape of a tensor as `i64`s, used to restore the rank after the
+/// instance-norm reshape collapses everything into one trailing dimension.
+fn dims_i64<B: Backend, const D: usize>(tensor: &Tensor<B, D>) -> [i64; D] {
+    let dims = tensor.dims();
+    let mut out = [0i64; D];
+    for i in 0..D {
+        out[i] = dims[i] as i64;
+    }
+    out
+}
+
+/// The exporter's normalisation block: reshape into `groups` channels, apply
+/// instance norm, reshape back, then a per-channel affine (`scale`/`bias`).
+///
+/// Equivalent to:
+/// `x -> reshape([0, groups, -1]) -> norm -> reshape(orig) -> * scale + bias`.
+fn norm_affine<B: Backend, const D: usize, const CD: usize>(
+    norm: &InstanceNorm<B>,
+    scale: &Param<Tensor<B, CD>>,
+    bias: &Param<Tensor<B, CD>>,
+    groups: i32,
+    x: Tensor<B, D>,
+) -> Tensor<B, D> {
+    let shape = dims_i64(&x);
+    norm.forward(x.reshape([0, groups, -1]))
+        .reshape(shape)
+        .mul(scale.val().unsqueeze_dims(&[0isize]))
+        .add(bias.val().unsqueeze_dims(&[0isize]))
+}
+
+/// One band/sequence LSTM stage from `submodule3`: permute into `[seq, batch,
+/// features]`, run the optimised LSTM seeded from `init_state`, permute back and
+/// project with `linear`. `label` names the stage for `VOCAL_MODEL_PROFILE`.
+fn lstm_block<B: CustomLstmBackend>(
+    lstm: &Lstm<B>,
+    linear: &Linear<B>,
+    init_state: Tensor<B, 3>,
+    label: &'static str,
+    affine: Tensor<B, 3>,
+) -> Tensor<B, 3> {
+    let input = affine.permute([2, 0, 1]);
+    let state = LstmState::new(
+        init_state.clone().squeeze_dim(0),
+        init_state.squeeze_dim(0),
+    );
+    let output_seq = profile_step(label, || {
+        let (output_seq, _) = lstm_preproj(lstm, input, Some(state));
+        output_seq
+    });
+    linear.forward(output_seq.permute([1, 0, 2]))
+}
+
 mod lstm;
 mod submodule1;
 mod submodule2;
@@ -110,15 +221,16 @@ impl<B: Backend> Model<B> {
 impl<B: Backend> Model<B> {
     #[allow(unused_variables)]
     pub fn new(device: &B::Device) -> Self {
-        let submodule1 = Submodule1::new(device);
-        let submodule2 = Submodule2::new(device);
-        let submodule3 = Submodule3::new(device);
-        let submodule4 = Submodule4::new(device);
+        // Build each submodule directly into the struct literal so they are
+        // constructed in place in the return slot rather than as separate stack
+        // temporaries that are then moved. Combined with `RtDttModel` holding the
+        // model behind a `Box`, this keeps construction off the (iOS-constrained)
+        // stack.
         Self {
-            submodule1,
-            submodule2,
-            submodule3,
-            submodule4,
+            submodule1: Submodule1::new(device),
+            submodule2: Submodule2::new(device),
+            submodule3: Submodule3::new(device),
+            submodule4: Submodule4::new(device),
             phantom: core::marker::PhantomData,
             device: device.clone(),
         }
