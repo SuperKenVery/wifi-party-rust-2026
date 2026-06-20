@@ -1396,79 +1396,17 @@ impl<B: Backend> Submodule3<B> {
         let constant84_out1 = self.constant84.val();
         let add21_out1 = mul17_out1.add((constant84_out1).unsqueeze_dims(&[0isize]));
         let transpose4_out1 = add21_out1.permute([2, 0, 1]);
-        let shape18_out1: [i64; 3] = {
-            let axes = &transpose4_out1.clone().dims()[0..3];
-            let mut output = [0i64; 3];
-            for i in 0..3 {
-                output[i] = axes[i] as i64;
-            }
-            output
-        };
-        let gather1_out1 = shape18_out1[1] as i64;
-        let unsqueeze1_out1 = [gather1_out1 as i64];
-        let constant243_out1: [i64; 1] = [1i64];
-        let constant242_out1: [i64; 1] = [32i64];
-        let concat1_out1: [i64; 3usize] = [
-            &constant243_out1[..],
-            &unsqueeze1_out1[..],
-            &constant242_out1[..],
-        ]
-            .concat()
-            .try_into()
-            .unwrap();
         let constant240_out1 = self.constant240.val();
-        let expand1_out1 = {
-            let onnx_shape: [i64; 3usize] = concat1_out1;
-            let input_dims = constant240_out1.clone().dims();
-            let mut shape = onnx_shape;
-            #[allow(clippy::needless_range_loop)]
-            for i in 0..3usize {
-                let dim_offset = 3usize - 3usize + i;
-                if shape[dim_offset] == 1 && input_dims[i] > 1 {
-                    shape[dim_offset] = input_dims[i] as i64;
-                }
-            }
-            constant240_out1.clone().expand(shape)
-        };
-        let gather2_out1 = shape18_out1[1] as i64;
-        let unsqueeze2_out1 = [gather2_out1 as i64];
-        let constant246_out1: [i64; 1] = [1i64];
-        let constant245_out1: [i64; 1] = [32i64];
-        let concat2_out1: [i64; 3usize] = [
-            &constant246_out1[..],
-            &unsqueeze2_out1[..],
-            &constant245_out1[..],
-        ]
-            .concat()
-            .try_into()
-            .unwrap();
-        let expand2_out1 = {
-            let onnx_shape: [i64; 3usize] = concat2_out1;
-            let input_dims = constant240_out1.dims();
-            let mut shape = onnx_shape;
-            #[allow(clippy::needless_range_loop)]
-            for i in 0..3usize {
-                let dim_offset = 3usize - 3usize + i;
-                if shape[dim_offset] == 1 && input_dims[i] > 1 {
-                    shape[dim_offset] = input_dims[i] as i64;
-                }
-            }
-            constant240_out1.expand(shape)
-        };
-        let (lstm1_out1, lstm1_out2, lstm1_out3) = profile_step("lstm1", || {
-            let (output_seq, final_state) = lstm_preproj(
+        let lstm1_out1 = profile_step("lstm1", || {
+            let (output_seq, _) = lstm_preproj(
                 &self.lstm1,
                 transpose4_out1,
                 Some(LstmState::new(
-                    expand2_out1.squeeze_dim(0),
-                    expand1_out1.squeeze_dim(0),
+                    constant240_out1.clone().squeeze_dim(0),
+                    constant240_out1.squeeze_dim(0),
                 )),
             );
-            (
-                output_seq.unsqueeze_dims::<4>(&[1]),
-                final_state.hidden.unsqueeze_dims::<3>(&[0]),
-                final_state.cell.unsqueeze_dims::<3>(&[0]),
-            )
+            output_seq.unsqueeze_dims::<4>(&[1])
         });
         let squeeze1_out1 = lstm1_out1.squeeze_dims::<3>(&[1]);
         let transpose5_out1 = squeeze1_out1.permute([1, 0, 2]);
@@ -1496,79 +1434,17 @@ impl<B: Backend> Submodule3<B> {
         let constant90_out1 = self.constant90.val();
         let add23_out1 = mul18_out1.add((constant90_out1).unsqueeze_dims(&[0isize]));
         let transpose8_out1 = add23_out1.permute([2, 0, 1]);
-        let shape21_out1: [i64; 3] = {
-            let axes = &transpose8_out1.clone().dims()[0..3];
-            let mut output = [0i64; 3];
-            for i in 0..3 {
-                output[i] = axes[i] as i64;
-            }
-            output
-        };
-        let gather3_out1 = shape21_out1[1] as i64;
-        let unsqueeze3_out1 = [gather3_out1 as i64];
-        let constant255_out1: [i64; 1] = [1i64];
-        let constant254_out1: [i64; 1] = [32i64];
-        let concat3_out1: [i64; 3usize] = [
-            &constant255_out1[..],
-            &unsqueeze3_out1[..],
-            &constant254_out1[..],
-        ]
-            .concat()
-            .try_into()
-            .unwrap();
         let constant252_out1 = self.constant252.val();
-        let expand3_out1 = {
-            let onnx_shape: [i64; 3usize] = concat3_out1;
-            let input_dims = constant252_out1.clone().dims();
-            let mut shape = onnx_shape;
-            #[allow(clippy::needless_range_loop)]
-            for i in 0..3usize {
-                let dim_offset = 3usize - 3usize + i;
-                if shape[dim_offset] == 1 && input_dims[i] > 1 {
-                    shape[dim_offset] = input_dims[i] as i64;
-                }
-            }
-            constant252_out1.clone().expand(shape)
-        };
-        let gather4_out1 = shape21_out1[1] as i64;
-        let unsqueeze4_out1 = [gather4_out1 as i64];
-        let constant258_out1: [i64; 1] = [1i64];
-        let constant257_out1: [i64; 1] = [32i64];
-        let concat4_out1: [i64; 3usize] = [
-            &constant258_out1[..],
-            &unsqueeze4_out1[..],
-            &constant257_out1[..],
-        ]
-            .concat()
-            .try_into()
-            .unwrap();
-        let expand4_out1 = {
-            let onnx_shape: [i64; 3usize] = concat4_out1;
-            let input_dims = constant252_out1.dims();
-            let mut shape = onnx_shape;
-            #[allow(clippy::needless_range_loop)]
-            for i in 0..3usize {
-                let dim_offset = 3usize - 3usize + i;
-                if shape[dim_offset] == 1 && input_dims[i] > 1 {
-                    shape[dim_offset] = input_dims[i] as i64;
-                }
-            }
-            constant252_out1.expand(shape)
-        };
-        let (lstm2_out1, lstm2_out2, lstm2_out3) = profile_step("lstm2", || {
-            let (output_seq, final_state) = lstm_preproj(
+        let lstm2_out1 = profile_step("lstm2", || {
+            let (output_seq, _) = lstm_preproj(
                 &self.lstm2,
                 transpose8_out1,
                 Some(LstmState::new(
-                    expand4_out1.squeeze_dim(0),
-                    expand3_out1.squeeze_dim(0),
+                    constant252_out1.clone().squeeze_dim(0),
+                    constant252_out1.squeeze_dim(0),
                 )),
             );
-            (
-                output_seq.unsqueeze_dims::<4>(&[1]),
-                final_state.hidden.unsqueeze_dims::<3>(&[0]),
-                final_state.cell.unsqueeze_dims::<3>(&[0]),
-            )
+            output_seq.unsqueeze_dims::<4>(&[1])
         });
         let squeeze2_out1 = lstm2_out1.squeeze_dims::<3>(&[1]);
         let transpose9_out1 = squeeze2_out1.permute([1, 0, 2]);
@@ -1596,79 +1472,17 @@ impl<B: Backend> Submodule3<B> {
         let constant96_out1 = self.constant96.val();
         let add25_out1 = mul19_out1.add((constant96_out1).unsqueeze_dims(&[0isize]));
         let transpose12_out1 = add25_out1.permute([2, 0, 1]);
-        let shape24_out1: [i64; 3] = {
-            let axes = &transpose12_out1.clone().dims()[0..3];
-            let mut output = [0i64; 3];
-            for i in 0..3 {
-                output[i] = axes[i] as i64;
-            }
-            output
-        };
-        let gather5_out1 = shape24_out1[1] as i64;
-        let unsqueeze5_out1 = [gather5_out1 as i64];
-        let constant267_out1: [i64; 1] = [1i64];
-        let constant266_out1: [i64; 1] = [32i64];
-        let concat5_out1: [i64; 3usize] = [
-            &constant267_out1[..],
-            &unsqueeze5_out1[..],
-            &constant266_out1[..],
-        ]
-            .concat()
-            .try_into()
-            .unwrap();
         let constant264_out1 = self.constant264.val();
-        let expand5_out1 = {
-            let onnx_shape: [i64; 3usize] = concat5_out1;
-            let input_dims = constant264_out1.clone().dims();
-            let mut shape = onnx_shape;
-            #[allow(clippy::needless_range_loop)]
-            for i in 0..3usize {
-                let dim_offset = 3usize - 3usize + i;
-                if shape[dim_offset] == 1 && input_dims[i] > 1 {
-                    shape[dim_offset] = input_dims[i] as i64;
-                }
-            }
-            constant264_out1.clone().expand(shape)
-        };
-        let gather6_out1 = shape24_out1[1] as i64;
-        let unsqueeze6_out1 = [gather6_out1 as i64];
-        let constant270_out1: [i64; 1] = [1i64];
-        let constant269_out1: [i64; 1] = [32i64];
-        let concat6_out1: [i64; 3usize] = [
-            &constant270_out1[..],
-            &unsqueeze6_out1[..],
-            &constant269_out1[..],
-        ]
-            .concat()
-            .try_into()
-            .unwrap();
-        let expand6_out1 = {
-            let onnx_shape: [i64; 3usize] = concat6_out1;
-            let input_dims = constant264_out1.dims();
-            let mut shape = onnx_shape;
-            #[allow(clippy::needless_range_loop)]
-            for i in 0..3usize {
-                let dim_offset = 3usize - 3usize + i;
-                if shape[dim_offset] == 1 && input_dims[i] > 1 {
-                    shape[dim_offset] = input_dims[i] as i64;
-                }
-            }
-            constant264_out1.expand(shape)
-        };
-        let (lstm3_out1, lstm3_out2, lstm3_out3) = profile_step("lstm3", || {
-            let (output_seq, final_state) = lstm_preproj(
+        let lstm3_out1 = profile_step("lstm3", || {
+            let (output_seq, _) = lstm_preproj(
                 &self.lstm3,
                 transpose12_out1,
                 Some(LstmState::new(
-                    expand6_out1.squeeze_dim(0),
-                    expand5_out1.squeeze_dim(0),
+                    constant264_out1.clone().squeeze_dim(0),
+                    constant264_out1.squeeze_dim(0),
                 )),
             );
-            (
-                output_seq.unsqueeze_dims::<4>(&[1]),
-                final_state.hidden.unsqueeze_dims::<3>(&[0]),
-                final_state.cell.unsqueeze_dims::<3>(&[0]),
-            )
+            output_seq.unsqueeze_dims::<4>(&[1])
         });
         let squeeze3_out1 = lstm3_out1.squeeze_dims::<3>(&[1]);
         let transpose13_out1 = squeeze3_out1.permute([1, 0, 2]);
@@ -1697,79 +1511,17 @@ impl<B: Backend> Submodule3<B> {
         let constant102_out1 = self.constant102.val();
         let add27_out1 = mul20_out1.add((constant102_out1).unsqueeze_dims(&[0isize]));
         let transpose16_out1 = add27_out1.permute([2, 0, 1]);
-        let shape27_out1: [i64; 3] = {
-            let axes = &transpose16_out1.clone().dims()[0..3];
-            let mut output = [0i64; 3];
-            for i in 0..3 {
-                output[i] = axes[i] as i64;
-            }
-            output
-        };
-        let gather7_out1 = shape27_out1[1] as i64;
-        let unsqueeze7_out1 = [gather7_out1 as i64];
-        let constant279_out1: [i64; 1] = [1i64];
-        let constant278_out1: [i64; 1] = [32i64];
-        let concat7_out1: [i64; 3usize] = [
-            &constant279_out1[..],
-            &unsqueeze7_out1[..],
-            &constant278_out1[..],
-        ]
-            .concat()
-            .try_into()
-            .unwrap();
         let constant276_out1 = self.constant276.val();
-        let expand7_out1 = {
-            let onnx_shape: [i64; 3usize] = concat7_out1;
-            let input_dims = constant276_out1.clone().dims();
-            let mut shape = onnx_shape;
-            #[allow(clippy::needless_range_loop)]
-            for i in 0..3usize {
-                let dim_offset = 3usize - 3usize + i;
-                if shape[dim_offset] == 1 && input_dims[i] > 1 {
-                    shape[dim_offset] = input_dims[i] as i64;
-                }
-            }
-            constant276_out1.clone().expand(shape)
-        };
-        let gather8_out1 = shape27_out1[1] as i64;
-        let unsqueeze8_out1 = [gather8_out1 as i64];
-        let constant282_out1: [i64; 1] = [1i64];
-        let constant281_out1: [i64; 1] = [32i64];
-        let concat8_out1: [i64; 3usize] = [
-            &constant282_out1[..],
-            &unsqueeze8_out1[..],
-            &constant281_out1[..],
-        ]
-            .concat()
-            .try_into()
-            .unwrap();
-        let expand8_out1 = {
-            let onnx_shape: [i64; 3usize] = concat8_out1;
-            let input_dims = constant276_out1.dims();
-            let mut shape = onnx_shape;
-            #[allow(clippy::needless_range_loop)]
-            for i in 0..3usize {
-                let dim_offset = 3usize - 3usize + i;
-                if shape[dim_offset] == 1 && input_dims[i] > 1 {
-                    shape[dim_offset] = input_dims[i] as i64;
-                }
-            }
-            constant276_out1.expand(shape)
-        };
-        let (lstm4_out1, lstm4_out2, lstm4_out3) = profile_step("lstm4", || {
-            let (output_seq, final_state) = lstm_preproj(
+        let lstm4_out1 = profile_step("lstm4", || {
+            let (output_seq, _) = lstm_preproj(
                 &self.lstm4,
                 transpose16_out1,
                 Some(LstmState::new(
-                    expand8_out1.squeeze_dim(0),
-                    expand7_out1.squeeze_dim(0),
+                    constant276_out1.clone().squeeze_dim(0),
+                    constant276_out1.squeeze_dim(0),
                 )),
             );
-            (
-                output_seq.unsqueeze_dims::<4>(&[1]),
-                final_state.hidden.unsqueeze_dims::<3>(&[0]),
-                final_state.cell.unsqueeze_dims::<3>(&[0]),
-            )
+            output_seq.unsqueeze_dims::<4>(&[1])
         });
         let squeeze4_out1 = lstm4_out1.squeeze_dims::<3>(&[1]);
         let transpose17_out1 = squeeze4_out1.permute([1, 0, 2]);
@@ -1798,79 +1550,17 @@ impl<B: Backend> Submodule3<B> {
         let constant108_out1 = self.constant108.val();
         let add29_out1 = mul21_out1.add((constant108_out1).unsqueeze_dims(&[0isize]));
         let transpose20_out1 = add29_out1.permute([2, 0, 1]);
-        let shape30_out1: [i64; 3] = {
-            let axes = &transpose20_out1.clone().dims()[0..3];
-            let mut output = [0i64; 3];
-            for i in 0..3 {
-                output[i] = axes[i] as i64;
-            }
-            output
-        };
-        let gather9_out1 = shape30_out1[1] as i64;
-        let unsqueeze9_out1 = [gather9_out1 as i64];
-        let constant291_out1: [i64; 1] = [1i64];
-        let constant290_out1: [i64; 1] = [32i64];
-        let concat9_out1: [i64; 3usize] = [
-            &constant291_out1[..],
-            &unsqueeze9_out1[..],
-            &constant290_out1[..],
-        ]
-            .concat()
-            .try_into()
-            .unwrap();
         let constant288_out1 = self.constant288.val();
-        let expand9_out1 = {
-            let onnx_shape: [i64; 3usize] = concat9_out1;
-            let input_dims = constant288_out1.clone().dims();
-            let mut shape = onnx_shape;
-            #[allow(clippy::needless_range_loop)]
-            for i in 0..3usize {
-                let dim_offset = 3usize - 3usize + i;
-                if shape[dim_offset] == 1 && input_dims[i] > 1 {
-                    shape[dim_offset] = input_dims[i] as i64;
-                }
-            }
-            constant288_out1.clone().expand(shape)
-        };
-        let gather10_out1 = shape30_out1[1] as i64;
-        let unsqueeze10_out1 = [gather10_out1 as i64];
-        let constant294_out1: [i64; 1] = [1i64];
-        let constant293_out1: [i64; 1] = [32i64];
-        let concat10_out1: [i64; 3usize] = [
-            &constant294_out1[..],
-            &unsqueeze10_out1[..],
-            &constant293_out1[..],
-        ]
-            .concat()
-            .try_into()
-            .unwrap();
-        let expand10_out1 = {
-            let onnx_shape: [i64; 3usize] = concat10_out1;
-            let input_dims = constant288_out1.dims();
-            let mut shape = onnx_shape;
-            #[allow(clippy::needless_range_loop)]
-            for i in 0..3usize {
-                let dim_offset = 3usize - 3usize + i;
-                if shape[dim_offset] == 1 && input_dims[i] > 1 {
-                    shape[dim_offset] = input_dims[i] as i64;
-                }
-            }
-            constant288_out1.expand(shape)
-        };
-        let (lstm5_out1, lstm5_out2, lstm5_out3) = profile_step("lstm5", || {
-            let (output_seq, final_state) = lstm_preproj(
+        let lstm5_out1 = profile_step("lstm5", || {
+            let (output_seq, _) = lstm_preproj(
                 &self.lstm5,
                 transpose20_out1,
                 Some(LstmState::new(
-                    expand10_out1.squeeze_dim(0),
-                    expand9_out1.squeeze_dim(0),
+                    constant288_out1.clone().squeeze_dim(0),
+                    constant288_out1.squeeze_dim(0),
                 )),
             );
-            (
-                output_seq.unsqueeze_dims::<4>(&[1]),
-                final_state.hidden.unsqueeze_dims::<3>(&[0]),
-                final_state.cell.unsqueeze_dims::<3>(&[0]),
-            )
+            output_seq.unsqueeze_dims::<4>(&[1])
         });
         let squeeze5_out1 = lstm5_out1.squeeze_dims::<3>(&[1]);
         let transpose21_out1 = squeeze5_out1.permute([1, 0, 2]);
@@ -1899,79 +1589,17 @@ impl<B: Backend> Submodule3<B> {
         let constant114_out1 = self.constant114.val();
         let add31_out1 = mul22_out1.add((constant114_out1).unsqueeze_dims(&[0isize]));
         let transpose24_out1 = add31_out1.permute([2, 0, 1]);
-        let shape33_out1: [i64; 3] = {
-            let axes = &transpose24_out1.clone().dims()[0..3];
-            let mut output = [0i64; 3];
-            for i in 0..3 {
-                output[i] = axes[i] as i64;
-            }
-            output
-        };
-        let gather11_out1 = shape33_out1[1] as i64;
-        let unsqueeze11_out1 = [gather11_out1 as i64];
-        let constant303_out1: [i64; 1] = [1i64];
-        let constant302_out1: [i64; 1] = [32i64];
-        let concat11_out1: [i64; 3usize] = [
-            &constant303_out1[..],
-            &unsqueeze11_out1[..],
-            &constant302_out1[..],
-        ]
-            .concat()
-            .try_into()
-            .unwrap();
         let constant300_out1 = self.constant300.val();
-        let expand11_out1 = {
-            let onnx_shape: [i64; 3usize] = concat11_out1;
-            let input_dims = constant300_out1.clone().dims();
-            let mut shape = onnx_shape;
-            #[allow(clippy::needless_range_loop)]
-            for i in 0..3usize {
-                let dim_offset = 3usize - 3usize + i;
-                if shape[dim_offset] == 1 && input_dims[i] > 1 {
-                    shape[dim_offset] = input_dims[i] as i64;
-                }
-            }
-            constant300_out1.clone().expand(shape)
-        };
-        let gather12_out1 = shape33_out1[1] as i64;
-        let unsqueeze12_out1 = [gather12_out1 as i64];
-        let constant306_out1: [i64; 1] = [1i64];
-        let constant305_out1: [i64; 1] = [32i64];
-        let concat12_out1: [i64; 3usize] = [
-            &constant306_out1[..],
-            &unsqueeze12_out1[..],
-            &constant305_out1[..],
-        ]
-            .concat()
-            .try_into()
-            .unwrap();
-        let expand12_out1 = {
-            let onnx_shape: [i64; 3usize] = concat12_out1;
-            let input_dims = constant300_out1.dims();
-            let mut shape = onnx_shape;
-            #[allow(clippy::needless_range_loop)]
-            for i in 0..3usize {
-                let dim_offset = 3usize - 3usize + i;
-                if shape[dim_offset] == 1 && input_dims[i] > 1 {
-                    shape[dim_offset] = input_dims[i] as i64;
-                }
-            }
-            constant300_out1.expand(shape)
-        };
-        let (lstm6_out1, lstm6_out2, lstm6_out3) = profile_step("lstm6", || {
-            let (output_seq, final_state) = lstm_preproj(
+        let lstm6_out1 = profile_step("lstm6", || {
+            let (output_seq, _) = lstm_preproj(
                 &self.lstm6,
                 transpose24_out1,
                 Some(LstmState::new(
-                    expand12_out1.squeeze_dim(0),
-                    expand11_out1.squeeze_dim(0),
+                    constant300_out1.clone().squeeze_dim(0),
+                    constant300_out1.squeeze_dim(0),
                 )),
             );
-            (
-                output_seq.unsqueeze_dims::<4>(&[1]),
-                final_state.hidden.unsqueeze_dims::<3>(&[0]),
-                final_state.cell.unsqueeze_dims::<3>(&[0]),
-            )
+            output_seq.unsqueeze_dims::<4>(&[1])
         });
         let squeeze6_out1 = lstm6_out1.squeeze_dims::<3>(&[1]);
         let transpose25_out1 = squeeze6_out1.permute([1, 0, 2]);
