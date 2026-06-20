@@ -16,6 +16,24 @@ use burn::tensor::Bytes;
 use burn_store::BurnpackStore;
 use burn_store::ModuleSnapshot;
 
+#[cfg(test)]
+fn profile_step<T>(name: &'static str, op: impl FnOnce() -> T) -> T {
+    if std::env::var_os("VOCAL_MODEL_PROFILE").is_some() {
+        let start = std::time::Instant::now();
+        let output = op();
+        println!("    model::{name}: {:.1}ms", start.elapsed().as_secs_f64() * 1000.0);
+        output
+    } else {
+        op()
+    }
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn profile_step<T>(_: &'static str, op: impl FnOnce() -> T) -> T {
+    op()
+}
+
 
 #[derive(Module, Debug)]
 pub struct Submodule1<B: Backend> {
@@ -1437,7 +1455,7 @@ impl<B: Backend> Submodule3<B> {
             }
             constant240_out1.expand(shape)
         };
-        let (lstm1_out1, lstm1_out2, lstm1_out3) = {
+        let (lstm1_out1, lstm1_out2, lstm1_out3) = profile_step("lstm1", || {
             let (output_seq, final_state) = lstm_preproj(
                 &self.lstm1,
                 transpose4_out1,
@@ -1451,7 +1469,7 @@ impl<B: Backend> Submodule3<B> {
                 final_state.hidden.unsqueeze_dims::<3>(&[0]),
                 final_state.cell.unsqueeze_dims::<3>(&[0]),
             )
-        };
+        });
         let squeeze1_out1 = lstm1_out1.squeeze_dims::<3>(&[1]);
         let transpose5_out1 = squeeze1_out1.permute([1, 0, 2]);
         let linear5_out1 = self.linear5.forward(transpose5_out1);
@@ -1537,7 +1555,7 @@ impl<B: Backend> Submodule3<B> {
             }
             constant252_out1.expand(shape)
         };
-        let (lstm2_out1, lstm2_out2, lstm2_out3) = {
+        let (lstm2_out1, lstm2_out2, lstm2_out3) = profile_step("lstm2", || {
             let (output_seq, final_state) = lstm_preproj(
                 &self.lstm2,
                 transpose8_out1,
@@ -1551,7 +1569,7 @@ impl<B: Backend> Submodule3<B> {
                 final_state.hidden.unsqueeze_dims::<3>(&[0]),
                 final_state.cell.unsqueeze_dims::<3>(&[0]),
             )
-        };
+        });
         let squeeze2_out1 = lstm2_out1.squeeze_dims::<3>(&[1]);
         let transpose9_out1 = squeeze2_out1.permute([1, 0, 2]);
         let linear6_out1 = self.linear6.forward(transpose9_out1);
@@ -1637,7 +1655,7 @@ impl<B: Backend> Submodule3<B> {
             }
             constant264_out1.expand(shape)
         };
-        let (lstm3_out1, lstm3_out2, lstm3_out3) = {
+        let (lstm3_out1, lstm3_out2, lstm3_out3) = profile_step("lstm3", || {
             let (output_seq, final_state) = lstm_preproj(
                 &self.lstm3,
                 transpose12_out1,
@@ -1651,7 +1669,7 @@ impl<B: Backend> Submodule3<B> {
                 final_state.hidden.unsqueeze_dims::<3>(&[0]),
                 final_state.cell.unsqueeze_dims::<3>(&[0]),
             )
-        };
+        });
         let squeeze3_out1 = lstm3_out1.squeeze_dims::<3>(&[1]);
         let transpose13_out1 = squeeze3_out1.permute([1, 0, 2]);
         let linear7_out1 = self.linear7.forward(transpose13_out1);
@@ -1738,7 +1756,7 @@ impl<B: Backend> Submodule3<B> {
             }
             constant276_out1.expand(shape)
         };
-        let (lstm4_out1, lstm4_out2, lstm4_out3) = {
+        let (lstm4_out1, lstm4_out2, lstm4_out3) = profile_step("lstm4", || {
             let (output_seq, final_state) = lstm_preproj(
                 &self.lstm4,
                 transpose16_out1,
@@ -1752,7 +1770,7 @@ impl<B: Backend> Submodule3<B> {
                 final_state.hidden.unsqueeze_dims::<3>(&[0]),
                 final_state.cell.unsqueeze_dims::<3>(&[0]),
             )
-        };
+        });
         let squeeze4_out1 = lstm4_out1.squeeze_dims::<3>(&[1]);
         let transpose17_out1 = squeeze4_out1.permute([1, 0, 2]);
         let linear8_out1 = self.linear8.forward(transpose17_out1);
@@ -1839,7 +1857,7 @@ impl<B: Backend> Submodule3<B> {
             }
             constant288_out1.expand(shape)
         };
-        let (lstm5_out1, lstm5_out2, lstm5_out3) = {
+        let (lstm5_out1, lstm5_out2, lstm5_out3) = profile_step("lstm5", || {
             let (output_seq, final_state) = lstm_preproj(
                 &self.lstm5,
                 transpose20_out1,
@@ -1853,7 +1871,7 @@ impl<B: Backend> Submodule3<B> {
                 final_state.hidden.unsqueeze_dims::<3>(&[0]),
                 final_state.cell.unsqueeze_dims::<3>(&[0]),
             )
-        };
+        });
         let squeeze5_out1 = lstm5_out1.squeeze_dims::<3>(&[1]);
         let transpose21_out1 = squeeze5_out1.permute([1, 0, 2]);
         let linear9_out1 = self.linear9.forward(transpose21_out1);
@@ -1940,7 +1958,7 @@ impl<B: Backend> Submodule3<B> {
             }
             constant300_out1.expand(shape)
         };
-        let (lstm6_out1, lstm6_out2, lstm6_out3) = {
+        let (lstm6_out1, lstm6_out2, lstm6_out3) = profile_step("lstm6", || {
             let (output_seq, final_state) = lstm_preproj(
                 &self.lstm6,
                 transpose24_out1,
@@ -1954,7 +1972,7 @@ impl<B: Backend> Submodule3<B> {
                 final_state.hidden.unsqueeze_dims::<3>(&[0]),
                 final_state.cell.unsqueeze_dims::<3>(&[0]),
             )
-        };
+        });
         let squeeze6_out1 = lstm6_out1.squeeze_dims::<3>(&[1]);
         let transpose25_out1 = squeeze6_out1.permute([1, 0, 2]);
         let linear10_out1 = self.linear10.forward(transpose25_out1);
@@ -2510,10 +2528,12 @@ impl<B: Backend> Model<B> {
 
     #[allow(clippy::let_and_return, clippy::approx_constant)]
     pub fn forward(&self, input: Tensor<B, 4>) -> Tensor<B, 5> {
-        let add10_out1 = self.submodule1.forward(input);
-        let add20_out1 = self.submodule2.forward(add10_out1.clone());
-        let mul25_out1 = self.submodule3.forward(add20_out1, add10_out1);
-        let reshape81_out1 = self.submodule4.forward(mul25_out1);
+        let add10_out1 = profile_step("submodule1", || self.submodule1.forward(input));
+        let add20_out1 =
+            profile_step("submodule2", || self.submodule2.forward(add10_out1.clone()));
+        let mul25_out1 =
+            profile_step("submodule3", || self.submodule3.forward(add20_out1, add10_out1));
+        let reshape81_out1 = profile_step("submodule4", || self.submodule4.forward(mul25_out1));
         reshape81_out1
     }
 }
