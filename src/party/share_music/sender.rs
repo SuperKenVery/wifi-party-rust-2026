@@ -164,7 +164,7 @@ impl MusicStream {
             no_vocal_vault,
             command_rx,
             frames_read: 0,
-            is_complete: false,
+            song_source_drained: false,
             next_original_seq_to_send: 1,
             next_no_vocal_seq_to_send: 1,
             next_original_seq_for_no_vocal: 1,
@@ -622,7 +622,7 @@ struct StreamContext<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RA
     command_rx: std::sync::mpsc::Receiver<MusicCommand>,
 
     frames_read: u64,
-    is_complete: bool,
+    song_source_drained: bool,
     next_original_seq_to_send: u64,
     next_no_vocal_seq_to_send: u64,
     next_original_seq_for_no_vocal: u64,
@@ -797,7 +797,7 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
             } else {
                 info!("Seeked to {} samples (seq {})", target_samples, seq);
                 self.frames_read = seq - 1;
-                self.is_complete = false;
+                self.song_source_drained = false;
             }
         }
         self.no_vocal_encoder.reset(no_vocal_seq);
@@ -848,7 +848,7 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
     }
 
     fn read_packets(&mut self) {
-        if self.is_complete {
+        if self.song_source_drained {
             return;
         }
 
@@ -866,7 +866,7 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
                 }
                 Ok(None) => {
                     // EOF - calculate exact total_samples from all packets
-                    self.is_complete = true;
+                    self.song_source_drained = true;
                     self.meta.total_frames = self.frames_read;
                     self.meta.total_samples =
                         self.original_vault.iter().map(|r| r.dur as u64).sum();
@@ -978,7 +978,9 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
                     .streaming_current
                     .store(seq, Ordering::Relaxed);
                 self.next_original_seq_to_send += 1;
-            } else if self.is_complete && self.next_original_seq_to_send > self.meta.total_frames {
+            } else if self.song_source_drained
+                && self.next_original_seq_to_send > self.meta.total_frames
+            {
                 break;
             } else {
                 break;
@@ -988,9 +990,6 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
     }
 
     fn send_no_vocal_packets(&mut self) {
-        if self.is_complete {
-            return;
-        }
         let now = Instant::now();
         let elapsed_us = now.duration_since(self.last_no_vocal_send_time).as_micros() as u64;
         let frame_dur_us = NO_VOCAL_OPUS_FRAME_MS as u64 * 1000;
@@ -1037,7 +1036,7 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
 
                 self.next_no_vocal_seq_to_send += 1;
                 sent_frames += 1;
-            } else if self.is_complete {
+            } else if self.song_source_drained {
                 // info!("send_no_vocal_packets: completed, not sending anymore");
                 break;
             } else {
@@ -1090,4 +1089,25 @@ fn fragment_raw_packet(
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_vocal_sender_keeps_sending_after_original_eof() {
+        assert!(
+            !StreamContext::<f32, 2, 48_000>::no_vocal_send_exhausted(true, true, false),
+            "no-vocal sender must not stop at original EOF when the next no-vocal packet is already buffered"
+        );
+        assert!(
+            !StreamContext::<f32, 2, 48_000>::no_vocal_send_exhausted(true, false, true),
+            "no-vocal sender must not stop at original EOF while original packets remain available for no-vocal derivation"
+        );
+        assert!(
+            StreamContext::<f32, 2, 48_000>::no_vocal_send_exhausted(true, false, false),
+            "no-vocal sender should stop only after original EOF and no derived work remains"
+        );
+    }
 }

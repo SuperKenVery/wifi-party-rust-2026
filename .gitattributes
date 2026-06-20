@@ -1,2 +1,3 @@
 assets/all_rt.onnx filter=lfs diff=lfs merge=lfs -text
 crates/vocal-model/model/all_rt.bpk filter=lfs diff=lfs merge=lfs -text
+crates/vocal-model/src/model/all_rt.bpk filter=lfs diff=lfs merge=lfs -text
