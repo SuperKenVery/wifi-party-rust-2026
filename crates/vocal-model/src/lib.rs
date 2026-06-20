@@ -1,11 +1,11 @@
 use burn::tensor::{Tensor, TensorData};
 use burn_store::{BurnpackStore, ModuleSnapshot};
-use burn_wgpu::{Wgpu, WgpuDevice};
-use cubecl::wgpu::{WgpuDevice as FftWgpuDevice, WgpuRuntime};
+use burn_wgpu::{CubeBackend, WgpuDevice};
+use cubecl_fft::wgpu::{WgpuDevice as FftWgpuDevice, WgpuRuntime};
 use include_bytes_aligned::include_bytes_aligned;
 use tracing::debug;
 
-type WgpuModel = Wgpu<f32, i32>;
+type WgpuModel = CubeBackend<burn_wgpu::WgpuRuntime, f32, i32, u32>;
 
 #[cfg(has_vocal_model)]
 #[allow(dead_code, unused_variables)]
