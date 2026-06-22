@@ -22,8 +22,11 @@ use crate::party::tagged_packet::{
 };
 use crate::state::MusicStreamProgress;
 
+pub mod playlist;
 pub mod receiver;
 pub mod sender;
+
+pub use playlist::{PlaylistEntry, PlaylistOp, PlaylistState, SharedPlaylist};
 
 // ---------------------------------------------------------------------------
 //  Stream ID
@@ -124,6 +127,9 @@ pub struct SyncedStreamProgress {
     pub buffered_frames: u64,
     pub is_playing: bool,
     pub highest_seq_received: u64,
+    /// Party clock time (microseconds) when playback started/resumed.
+    /// Used by the playlist auto-advance logic to detect song completion.
+    pub start_party_time: u64,
 }
 
 /// Complete state of a synced stream (output type for GUI).

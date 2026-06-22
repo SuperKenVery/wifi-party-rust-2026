@@ -665,6 +665,7 @@ impl<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32>
                     buffered_frames: entry.original_track.packet_counter.packets_pushed(),
                     is_playing: entry.playing,
                     highest_seq_received: entry.original_track.packet_counter.highest_seq(),
+                    start_party_time: entry.start_party_time,
                 },
                 is_local_sender,
             });

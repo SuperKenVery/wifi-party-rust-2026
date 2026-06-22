@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use dashmap::DashMap;
 
-use crate::party::{NtpDebugInfo, StreamSnapshot, SyncedStreamState};
+use crate::party::{NtpDebugInfo, PlaylistEntry, PlaylistState, StreamSnapshot, SyncedStreamState};
 use crate::state::{HostId, HostInfo, StreamInfo};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -164,6 +164,7 @@ impl NtpView {
 pub struct PartyViewState {
     realtime_streams: DashMap<StreamViewKey, Arc<RealtimeStreamView>>,
     synced_streams: Mutex<Vec<SyncedStreamState>>,
+    playlist: Mutex<PlaylistState>,
     ntp: Arc<NtpView>,
 }
 
@@ -172,6 +173,7 @@ impl PartyViewState {
         Self {
             realtime_streams: DashMap::new(),
             synced_streams: Mutex::new(Vec::new()),
+            playlist: Mutex::new(PlaylistState::default()),
             ntp: Arc::new(NtpView::new()),
         }
     }
@@ -240,6 +242,20 @@ impl PartyViewState {
             .unwrap_or_default()
     }
 
+    pub fn set_playlist(&self, entries: Vec<PlaylistEntry>, current_entry_id: Option<u64>) {
+        if let Ok(mut playlist) = self.playlist.lock() {
+            playlist.entries = entries;
+            playlist.current_entry_id = current_entry_id;
+        }
+    }
+
+    pub fn playlist(&self) -> PlaylistState {
+        self.playlist
+            .lock()
+            .map(|p| p.clone())
+            .unwrap_or_default()
+    }
+
     pub fn update_ntp(&self, info: NtpDebugInfo) {
         self.ntp.update(info);
     }
@@ -252,6 +268,10 @@ impl PartyViewState {
         self.realtime_streams.clear();
         if let Ok(mut synced_streams) = self.synced_streams.lock() {
             synced_streams.clear();
+        }
+        if let Ok(mut playlist) = self.playlist.lock() {
+            playlist.entries.clear();
+            playlist.current_entry_id = None;
         }
     }
 }

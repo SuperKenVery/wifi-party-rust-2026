@@ -3,7 +3,7 @@
 //! Coordinates audio capture, network transport, and playback into a complete
 //! audio sharing pipeline.
 
-use std::net::UdpSocket;
+use std::net::{IpAddr, UdpSocket};
 use std::sync::Arc;
 use std::thread;
 
@@ -26,11 +26,12 @@ use super::network_stream::{NetworkStream, NetworkStreamContext, StreamRegistry}
 use super::ntp::NtpService;
 use super::packet_dispatcher::PacketDispatcher;
 use super::realtime_stream::{RealtimeAudioStream, RealtimeFramePacker, RealtimeStreamId};
-use super::share_music::{ShareMusicService, SyncedStreamId};
+use super::share_music::{ShareMusicService, SyncedStreamId, SharedPlaylist};
 
 struct NetworkStreamBundle<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     ntp_service: Arc<NtpService>,
     share_music: Arc<ShareMusicService<Sample, CHANNELS, SAMPLE_RATE>>,
+    playlist: Arc<SharedPlaylist>,
     registry: Arc<StreamRegistry<Sample, CHANNELS, SAMPLE_RATE>>,
 }
 
@@ -39,6 +40,7 @@ pub struct Party<Sample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     config: PartyConfig,
     realtime_stream: Arc<RealtimeAudioStream<Sample, CHANNELS, SAMPLE_RATE>>,
     share_music: Option<Arc<ShareMusicService<Sample, CHANNELS, SAMPLE_RATE>>>,
+    playlist: Option<Arc<SharedPlaylist>>,
     ntp_service: Option<Arc<NtpService>>,
     mic_input: Option<Arc<AudioInput<Sample, CHANNELS, SAMPLE_RATE>>>,
     _audio_streams: Vec<cpal::Stream>,
@@ -57,6 +59,7 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
             config,
             realtime_stream: Arc::new(RealtimeAudioStream::new()),
             share_music: None,
+            playlist: None,
             ntp_service: None,
             mic_input: None,
             _audio_streams: Vec::new(),
@@ -90,6 +93,49 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
         self.share_music()?.set_vocal_removal(stream_id, enabled)
     }
 
+    // -- Playlist delegation --
+
+    fn playlist(&self) -> Result<&Arc<SharedPlaylist>> {
+        self.playlist
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("SharedPlaylist not started"))
+    }
+
+    pub fn playlist_add(&self, data: Vec<u8>, title: String) -> Result<()> {
+        self.playlist()?.add_entry(data, title);
+        Ok(())
+    }
+
+    pub fn playlist_remove(&self, entry_id: u64) -> Result<()> {
+        self.playlist()?.remove_entry(entry_id);
+        Ok(())
+    }
+
+    pub fn playlist_move(&self, entry_id: u64, new_index: usize) -> Result<()> {
+        self.playlist()?.move_entry(entry_id, new_index);
+        Ok(())
+    }
+
+    pub fn playlist_play(&self, entry_id: u64) -> Result<()> {
+        self.playlist()?.set_current(Some(entry_id));
+        Ok(())
+    }
+
+    pub fn playlist_skip(&self) -> Result<()> {
+        self.playlist()?.skip();
+        Ok(())
+    }
+
+    pub fn playlist_previous(&self) -> Result<()> {
+        self.playlist()?.previous();
+        Ok(())
+    }
+
+    pub fn playlist_clear(&self) -> Result<()> {
+        self.playlist()?.clear();
+        Ok(())
+    }
+
     fn share_music(&self) -> Result<&Arc<ShareMusicService<Sample, CHANNELS, SAMPLE_RATE>>> {
         self.share_music
             .as_ref()
@@ -118,12 +164,13 @@ impl<
         let network_sender =
             NetworkSender::new(send_socket, multicast_addr, self.state.send_target.clone());
 
-        let stream_bundle = self.build_stream_bundle(network_sender.clone());
+        let stream_bundle = self.build_stream_bundle(network_sender.clone(), local_ips.clone());
 
         let realtime_stream = self.realtime_stream.clone();
         let synced_stream = stream_bundle.share_music.receiver();
         self.ntp_service = Some(stream_bundle.ntp_service.clone());
         self.share_music = Some(stream_bundle.share_music.clone());
+        self.playlist = Some(stream_bundle.playlist.clone());
 
         let (abort_tx, abort_rx) = std::sync::mpsc::sync_channel(1);
 
@@ -239,8 +286,12 @@ impl<
         if let Some(share_music) = self.share_music.take() {
             share_music.clear();
         }
+        if let Some(playlist) = self.playlist.take() {
+            playlist.clear();
+        }
         self.ntp_service = None;
         self.share_music = None;
+        self.playlist = None;
         self.multicast_lock = None;
         self.state.view_state.clear();
 
@@ -266,26 +317,38 @@ impl<
     fn build_stream_bundle(
         &mut self,
         network_sender: NetworkSender,
+        local_ips: Vec<IpAddr>,
     ) -> NetworkStreamBundle<Sample, CHANNELS, SAMPLE_RATE> {
         let ntp_service = NtpService::new(network_sender.clone());
 
         let ntp_for_synced = ntp_service.clone();
         let share_music = Arc::new(ShareMusicService::new(
             ntp_service.clone(),
-            network_sender,
+            network_sender.clone(),
             move || ntp_for_synced.party_now(),
             self.state.vocal_removal_enabled.clone(),
+        ));
+
+        let ntp_for_playlist = ntp_service.clone();
+        let playlist = Arc::new(SharedPlaylist::new(
+            Arc::downgrade(&self.state),
+            network_sender,
+            local_ips,
+            self.state.view_state.clone(),
+            move || ntp_for_playlist.party_now(),
         ));
 
         let streams: Vec<Arc<dyn NetworkStream<Sample, CHANNELS, SAMPLE_RATE>>> = vec![
             self.realtime_stream.clone() as Arc<dyn NetworkStream<Sample, CHANNELS, SAMPLE_RATE>>,
             share_music.clone() as Arc<dyn NetworkStream<Sample, CHANNELS, SAMPLE_RATE>>,
             ntp_service.clone() as Arc<dyn NetworkStream<Sample, CHANNELS, SAMPLE_RATE>>,
+            playlist.clone() as Arc<dyn NetworkStream<Sample, CHANNELS, SAMPLE_RATE>>,
         ];
 
         NetworkStreamBundle {
             ntp_service,
             share_music,
+            playlist,
             registry: Arc::new(StreamRegistry::from_streams(streams)),
         }
     }

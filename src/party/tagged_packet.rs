@@ -31,3 +31,4 @@ pub const SYNCED_META_TAG: PacketTag = 3;
 pub const SYNCED_CONTROL_TAG: PacketTag = 4;
 pub const REQUEST_FRAMES_TAG: PacketTag = 5;
 pub const NTP_TAG: PacketTag = 6;
+pub const PLAYLIST_TAG: PacketTag = 7;

@@ -48,4 +48,6 @@ pub use config::PartyConfig;
 pub use ntp::NtpDebugInfo;
 pub use party::Party;
 pub use realtime_stream::StreamSnapshot;
-pub use share_music::{SyncedStreamId, SyncedStreamState};
+pub use share_music::{
+    PlaylistEntry, PlaylistOp, PlaylistState, SharedPlaylist, SyncedStreamId, SyncedStreamState,
+};

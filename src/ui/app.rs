@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use super::sidebar::{BottomNav, SidebarMenu};
 use super::sidebar_panels::{AudioControlPanel, DebugPanel, ParticipantsPanel, ShareMusicPanel};
-use crate::party::{NtpDebugInfo, SyncedStreamState};
+use crate::party::{NtpDebugInfo, PlaylistState, SyncedStreamState};
 
 const NARROW_BREAKPOINT: u32 = 600;
 
@@ -21,6 +21,7 @@ pub struct UIState {
     pub listen_enabled: Signal<bool>,
     pub ntp_info: Signal<Option<NtpDebugInfo>>,
     pub synced_streams: Signal<Vec<SyncedStreamState>>,
+    pub playlist: Signal<PlaylistState>,
     pub is_narrow: Signal<bool>,
 }
 
@@ -95,6 +96,7 @@ fn AppLayout() -> Element {
         listen_enabled: use_signal(|| true),
         ntp_info: use_signal(|| None::<NtpDebugInfo>),
         synced_streams: use_signal(Vec::<SyncedStreamState>::new),
+        playlist: use_signal(PlaylistState::default),
         is_narrow: use_signal(|| false),
     };
 
@@ -161,6 +163,7 @@ fn AppLayout() -> Element {
                 ui.ntp_info.set(state.view_state.ntp_debug());
 
                 ui.synced_streams.set(state.view_state.synced_streams());
+                ui.playlist.set(state.view_state.playlist());
 
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
@@ -242,7 +245,10 @@ fn ShareMusic() -> Element {
     let ui = use_context::<UIState>();
 
     rsx! {
-        ShareMusicPanel { active_streams: (ui.synced_streams)() }
+        ShareMusicPanel {
+            active_streams: (ui.synced_streams)(),
+            playlist: (ui.playlist)(),
+        }
     }
 }
 

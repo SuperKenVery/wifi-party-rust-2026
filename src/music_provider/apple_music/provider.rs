@@ -4,23 +4,28 @@ use dioxus::prelude::*;
 use std::sync::Arc;
 use tracing::{error, info};
 
-use crate::music_provider::MusicProvider;
-use crate::state::AppState;
+use crate::music_provider::{MusicProvider, MusicProviderContext};
 
 use super::api::{self, SongData};
 use super::download::{self, DownloadProgress, ProgressFn};
 
-pub fn factory(state: Arc<AppState>) -> Box<dyn MusicProvider> {
-    Box::new(AppleMusicProvider::new(state))
+#[derive(Clone, Copy, Debug)]
+enum SongAction {
+    PlayNow,
+    Queue,
+}
+
+pub fn factory(ctx: MusicProviderContext) -> Box<dyn MusicProvider> {
+    Box::new(AppleMusicProvider::new(ctx))
 }
 
 pub struct AppleMusicProvider {
-    state: Arc<AppState>,
+    ctx: MusicProviderContext,
 }
 
 impl AppleMusicProvider {
-    fn new(state: Arc<AppState>) -> Self {
-        Self { state }
+    fn new(ctx: MusicProviderContext) -> Self {
+        Self { ctx }
     }
 }
 
@@ -30,11 +35,11 @@ impl MusicProvider for AppleMusicProvider {
     }
 
     fn render(&self) -> Element {
-        apple_music_content(self.state.clone())
+        apple_music_content(self.ctx.clone())
     }
 }
 
-fn apple_music_content(state: Arc<AppState>) -> Element {
+fn apple_music_content(ctx: MusicProviderContext) -> Element {
     let mut query = use_signal(String::new);
     let mut storefront = use_signal(|| "cn".to_string());
     let mut wrapper_addr = use_signal(|| "localhost".to_string());
@@ -97,8 +102,8 @@ fn apple_music_content(state: Arc<AppState>) -> Element {
 
     let on_search = move |_| do_search();
 
-    let make_play_handler = move |song: SongData| {
-        let state = state.clone();
+    let make_action_handler = move |song: SongData, action: SongAction| {
+        let ctx = ctx.clone();
         move |_: Event<MouseData>| {
             if *busy.read() {
                 return;
@@ -119,7 +124,7 @@ fn apple_music_content(state: Arc<AppState>) -> Element {
             };
             let wrapper = format!("{addr}:{port}");
             let song = song.clone();
-            let state = state.clone();
+            let ctx = ctx.clone();
             busy.set(true);
             dl_progress.set(Some(0.0));
             dec_progress.set(None);
@@ -178,8 +183,12 @@ fn apple_music_content(state: Arc<AppState>) -> Element {
                         dl_progress.set(Some(1.0));
                         dec_progress.set(Some(1.0));
                         let name = s.file_name.clone();
-                        if let Err(e) = state.start_music_stream(s.bytes, name.clone()) {
-                            error!("start_music_stream: {e:#}");
+                        let res = match action {
+                            SongAction::PlayNow => ctx.play_now(s.bytes, name),
+                            SongAction::Queue => ctx.queue(s.bytes, name),
+                        };
+                        if let Err(e) = res {
+                            error!("{:?}: {e:#}", action);
                             status.set(Some(format!("Playback error: {e}")));
                             playing_id.set(None);
                             dl_progress.set(None);
@@ -255,38 +264,37 @@ fn apple_music_content(state: Arc<AppState>) -> Element {
                 }
             }
 
-            // Results list — each row is its own play button
+            // Results list — each row has song info + play/queue buttons
             if !songs.is_empty() {
                 div {
                     class: "space-y-1",
                     for song in songs.iter() {
                         {
                             let song = song.clone();
-                            let is_playing = current_playing_id.as_ref().map(|id| *id == song.id).unwrap_or(false);
-                            let handler = make_play_handler(song.clone());
+                            let is_active = current_playing_id.as_ref().map(|id| *id == song.id).unwrap_or(false);
+                            let play_handler = make_action_handler(song.clone(), SongAction::PlayNow);
+                            let queue_handler = make_action_handler(song.clone(), SongAction::Queue);
                             rsx! {
-                                button {
-                                    class: if is_playing {
-                                        "w-full flex items-center gap-3 px-3 py-2.5 rounded-xl bg-pink-500/15 border border-pink-500/40 text-left cursor-pointer transition-colors"
+                                div {
+                                    class: if is_active {
+                                        "flex items-center gap-3 px-3 py-2.5 rounded-xl bg-pink-500/15 border border-pink-500/40 transition-colors"
                                     } else {
-                                        "w-full flex items-center gap-3 px-3 py-2.5 rounded-xl bg-slate-800/60 hover:bg-slate-700/80 border border-transparent hover:border-slate-600 text-left cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                        "flex items-center gap-3 px-3 py-2.5 rounded-xl bg-slate-800/60 hover:bg-slate-700/80 border border-transparent hover:border-slate-600 transition-colors"
                                     },
-                                    disabled: is_busy && !is_playing,
-                                    onclick: handler,
-                                    // Play / spinner icon
+                                    // Spinner / icon
                                     div {
-                                        class: if is_playing {
+                                        class: if is_active {
                                             "shrink-0 w-7 h-7 rounded-full bg-pink-500/30 flex items-center justify-center text-pink-400 text-xs"
                                         } else {
-                                            "shrink-0 w-7 h-7 rounded-full bg-slate-700 flex items-center justify-center text-slate-400 text-xs group-hover:bg-slate-600"
+                                            "shrink-0 w-7 h-7 rounded-full bg-slate-700 flex items-center justify-center text-slate-400 text-xs"
                                         },
-                                        if is_playing && is_busy { "…" } else { "▶" }
+                                        if is_active && is_busy { "…" } else { "♪" }
                                     }
                                     // Text
                                     div {
                                         class: "flex-1 min-w-0",
                                         p {
-                                            class: if is_playing {
+                                            class: if is_active {
                                                 "text-sm font-medium text-pink-300 truncate"
                                             } else {
                                                 "text-sm font-medium text-white truncate"
@@ -297,6 +305,22 @@ fn apple_music_content(state: Arc<AppState>) -> Element {
                                             class: "text-xs text-slate-400 truncate",
                                             "{song.attributes.artist_name}"
                                         }
+                                    }
+                                    // Play now button
+                                    button {
+                                        class: "shrink-0 w-8 h-8 rounded-full flex items-center justify-center bg-pink-500/20 hover:bg-pink-500/40 text-pink-400 text-xs transition-colors disabled:opacity-30 disabled:cursor-not-allowed",
+                                        disabled: is_busy,
+                                        onclick: play_handler,
+                                        title: "Play now",
+                                        "▶"
+                                    }
+                                    // Queue button
+                                    button {
+                                        class: "shrink-0 w-8 h-8 rounded-full flex items-center justify-center bg-indigo-500/20 hover:bg-indigo-500/40 text-indigo-400 text-xs transition-colors disabled:opacity-30 disabled:cursor-not-allowed",
+                                        disabled: is_busy,
+                                        onclick: queue_handler,
+                                        title: "Add to playlist",
+                                        "📋"
                                     }
                                 }
                             }

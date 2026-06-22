@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::io::SendTarget;
 use crate::music_provider::ProviderFactory;
-use crate::party::{Party, PartyConfig};
+use crate::party::{Party, PartyConfig, PlaylistState};
 
 mod view_state;
 
@@ -218,6 +218,77 @@ impl AppState {
             .as_ref()
             .context("Party not initialized")?
             .set_music_vocal_removal(stream_id, enabled)
+    }
+
+    // -- Playlist operations --
+
+    /// Add a song to the shared playlist. The audio data is cached locally
+    /// and the entry is broadcast to all peers.
+    pub fn playlist_add(&self, data: Vec<u8>, title: String) -> Result<()> {
+        self.party
+            .lock()
+            .expect("Party lock poisoned")
+            .as_ref()
+            .context("Party not initialized")?
+            .playlist_add(data, title)
+    }
+
+    pub fn playlist_remove(&self, entry_id: u64) -> Result<()> {
+        self.party
+            .lock()
+            .expect("Party lock poisoned")
+            .as_ref()
+            .context("Party not initialized")?
+            .playlist_remove(entry_id)
+    }
+
+    pub fn playlist_move(&self, entry_id: u64, new_index: usize) -> Result<()> {
+        self.party
+            .lock()
+            .expect("Party lock poisoned")
+            .as_ref()
+            .context("Party not initialized")?
+            .playlist_move(entry_id, new_index)
+    }
+
+    pub fn playlist_play(&self, entry_id: u64) -> Result<()> {
+        self.party
+            .lock()
+            .expect("Party lock poisoned")
+            .as_ref()
+            .context("Party not initialized")?
+            .playlist_play(entry_id)
+    }
+
+    pub fn playlist_skip(&self) -> Result<()> {
+        self.party
+            .lock()
+            .expect("Party lock poisoned")
+            .as_ref()
+            .context("Party not initialized")?
+            .playlist_skip()
+    }
+
+    pub fn playlist_previous(&self) -> Result<()> {
+        self.party
+            .lock()
+            .expect("Party lock poisoned")
+            .as_ref()
+            .context("Party not initialized")?
+            .playlist_previous()
+    }
+
+    pub fn playlist_clear(&self) -> Result<()> {
+        self.party
+            .lock()
+            .expect("Party lock poisoned")
+            .as_ref()
+            .context("Party not initialized")?
+            .playlist_clear()
+    }
+
+    pub fn playlist_state(&self) -> PlaylistState {
+        self.view_state.playlist()
     }
 
     pub fn send_target(&self) -> SendTarget {

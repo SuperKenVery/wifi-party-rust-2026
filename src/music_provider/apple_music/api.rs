@@ -44,7 +44,7 @@ pub async fn get_token(client: &Client) -> Result<String> {
         .text()
         .await?;
 
-    let tok_re = Regex::new(r#"eyJh[A-Za-z0-9._\-]+"#)?;
+    let tok_re = Regex::new(r#"eyJ[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+"#)?;
     let token = tok_re
         .find(&js)
         .ok_or_else(|| anyhow!("could not locate bearer token in {index_path}"))?
