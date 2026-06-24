@@ -4,16 +4,16 @@
     rust-overlay.url = "github:oxalica/rust-overlay";
     crane.url = "github:ipetkov/crane";
     systems.url = "github:nix-systems/default";
-
-    nix-github-actions.url = "github:nix-community/nix-github-actions";
-    nix-github-actions.inputs.nixpkgs.follows = "nixpkgs";
+    bundlers = {
+      url = "github:NixOS/bundlers";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs = {
     self,
     systems,
     nixpkgs,
-    nix-github-actions,
     crane,
     ...
   } @ inputs: let
@@ -30,27 +30,29 @@
           })
       );
 
-    rustToolchain = eachSystem (pkgs: pkgs.rust-bin.stable.latest.default.override {
-      extensions = ["rust-src" "rust-analyzer"];
-      targets = [
-        "wasm32-unknown-unknown"
-        "aarch64-linux-android"
-        "aarch64-apple-ios"
-        "aarch64-apple-ios-sim"
-        "x86_64-apple-ios"
-      ];
-    });
+    rustToolchain = eachSystem (pkgs:
+      pkgs.rust-bin.stable.latest.default.override {
+        extensions = ["rust-src" "rust-analyzer"];
+        targets = [
+          "wasm32-unknown-unknown"
+          "aarch64-linux-android"
+          "aarch64-apple-ios"
+          "aarch64-apple-ios-sim"
+          "x86_64-apple-ios"
+        ];
+      });
 
-    dioxus-cli = eachSystem (pkgs: pkgs.dioxus-cli.overrideAttrs (oldAttrs: {
-      # postPatch = ''
-      #   rm Cargo.lock
-      #   cp ${./Dioxus.lock} Cargo.lock
-      # '';
+    dioxus-cli = eachSystem (pkgs:
+      pkgs.dioxus-cli.overrideAttrs (oldAttrs: {
+        # postPatch = ''
+        #   rm Cargo.lock
+        #   cp ${./Dioxus.lock} Cargo.lock
+        # '';
 
-      # cargoDeps = pkgs.rustPlatform.importCargoLock {
-      #   lockFile = ./Dioxus.lock;
-      # };
-    }));
+        # cargoDeps = pkgs.rustPlatform.importCargoLock {
+        #   lockFile = ./Dioxus.lock;
+        # };
+      }));
 
     cargoLock = builtins.fromTOML (builtins.readFile ./Cargo.lock);
 
@@ -72,92 +74,139 @@
       };
     }));
 
+    androidSdk = eachSystem (pkgs:
+      (pkgs.androidenv.composeAndroidPackages {
+        platformVersions = ["33" "34"];
+        buildToolsVersions = ["33.0.0" "34.0.0"];
+        ndkVersions = ["29.0.14206865"];
+        includeEmulator = false;
+        includeSources = false;
+        includeSystemImages = false;
+        includeNDK = true;
+      }).androidsdk);
 
+    androidCmake = eachSystem (pkgs:
+      pkgs.writeShellScriptBin "android-cmake" ''
+        if [ "''${1:-}" = "--build" ]; then
+          exec ${pkgs.cmake}/bin/cmake "$@"
+        fi
 
-    androidSdk = eachSystem (pkgs: (pkgs.androidenv.composeAndroidPackages {
-      platformVersions = [ "33" "34" ];
-      buildToolsVersions = [ "33.0.0" "34.0.0" ];
-      ndkVersions = [ "29.0.14206865" ];
-      includeEmulator = false;
-      includeSources = false;
-      includeSystemImages = false;
-      includeNDK = true;
-    }).androidsdk);
-
+        exec ${pkgs.cmake}/bin/cmake "$@" -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 -DCMAKE_SYSTEM_VERSION=28
+      '');
   in rec {
-    devShells = eachSystem (pkgs: {
-      # Based on a discussion at https://github.com/oxalica/rust-overlay/issues/129
-      default = pkgs.mkShell (with pkgs; {
-        nativeBuildInputs = [
-          # Use mold when we are runnning in Linux
-          (lib.optionals stdenv.isLinux mold)
-          sqlite
-          darwin.sigtool
-          binaryen
-        ];
-
-        buildInputs = [
-          rustToolchain.${pkgs.stdenv.hostPlatform.system}
-          cargo
-          dioxus-cli.${pkgs.stdenv.hostPlatform.system}
-          wasm-bindgen-cli.${pkgs.stdenv.hostPlatform.system}
-          nodejs
-          lld
-          cmake
-          pkg-config
-          jdk17
-          androidSdk.${pkgs.stdenv.hostPlatform.system}
-        ] ++
-        (pkgs.lib.optionals pkgs.stdenv.isLinux (with pkgs; [
-          openssl
-        ]));
-
-        RUST_BACKTRACE = "1";
-        RUST_LOG = "warn,wifi_party_rust=debug,vocal-model=debug";
-
-        OPUS_NO_PKG = "1";
-        CMAKE_POLICY_VERSION_MINIMUM = "3.5";
-
-        JAVA_HOME = "${jdk17}";
-        ANDROID_HOME = "${androidSdk.${pkgs.stdenv.hostPlatform.system}}/libexec/android-sdk";
-        NDK_HOME = "${androidSdk.${pkgs.stdenv.hostPlatform.system}}/libexec/android-sdk/ndk/29.0.14206865";
-      });
+    bundlers = eachSystem (pkgs: let
+      system = pkgs.stdenv.hostPlatform.system;
+    in {
+      default = inputs.bundlers.bundlers.${system}.default;
+      appimage = inputs.bundlers.bundlers.${system}.toAppImage;
     });
 
-    packages = eachSystem(pkgs: rec {
-      server = let
+    devShells = eachSystem (pkgs: {
+      # Based on a discussion at https://github.com/oxalica/rust-overlay/issues/129
+      default = pkgs.mkShell (with pkgs;
+        {
+          nativeBuildInputs =
+            [
+              sqlite
+              darwin.sigtool
+              binaryen
+            ]
+            # Use mold when we are runnning in Linux.
+            ++ lib.optionals stdenv.isLinux [mold];
+
+          buildInputs =
+            [
+              rustToolchain.${pkgs.stdenv.hostPlatform.system}
+              cargo
+              dioxus-cli.${pkgs.stdenv.hostPlatform.system}
+              wasm-bindgen-cli.${pkgs.stdenv.hostPlatform.system}
+              nodejs
+              lld
+              cmake
+              pkg-config
+              jdk17
+              androidSdk.${pkgs.stdenv.hostPlatform.system}
+            ]
+            ++ (pkgs.lib.optionals pkgs.stdenv.isLinux (with pkgs; [
+              alsa-lib
+              dbus
+              glib
+              gtk3
+              jack2
+              libpulseaudio
+              llvmPackages.libclang
+              openssl
+              opus
+              pipewire
+              webkitgtk_4_1
+              xdotool
+            ]));
+
+          RUST_BACKTRACE = "1";
+          RUST_LOG = "warn,wifi_party_rust=debug,vocal-model=debug";
+
+          CMAKE_POLICY_VERSION_MINIMUM = "3.5";
+
+          JAVA_HOME = "${jdk17}";
+          ANDROID_HOME = "${androidSdk.${pkgs.stdenv.hostPlatform.system}}/libexec/android-sdk";
+          NDK_HOME = "${androidSdk.${pkgs.stdenv.hostPlatform.system}}/libexec/android-sdk/ndk/29.0.14206865";
+          LIBCLANG_PATH = pkgs.lib.optionalString pkgs.stdenv.isLinux "${pkgs.llvmPackages.libclang.lib}/lib";
+          BINDGEN_EXTRA_CLANG_ARGS = pkgs.lib.optionalString pkgs.stdenv.isLinux "-DSPA_ID_INVALID=4294967295U -I${pkgs.glibc.dev}/include";
+          CMAKE_TOOLCHAIN_FILE_aarch64_linux_android = "${androidSdk.${pkgs.stdenv.hostPlatform.system}}/libexec/android-sdk/ndk/29.0.14206865/build/cmake/android.toolchain.cmake";
+          CMAKE_aarch64_linux_android = "${androidCmake.${pkgs.stdenv.hostPlatform.system}}/bin/android-cmake";
+          APPIMAGE_EXTRACT_AND_RUN = pkgs.lib.optionalString pkgs.stdenv.isLinux "1";
+        }
+        // pkgs.lib.optionalAttrs (!pkgs.stdenv.isLinux) {
+          OPUS_NO_PKG = "1";
+        });
+    });
+
+    packages = eachSystem (pkgs: rec {
+      default = app;
+      app = let
         system = pkgs.stdenv.hostPlatform.system;
         craneLib = crane.mkLib pkgs;
-        assets = pkgs.runCommand "assets" { } ''
-            mkdir -p $out
-            cd assets/
-            npx tailwind -o $out/tailwind_output.css
-          '';
-        commonArgs = rec {
-          src = (pkgs.lib.cleanSourceWith {
+        commonArgsBase = rec {
+          src = pkgs.lib.cleanSourceWith {
             src = ./.;
             filter = manifestFilter;
             name = "source";
-          });
+          };
           # src = builtins.trace src1.outPath src1;
 
           nativeBuildInputs = devShells.${system}.default.nativeBuildInputs;
           buildInputs = devShells.${system}.default.buildInputs;
+
+          LIBCLANG_PATH = pkgs.lib.optionalString pkgs.stdenv.isLinux "${pkgs.llvmPackages.libclang.lib}/lib";
+          BINDGEN_EXTRA_CLANG_ARGS = pkgs.lib.optionalString pkgs.stdenv.isLinux "-DSPA_ID_INVALID=4294967295U -I${pkgs.glibc.dev}/include";
+          cargoExtraArgs = "--locked --no-default-features --features vocal-removal,desktop,cpal-pipewire";
+          doCheck = false;
         };
+        cargoVendorDir = pkgs.runCommand "vendor-cargo-deps-patched" {} ''
+          mkdir -p "$out"
+          cp -rL --no-preserve=mode,ownership ${craneLib.vendorCargoDeps commonArgsBase}/. "$out"
+          substituteInPlace "$out/config.toml" \
+            --replace-fail "${craneLib.vendorCargoDeps commonArgsBase}" "$out"
+          substituteInPlace "$out"/*/libspa-0.10.0/src/constants.rs \
+            --replace-fail "spa_sys::SPA_ID_INVALID" "u32::MAX"
+          substituteInPlace "$out"/*/pipewire-0.10.0/src/constants.rs \
+            --replace-fail "pw_sys::PW_ID_ANY" "u32::MAX"
+        '';
+        commonArgs = commonArgsBase // {inherit cargoVendorDir;};
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
         # Keep all source and /assets for building this crate
         sourceFilter = path: type:
-            (craneLib.filterCargoSources path type)
-            || (builtins.match ".*assets/.*" path != null);
+          (craneLib.filterCargoSources path type)
+          || (builtins.match ".*assets/.*" path != null);
         # Only keep Cargo.toml and Cargo.lock, for building dependencies
         manifestFilter = path: type:
-            (craneLib.filterCargoSources path type)
-            || (builtins.match ".*/Cargo\\..*" path != null);
+          (craneLib.filterCargoSources path type)
+          || (builtins.match ".*/Cargo\\..*" path != null);
         tailwind-assets = pkgs.buildNpmPackage {
           name = "tailwind-assets";
           src = ./assets;
 
-          npmDepsHash = "sha256-HRMLzN2s0CKjHXx23MAL4EURhzHhpb6gtSsocva6q8s=";
+          npmDepsHash = "sha256-1mjkLm2cjzGtxB6llUVvxBjqeLAJweYuI/6qyPCHud8=";
 
           # Override the build command to generate the specific file you need
           # Adjust 'input.css' to whatever your source css file is named
@@ -170,36 +219,25 @@
             cp tailwind_output.css $out/
           '';
         };
-
-        in craneLib.buildPackage (
-          commonArgs // {
+      in
+        craneLib.buildPackage (
+          commonArgs
+          // {
             inherit cargoArtifacts;
 
-            src = (pkgs.lib.cleanSourceWith {
+            src = pkgs.lib.cleanSourceWith {
               src = ./.;
               filter = sourceFilter;
               name = "source";
-            });
-        });
-    });
+            };
 
-    githubActions-server = let
-      server-package = (
-        nixpkgs.lib.mapAttrs
-        (_system: pkgs: nixpkgs.lib.removeAttrs pkgs [ "docker" ])
-        self.packages
-      );
-    in nix-github-actions.lib.mkGithubMatrix {
-      checks = nixpkgs.lib.getAttrs ["x86_64-linux" "aarch64-linux" "aarch64-darwin"] server-package;
-    };
-    githubActions-docker = let
-      docker-package = (
-        nixpkgs.lib.mapAttrs
-        (_system: pkgs: nixpkgs.lib.removeAttrs pkgs [ "server" ])
-        self.packages
-      );
-    in nix-github-actions.lib.mkGithubMatrix {
-      checks = nixpkgs.lib.getAttrs ["x86_64-linux" "aarch64-linux"] docker-package;
-    };
+            postPatch = ''
+              cp ${tailwind-assets}/tailwind_output.css assets/tailwind_output.css
+            '';
+
+            meta.mainProgram = "wifi-party-rust";
+          }
+        );
+    });
   };
 }

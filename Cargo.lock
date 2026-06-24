@@ -11958,7 +11958,6 @@ name = "wifi-party-rust"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "audiopus_sys",
  "chrono",
  "cpal",
  "crossbeam",
