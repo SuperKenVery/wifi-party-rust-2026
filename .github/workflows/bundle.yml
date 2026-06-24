@@ -45,7 +45,20 @@ jobs:
 
       - name: Install Windows bundling tools
         shell: pwsh
-        run: choco install wixtoolset --no-progress -y
+        run: choco install wixtoolset cmake llvm --no-progress -y
+
+      - name: Configure native build tools
+        shell: pwsh
+        run: |
+          $llvmBin = "C:\Program Files\LLVM\bin"
+          $cmakeBin = "C:\Program Files\CMake\bin"
+          if (Test-Path $llvmBin) {
+            "$llvmBin" | Out-File -FilePath $env:GITHUB_PATH -Append
+            "LIBCLANG_PATH=$llvmBin" | Out-File -FilePath $env:GITHUB_ENV -Append
+          }
+          if (Test-Path $cmakeBin) {
+            "$cmakeBin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          }
 
       - name: Install Dioxus CLI
         shell: pwsh

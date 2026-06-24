@@ -42,14 +42,13 @@
 
     dioxus-cli = eachSystem (pkgs:
       pkgs.dioxus-cli.overrideAttrs (oldAttrs: {
-        # postPatch = ''
-        #   rm Cargo.lock
-        #   cp ${./Dioxus.lock} Cargo.lock
-        # '';
-
-        # cargoDeps = pkgs.rustPlatform.importCargoLock {
-        #   lockFile = ./Dioxus.lock;
-        # };
+        postPatch =
+          (oldAttrs.postPatch or "")
+          + ''
+            substituteInPlace src/build/android.rs \
+              --replace-fail 'Ok(self.root_dir().join(gradle_exec_name))' \
+                'Ok(std::env::var_os("DIOXUS_GRADLE").map(PathBuf::from).unwrap_or_else(|| self.root_dir().join(gradle_exec_name)))'
+          '';
       }));
 
     cargoLock = builtins.fromTOML (builtins.readFile ./Cargo.lock);
