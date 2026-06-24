@@ -77,6 +77,8 @@
       nativeBuildInputs = commonArgs.nativeBuildInputs;
       buildInputs = commonArgs.buildInputs;
 
+      dontConfigure = true;
+
       inherit (commonArgs) LIBCLANG_PATH BINDGEN_EXTRA_CLANG_ARGS;
       CMAKE_POLICY_VERSION_MINIMUM = "3.5";
       JAVA_HOME = "${pkgs.jdk17}";
