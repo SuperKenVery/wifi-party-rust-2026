@@ -13,7 +13,7 @@ resolver = "3"
 [dependencies]
 dioxus = { version = "0.7.9", default-features = false, features = ["router"] }
 chrono = "0.4"
-cpal = { git="https://github.com/RustAudio/cpal.git", default-features = false, features = ["asio", "jack", "pulseaudio", "realtime", "realtime-dbus"] }
+cpal = { git="https://github.com/RustAudio/cpal.git", default-features = false }
 rkyv = "0.8"
 rtrb = "0.3"
 socket2 = { version = "0.5", features = ["all"] }
@@ -58,10 +58,21 @@ pollster = "0.4.0"
 wgpu = "29.0.1"
 
 [features]
-default = ["desktop", "cpal-pipewire", "vocal-removal"]
+default = [
+    "desktop",
+    "cpal-jack",
+    "cpal-pulseaudio",
+    "cpal-realtime",
+    "cpal-pipewire",
+    "vocal-removal",
+]
 web = ["dioxus/default", "dioxus/web"]
 desktop = ["dioxus/default", "dioxus/desktop"]
 mobile = ["dioxus/default", "dioxus/mobile", "vocal-removal"]
+cpal-asio = ["cpal/asio"]
+cpal-jack = ["cpal/jack"]
+cpal-pulseaudio = ["cpal/pulseaudio"]
+cpal-realtime = ["cpal/realtime", "cpal/realtime-dbus"]
 cpal-pipewire = ["cpal/pipewire"]
 vocal-removal = ["dep:wifi-party-vocal-model"]
 
