@@ -71,6 +71,18 @@ jobs:
           npm ci
           npx @tailwindcss/cli -i tailwind.css -o tailwind_output.css
 
+      - name: Build Windows app
+        shell: pwsh
+        run: >
+          cargo build
+          --release
+          --no-default-features
+          --features desktop
+          --locked
+          -p wifi-party-rust
+          --bin wifi-party-rust
+          --verbose
+
       - name: Bundle MSI
         shell: pwsh
         run: >
