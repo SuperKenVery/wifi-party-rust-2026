@@ -45,7 +45,9 @@ jobs:
 
       - name: Install Windows bundling tools
         shell: pwsh
-        run: choco install wixtoolset cmake llvm --no-progress -y
+        run: |
+          choco install wixtoolset llvm --no-progress -y
+          choco install cmake --version=3.31.8 --allow-downgrade --no-progress -y
 
       - name: Configure native build tools
         shell: pwsh
@@ -59,6 +61,7 @@ jobs:
           if (Test-Path $cmakeBin) {
             "$cmakeBin" | Out-File -FilePath $env:GITHUB_PATH -Append
           }
+          cmake --version
 
       - name: Install Dioxus CLI
         shell: pwsh
