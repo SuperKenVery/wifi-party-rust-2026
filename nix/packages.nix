@@ -43,6 +43,9 @@
   '';
   commonArgs = commonArgsBase // {inherit cargoVendorDir;};
   cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+  macosHdiutil = pkgs.writeShellScriptBin "hdiutil" ''
+    exec /usr/bin/hdiutil "$@"
+  '';
   tailwind-assets = pkgs.buildNpmPackage {
     name = "tailwind-assets";
     src = root + /assets;
@@ -74,7 +77,9 @@
         name = "source";
       };
 
-      nativeBuildInputs = commonArgs.nativeBuildInputs;
+      nativeBuildInputs =
+        commonArgs.nativeBuildInputs
+        ++ pkgs.lib.optionals (pkgs.stdenv.isDarwin && packageType == "dmg") [macosHdiutil];
       buildInputs = commonArgs.buildInputs;
 
       dontConfigure = true;
