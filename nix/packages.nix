@@ -158,7 +158,7 @@ in
       pname = "wifi-party-rust-dmg";
       platformFlag = "--macos";
       packageType = "dmg";
-      features = "vocal-removal desktop";
+      features = "vocal-removal,desktop";
     };
   }
   // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {

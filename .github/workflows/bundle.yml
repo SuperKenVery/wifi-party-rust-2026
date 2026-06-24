@@ -67,7 +67,7 @@ jobs:
           --out-dir dist/windows
           --release
           --no-default-features
-          --features "vocal-removal desktop"
+          --features vocal-removal,desktop
           --locked
           --verbose
 
