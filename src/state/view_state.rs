@@ -1,9 +1,10 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use dashmap::DashMap;
+use dioxus::prelude::*;
 
 use crate::party::{NtpDebugInfo, PlaylistEntry, PlaylistState, StreamSnapshot, SyncedStreamState};
 use crate::state::{HostId, HostInfo, StreamInfo};
@@ -163,8 +164,8 @@ impl NtpView {
 
 pub struct PartyViewState {
     realtime_streams: DashMap<StreamViewKey, Arc<RealtimeStreamView>>,
-    synced_streams: Mutex<Vec<SyncedStreamState>>,
-    playlist: Mutex<PlaylistState>,
+    synced_streams_signal: OnceLock<Signal<Vec<SyncedStreamState>, SyncStorage>>,
+    playlist_signal: OnceLock<Signal<PlaylistState, SyncStorage>>,
     ntp: Arc<NtpView>,
 }
 
@@ -172,8 +173,8 @@ impl PartyViewState {
     pub fn new() -> Self {
         Self {
             realtime_streams: DashMap::new(),
-            synced_streams: Mutex::new(Vec::new()),
-            playlist: Mutex::new(PlaylistState::default()),
+            synced_streams_signal: OnceLock::new(),
+            playlist_signal: OnceLock::new(),
             ntp: Arc::new(NtpView::new()),
         }
     }
@@ -229,31 +230,34 @@ impl PartyViewState {
             .unwrap_or_default()
     }
 
+    pub fn set_synced_streams_signal(&self, signal: Signal<Vec<SyncedStreamState>, SyncStorage>) {
+        let _ = self.synced_streams_signal.set(signal);
+    }
+
     pub fn set_synced_streams(&self, streams: Vec<SyncedStreamState>) {
-        if let Ok(mut synced_streams) = self.synced_streams.lock() {
-            *synced_streams = streams;
+        if let Some(mut signal) = self.synced_streams_signal.get().copied() {
+            signal.set(streams);
         }
     }
 
     pub fn synced_streams(&self) -> Vec<SyncedStreamState> {
-        self.synced_streams
-            .lock()
-            .map(|streams| streams.clone())
+        self.synced_streams_signal
+            .get()
+            .map(|s| (*s.read()).clone())
             .unwrap_or_default()
+    }
+
+    pub fn set_playlist_signal(&self, signal: Signal<PlaylistState, SyncStorage>) {
+        let _ = self.playlist_signal.set(signal);
     }
 
     pub fn set_playlist(&self, entries: Vec<PlaylistEntry>, current_entry_id: Option<u64>) {
-        if let Ok(mut playlist) = self.playlist.lock() {
-            playlist.entries = entries;
-            playlist.current_entry_id = current_entry_id;
+        if let Some(mut signal) = self.playlist_signal.get().copied() {
+            signal.set(PlaylistState {
+                entries,
+                current_entry_id,
+            });
         }
-    }
-
-    pub fn playlist(&self) -> PlaylistState {
-        self.playlist
-            .lock()
-            .map(|p| p.clone())
-            .unwrap_or_default()
     }
 
     pub fn update_ntp(&self, info: NtpDebugInfo) {
@@ -266,12 +270,11 @@ impl PartyViewState {
 
     pub fn clear(&self) {
         self.realtime_streams.clear();
-        if let Ok(mut synced_streams) = self.synced_streams.lock() {
-            synced_streams.clear();
+        if let Some(mut signal) = self.synced_streams_signal.get().copied() {
+            signal.set(Vec::new());
         }
-        if let Ok(mut playlist) = self.playlist.lock() {
-            playlist.entries.clear();
-            playlist.current_entry_id = None;
+        if let Some(mut signal) = self.playlist_signal.get().copied() {
+            signal.set(PlaylistState::default());
         }
     }
 }

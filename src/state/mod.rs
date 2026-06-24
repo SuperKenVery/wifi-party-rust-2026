@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::io::SendTarget;
 use crate::music_provider::ProviderFactory;
-use crate::party::{Party, PartyConfig, PlaylistState};
+use crate::party::{Party, PartyConfig};
 
 mod view_state;
 
@@ -285,10 +285,6 @@ impl AppState {
             .as_ref()
             .context("Party not initialized")?
             .playlist_clear()
-    }
-
-    pub fn playlist_state(&self) -> PlaylistState {
-        self.view_state.playlist()
     }
 
     pub fn send_target(&self) -> SendTarget {

@@ -2,6 +2,7 @@
 
 use crate::state::{AppState, HostInfo};
 use dioxus::prelude::*;
+use dioxus::signals::SyncStorage;
 use std::sync::Arc;
 
 use super::sidebar::{BottomNav, SidebarMenu};
@@ -20,8 +21,8 @@ pub struct UIState {
     pub system_audio_level: Signal<u32>,
     pub listen_enabled: Signal<bool>,
     pub ntp_info: Signal<Option<NtpDebugInfo>>,
-    pub synced_streams: Signal<Vec<SyncedStreamState>>,
-    pub playlist: Signal<PlaylistState>,
+    pub synced_streams: Signal<Vec<SyncedStreamState>, SyncStorage>,
+    pub playlist: Signal<PlaylistState, SyncStorage>,
     pub is_narrow: Signal<bool>,
 }
 
@@ -86,6 +87,16 @@ pub fn App() -> Element {
 fn AppLayout() -> Element {
     let state_arc = use_context::<Arc<AppState>>();
 
+    // Create sync signals that can be written from the network thread.
+    let synced_streams_signal = use_signal_sync(Vec::<SyncedStreamState>::new);
+    let playlist_signal = use_signal_sync(PlaylistState::default);
+
+    // Register signals with PartyViewState so the network layer can write directly.
+    state_arc
+        .view_state
+        .set_synced_streams_signal(synced_streams_signal);
+    state_arc.view_state.set_playlist_signal(playlist_signal);
+
     let mut ui = UIState {
         active_hosts: use_signal(Vec::<HostInfo>::new),
         mic_volume: use_signal(|| 1.0f32),
@@ -95,8 +106,8 @@ fn AppLayout() -> Element {
         system_audio_level: use_signal(|| 0u32),
         listen_enabled: use_signal(|| true),
         ntp_info: use_signal(|| None::<NtpDebugInfo>),
-        synced_streams: use_signal(Vec::<SyncedStreamState>::new),
-        playlist: use_signal(PlaylistState::default),
+        synced_streams: synced_streams_signal,
+        playlist: playlist_signal,
         is_narrow: use_signal(|| false),
     };
 
@@ -162,8 +173,8 @@ fn AppLayout() -> Element {
 
                 ui.ntp_info.set(state.view_state.ntp_debug());
 
-                ui.synced_streams.set(state.view_state.synced_streams());
-                ui.playlist.set(state.view_state.playlist());
+                // synced_streams and playlist are written directly to signals
+                // by the network layer — no polling needed.
 
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }

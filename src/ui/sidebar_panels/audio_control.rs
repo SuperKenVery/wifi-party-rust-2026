@@ -451,10 +451,29 @@ fn DeviceSettings() -> Element {
     let output_devices = use_signal(get_output_devices);
     let network_interfaces = use_signal(get_network_interfaces);
 
+    // Restore interface/ipv6 selection from the current party config so that
+    // switching tabs and back doesn't reset them to defaults.
+    let (initial_ipv6, initial_interface) = state_arc
+        .party
+        .lock()
+        .ok()
+        .and_then(|guard| {
+            guard.as_ref().map(|party| {
+                let cfg = party.config();
+                (
+                    cfg.ipv6,
+                    cfg.send_interface_index
+                        .map(|i| i.to_string())
+                        .unwrap_or_default(),
+                )
+            })
+        })
+        .unwrap_or((false, String::new()));
+
     let mut selected_input = use_signal(String::new);
     let mut selected_output = use_signal(String::new);
-    let mut selected_interface = use_signal(String::new);
-    let mut use_ipv6 = use_signal(|| false);
+    let mut selected_interface = use_signal(move || initial_interface.clone());
+    let mut use_ipv6 = use_signal(move || initial_ipv6);
 
     let input_options: Vec<(String, String)> =
         std::iter::once(("".to_string(), "System Default".to_string()))

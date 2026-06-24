@@ -105,6 +105,10 @@ pub struct SharedPlaylist {
     local_audio_cache: Arc<DashMap<u64, (Vec<u8>, String)>>,
     /// All local IP addresses, used to determine ownership.
     local_ips: Vec<IpAddr>,
+    /// IP of the interface actually used for sending. Preferred over
+    /// `local_ips.first()` for the `added_by` field so that remote peers can
+    /// correlate it with the source IP of our outgoing packets.
+    send_ip: Option<IpAddr>,
     network_sender: NetworkSender,
     view_state: Arc<PartyViewState>,
     party_now_fn: Arc<dyn Fn() -> u64 + Send + Sync>,
@@ -118,6 +122,7 @@ impl SharedPlaylist {
         state: Weak<AppState>,
         network_sender: NetworkSender,
         local_ips: Vec<IpAddr>,
+        send_ip: Option<IpAddr>,
         view_state: Arc<PartyViewState>,
         party_now_fn: impl Fn() -> u64 + Send + Sync + 'static,
     ) -> Self {
@@ -126,6 +131,7 @@ impl SharedPlaylist {
             current_entry_id: Arc::new(RwLock::new(None)),
             local_audio_cache: Arc::new(DashMap::new()),
             local_ips,
+            send_ip,
             network_sender,
             view_state,
             party_now_fn: Arc::new(party_now_fn),
@@ -134,8 +140,8 @@ impl SharedPlaylist {
     }
 
     fn local_ip_string(&self) -> String {
-        self.local_ips
-            .first()
+        self.send_ip
+            .or_else(|| self.local_ips.first().copied())
             .map(|ip| ip.to_string())
             .unwrap_or_default()
     }

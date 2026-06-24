@@ -77,6 +77,12 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
         self.config.ipv6
     }
 
+    /// Current party configuration (device IDs, IPv6 flag, send interface).
+    /// Used by the UI to restore panel state across tab switches.
+    pub fn config(&self) -> &PartyConfig {
+        &self.config
+    }
+
     pub fn pause_music(&self, stream_id: SyncedStreamId) -> Result<()> {
         self.share_music()?.pause(stream_id)
     }
@@ -155,7 +161,7 @@ impl<
         self.multicast_lock = MulticastLock::acquire();
         self.normalize_send_target_for_config();
 
-        let (socket, multicast_addr, local_ips) =
+        let (socket, multicast_addr, local_ips, send_ip) =
             create_multicast_socket(self.config.ipv6, self.config.send_interface_index)?;
 
         let send_socket: UdpSocket = socket
@@ -164,7 +170,8 @@ impl<
         let network_sender =
             NetworkSender::new(send_socket, multicast_addr, self.state.send_target.clone());
 
-        let stream_bundle = self.build_stream_bundle(network_sender.clone(), local_ips.clone());
+        let stream_bundle =
+            self.build_stream_bundle(network_sender.clone(), local_ips.clone(), send_ip);
 
         let realtime_stream = self.realtime_stream.clone();
         let synced_stream = stream_bundle.share_music.receiver();
@@ -318,6 +325,7 @@ impl<
         &mut self,
         network_sender: NetworkSender,
         local_ips: Vec<IpAddr>,
+        send_ip: Option<IpAddr>,
     ) -> NetworkStreamBundle<Sample, CHANNELS, SAMPLE_RATE> {
         let ntp_service = NtpService::new(network_sender.clone());
 
@@ -334,6 +342,7 @@ impl<
             Arc::downgrade(&self.state),
             network_sender,
             local_ips,
+            send_ip,
             self.state.view_state.clone(),
             move || ntp_for_playlist.party_now(),
         ));

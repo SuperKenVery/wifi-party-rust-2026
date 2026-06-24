@@ -155,10 +155,11 @@ fn allow_awdl(socket: &Socket, allow: bool) -> Result<()> {
 
 /// Creates an IPv4 multicast socket ready for sending and receiving.
 ///
-/// Returns the socket, multicast address, and list of local IPs (for filtering own packets).
+/// Returns the socket, multicast address, list of local IPs (for filtering own
+/// packets), and the IP of the send interface (if one was explicitly chosen).
 pub fn create_multicast_socket_v4(
     send_interface_index: Option<u32>,
-) -> Result<(UdpSocket, SocketAddr, Vec<IpAddr>)> {
+) -> Result<(UdpSocket, SocketAddr, Vec<IpAddr>, Option<IpAddr>)> {
     let multicast_ip: Ipv4Addr = MULTICAST_ADDR_V4
         .parse()
         .context("Invalid multicast address")?;
@@ -233,15 +234,16 @@ pub fn create_multicast_socket_v4(
         "IPv4 multicast socket ready on {}:{}",
         MULTICAST_ADDR_V4, MULTICAST_PORT
     );
-    Ok((socket.into(), multicast_addr, local_ips))
+    Ok((socket.into(), multicast_addr, local_ips, send_ip.map(IpAddr::V4)))
 }
 
 /// Creates an IPv6 multicast socket ready for sending and receiving.
 ///
-/// Returns the socket, multicast address, and list of local IPs (for filtering own packets).
+/// Returns the socket, multicast address, list of local IPs (for filtering own
+/// packets), and the IP of the send interface (if one was explicitly chosen).
 pub fn create_multicast_socket_v6(
     send_interface_index: Option<u32>,
-) -> Result<(UdpSocket, SocketAddr, Vec<IpAddr>)> {
+) -> Result<(UdpSocket, SocketAddr, Vec<IpAddr>, Option<IpAddr>)> {
     let multicast_ip: Ipv6Addr = MULTICAST_ADDR_V6
         .parse()
         .context("Invalid IPv6 multicast address")?;
@@ -279,6 +281,7 @@ pub fn create_multicast_socket_v6(
         .context(format!("Failed to bind to {:?}", bind_addr))?;
 
     let mut local_ips = Vec::new();
+    let mut send_ip: Option<Ipv6Addr> = None;
     match network_interface::NetworkInterface::show() {
         Ok(interfaces) => {
             for iface in interfaces {
@@ -288,6 +291,9 @@ pub fn create_multicast_socket_v6(
                             continue;
                         }
                         local_ips.push(IpAddr::V6(ip));
+                        if send_interface_index == Some(iface.index) && send_ip.is_none() {
+                            send_ip = Some(ip);
+                        }
                         match socket.join_multicast_v6(&multicast_ip, iface.index) {
                             Ok(()) => info!("Joined IPv6 multicast on {} ({})", iface.name, ip),
                             Err(e) => warn!(
@@ -309,14 +315,14 @@ pub fn create_multicast_socket_v6(
         "IPv6 multicast socket ready on [{}]:{}",
         MULTICAST_ADDR_V6, MULTICAST_PORT
     );
-    Ok((socket.into(), multicast_addr, local_ips))
+    Ok((socket.into(), multicast_addr, local_ips, send_ip.map(IpAddr::V6)))
 }
 
 /// Creates a multicast socket based on the IPv6 flag.
 pub fn create_multicast_socket(
     ipv6: bool,
     send_interface_index: Option<u32>,
-) -> Result<(UdpSocket, SocketAddr, Vec<IpAddr>)> {
+) -> Result<(UdpSocket, SocketAddr, Vec<IpAddr>, Option<IpAddr>)> {
     if ipv6 {
         create_multicast_socket_v6(send_interface_index)
     } else {
