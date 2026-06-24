@@ -1,0 +1,239 @@
+name: Bundle
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    tags:
+      - "v*"
+
+env:
+  DX_VERSION: "0.7.9"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows MSI
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: assets/package-lock.json
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cargo-${{ runner.os }}-${{ env.DX_VERSION }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            windows-cargo-${{ runner.os }}-${{ env.DX_VERSION }}-
+            windows-cargo-${{ runner.os }}-
+
+      - name: Install Windows bundling tools
+        shell: pwsh
+        run: choco install wixtoolset --no-progress -y
+
+      - name: Install Dioxus CLI
+        shell: pwsh
+        run: cargo install dioxus-cli --version $env:DX_VERSION --locked
+
+      - name: Generate CSS
+        shell: pwsh
+        working-directory: assets
+        run: |
+          npm ci
+          npx @tailwindcss/cli -i tailwind.css -o tailwind_output.css
+
+      - name: Bundle MSI
+        shell: pwsh
+        run: >
+          dx bundle
+          --windows
+          --package-types msi
+          --out-dir dist/windows
+          --release
+          --no-default-features
+          --features "vocal-removal desktop"
+          --locked
+          --verbose
+
+      - name: Upload MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-msi
+          path: dist/windows/*.msi
+          if-no-files-found: error
+
+  macos:
+    name: macOS DMG
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            accept-flake-config = true
+            extra-substituters = https://nix-binary-cache.ken.com.im/ken
+            extra-trusted-public-keys = ken.com.im:br/oG6ywHr+tGvmUpZEA5mVYSNZgrNrFflazAEI+AK4=
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-cargo-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock') }}
+          restore-keys: |
+            macos-cargo-${{ runner.arch }}-
+
+      - name: Generate CSS
+        run: |
+          nix develop --command bash -c 'cd assets && npm ci && npx @tailwindcss/cli -i tailwind.css -o tailwind_output.css'
+
+      - name: Bundle DMG
+        run: >
+          nix develop --command dx bundle
+          --macos
+          --package-types dmg
+          --out-dir dist/macos
+          --release
+          --no-default-features
+          --features "vocal-removal desktop"
+          --locked
+          --verbose
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: dist/macos/*.dmg
+          if-no-files-found: error
+
+  linux:
+    name: Linux AppImage
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            accept-flake-config = true
+            extra-substituters = https://nix-binary-cache.ken.com.im/ken
+            extra-trusted-public-keys = ken.com.im:br/oG6ywHr+tGvmUpZEA5mVYSNZgrNrFflazAEI+AK4=
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-cargo-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock') }}
+          restore-keys: |
+            linux-cargo-${{ runner.arch }}-
+
+      - name: Bundle AppImage
+        run: |
+          mkdir -p dist/linux
+          nix bundle --bundler .#appimage .#app --out-link result-appimage
+          cp -L result-appimage dist/linux/wifi-party-rust.AppImage
+
+      - name: Push to Nix binary cache
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+          NIX_SIGNING_KEY: ${{ secrets.NIX_SIGNING_KEY }}
+        run: |
+          if [ -z "${ATTIC_TOKEN}" ] || [ -z "${NIX_SIGNING_KEY}" ]; then
+            echo "ATTIC_TOKEN or NIX_SIGNING_KEY is not set; skip Nix cache push."
+            exit 0
+          fi
+
+          key_file="${RUNNER_TEMP}/nix-signing-key.pem"
+          printf '%s\n' "${NIX_SIGNING_KEY}" > "${key_file}"
+          chmod 600 "${key_file}"
+
+          out="$(readlink -f result-appimage)"
+          nix store sign --key-file "${key_file}" --recursive "${out}"
+
+          nix shell nixpkgs#attic-client -c attic login --set-default wifi-party https://nix-binary-cache.ken.com.im/ "${ATTIC_TOKEN}"
+          nix shell nixpkgs#attic-client -c attic push wifi-party:ken "${out}"
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: dist/linux/*.AppImage
+          if-no-files-found: error
+
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            accept-flake-config = true
+            extra-substituters = https://nix-binary-cache.ken.com.im/ken
+            extra-trusted-public-keys = ken.com.im:br/oG6ywHr+tGvmUpZEA5mVYSNZgrNrFflazAEI+AK4=
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: android-cargo-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock') }}
+          restore-keys: |
+            android-cargo-${{ runner.arch }}-
+
+      - name: Generate CSS
+        run: |
+          nix develop --command bash -c 'cd assets && npm ci && npx @tailwindcss/cli -i tailwind.css -o tailwind_output.css'
+
+      - name: Bundle APK
+        run: >
+          nix develop --command dx bundle
+          --android
+          --package-types apk
+          --out-dir dist/android
+          --release
+          --no-default-features
+          --features mobile
+          --locked
+          --verbose
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: dist/android/*.apk
+          if-no-files-found: error
