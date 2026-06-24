@@ -60,8 +60,12 @@ impl FileAction {
 
     fn class(&self) -> &'static str {
         match self {
-            FileAction::PlayNow => "w-full p-4 rounded-2xl flex items-center justify-center gap-3 transition-all duration-200 border bg-pink-500/10 border-pink-500/50 text-pink-400 hover:bg-pink-500/20 cursor-pointer",
-            FileAction::Queue => "w-full p-4 rounded-2xl flex items-center justify-center gap-3 transition-all duration-200 border bg-indigo-500/10 border-indigo-500/50 text-indigo-400 hover:bg-indigo-500/20 cursor-pointer",
+            FileAction::PlayNow => {
+                "w-full p-4 rounded-2xl flex items-center justify-center gap-3 transition-all duration-200 border bg-pink-500/10 border-pink-500/50 text-pink-400 hover:bg-pink-500/20 cursor-pointer"
+            }
+            FileAction::Queue => {
+                "w-full p-4 rounded-2xl flex items-center justify-center gap-3 transition-all duration-200 border bg-indigo-500/10 border-indigo-500/50 text-indigo-400 hover:bg-indigo-500/20 cursor-pointer"
+            }
         }
     }
 }

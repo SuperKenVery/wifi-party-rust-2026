@@ -234,7 +234,12 @@ pub fn create_multicast_socket_v4(
         "IPv4 multicast socket ready on {}:{}",
         MULTICAST_ADDR_V4, MULTICAST_PORT
     );
-    Ok((socket.into(), multicast_addr, local_ips, send_ip.map(IpAddr::V4)))
+    Ok((
+        socket.into(),
+        multicast_addr,
+        local_ips,
+        send_ip.map(IpAddr::V4),
+    ))
 }
 
 /// Creates an IPv6 multicast socket ready for sending and receiving.
@@ -315,7 +320,12 @@ pub fn create_multicast_socket_v6(
         "IPv6 multicast socket ready on [{}]:{}",
         MULTICAST_ADDR_V6, MULTICAST_PORT
     );
-    Ok((socket.into(), multicast_addr, local_ips, send_ip.map(IpAddr::V6)))
+    Ok((
+        socket.into(),
+        multicast_addr,
+        local_ips,
+        send_ip.map(IpAddr::V6),
+    ))
 }
 
 /// Creates a multicast socket based on the IPv6 flag.

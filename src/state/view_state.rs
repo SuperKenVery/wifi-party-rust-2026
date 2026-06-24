@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use dashmap::DashMap;
 use dioxus::prelude::*;
@@ -164,8 +164,8 @@ impl NtpView {
 
 pub struct PartyViewState {
     realtime_streams: DashMap<StreamViewKey, Arc<RealtimeStreamView>>,
-    synced_streams_signal: OnceLock<Signal<Vec<SyncedStreamState>, SyncStorage>>,
-    playlist_signal: OnceLock<Signal<PlaylistState, SyncStorage>>,
+    synced_streams_signal: Mutex<Option<Signal<Vec<SyncedStreamState>, SyncStorage>>>,
+    playlist_signal: Mutex<Option<Signal<PlaylistState, SyncStorage>>>,
     ntp: Arc<NtpView>,
 }
 
@@ -173,8 +173,8 @@ impl PartyViewState {
     pub fn new() -> Self {
         Self {
             realtime_streams: DashMap::new(),
-            synced_streams_signal: OnceLock::new(),
-            playlist_signal: OnceLock::new(),
+            synced_streams_signal: Mutex::new(None),
+            playlist_signal: Mutex::new(None),
             ntp: Arc::new(NtpView::new()),
         }
     }
@@ -231,31 +231,51 @@ impl PartyViewState {
     }
 
     pub fn set_synced_streams_signal(&self, signal: Signal<Vec<SyncedStreamState>, SyncStorage>) {
-        let _ = self.synced_streams_signal.set(signal);
+        if let Ok(mut slot) = self.synced_streams_signal.lock() {
+            *slot = Some(signal);
+        }
     }
 
     pub fn set_synced_streams(&self, streams: Vec<SyncedStreamState>) {
-        if let Some(mut signal) = self.synced_streams_signal.get().copied() {
-            signal.set(streams);
+        let signal = self
+            .synced_streams_signal
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().copied());
+        if let Some(mut signal) = signal {
+            let _ = signal.try_write().map(|mut w| *w = streams);
         }
     }
 
     pub fn synced_streams(&self) -> Vec<SyncedStreamState> {
-        self.synced_streams_signal
-            .get()
-            .map(|s| (*s.read()).clone())
+        let signal = self
+            .synced_streams_signal
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().copied());
+        signal
+            .and_then(|s| s.try_read().ok().map(|r| (*r).clone()))
             .unwrap_or_default()
     }
 
     pub fn set_playlist_signal(&self, signal: Signal<PlaylistState, SyncStorage>) {
-        let _ = self.playlist_signal.set(signal);
+        if let Ok(mut slot) = self.playlist_signal.lock() {
+            *slot = Some(signal);
+        }
     }
 
     pub fn set_playlist(&self, entries: Vec<PlaylistEntry>, current_entry_id: Option<u64>) {
-        if let Some(mut signal) = self.playlist_signal.get().copied() {
-            signal.set(PlaylistState {
-                entries,
-                current_entry_id,
+        let signal = self
+            .playlist_signal
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().copied());
+        if let Some(mut signal) = signal {
+            let _ = signal.try_write().map(|mut w| {
+                *w = PlaylistState {
+                    entries,
+                    current_entry_id,
+                }
             });
         }
     }
@@ -270,11 +290,23 @@ impl PartyViewState {
 
     pub fn clear(&self) {
         self.realtime_streams.clear();
-        if let Some(mut signal) = self.synced_streams_signal.get().copied() {
-            signal.set(Vec::new());
+        let synced_signal = self
+            .synced_streams_signal
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().copied());
+        if let Some(mut signal) = synced_signal {
+            let _ = signal.try_write().map(|mut w| *w = Vec::new());
         }
-        if let Some(mut signal) = self.playlist_signal.get().copied() {
-            signal.set(PlaylistState::default());
+        let playlist_signal = self
+            .playlist_signal
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().copied());
+        if let Some(mut signal) = playlist_signal {
+            let _ = signal
+                .try_write()
+                .map(|mut w| *w = PlaylistState::default());
         }
     }
 }

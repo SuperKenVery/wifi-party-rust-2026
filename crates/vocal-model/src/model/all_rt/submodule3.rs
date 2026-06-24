@@ -112,7 +112,12 @@ impl<B: Backend> Submodule3<B> {
             constant119: const_param([32, 1, 1], device),
             constant120: const_param([32, 1, 1], device),
             conv2d13: conv([32, 128], [1, 1], PaddingConfig2d::Valid, device),
-            conv2d14: conv([128, 64], [2, 2], PaddingConfig2d::Explicit(1, 1, 1, 1), device),
+            conv2d14: conv(
+                [128, 64],
+                [2, 2],
+                PaddingConfig2d::Explicit(1, 1, 1, 1),
+                device,
+            ),
             instancenormalization24: norm(8, device),
             constant121: const_param([64, 1, 1], device),
             constant122: const_param([64, 1, 1], device),

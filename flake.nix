@@ -91,8 +91,9 @@
         nativeBuildInputs = [
           # Use mold when we are runnning in Linux
           (lib.optionals stdenv.isLinux mold)
+          (lib.optionals stdenv.isLinux wayland.dev)
+          (lib.optionals stdenv.isDarwin darwin.sigtool)
           sqlite
-          darwin.sigtool
           binaryen
         ];
 

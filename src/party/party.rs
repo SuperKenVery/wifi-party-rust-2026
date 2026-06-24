@@ -26,7 +26,7 @@ use super::network_stream::{NetworkStream, NetworkStreamContext, StreamRegistry}
 use super::ntp::NtpService;
 use super::packet_dispatcher::PacketDispatcher;
 use super::realtime_stream::{RealtimeAudioStream, RealtimeFramePacker, RealtimeStreamId};
-use super::share_music::{ShareMusicService, SyncedStreamId, SharedPlaylist};
+use super::share_music::{ShareMusicService, SharedPlaylist, SyncedStreamId};
 
 struct NetworkStreamBundle<Sample: AudioSample, const CHANNELS: usize, const SAMPLE_RATE: u32> {
     ntp_service: Arc<NtpService>,
@@ -105,6 +105,10 @@ impl<Sample: AudioSample + 'static, const CHANNELS: usize, const SAMPLE_RATE: u3
         self.playlist
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("SharedPlaylist not started"))
+    }
+
+    pub fn playlist_handle(&self) -> Result<Arc<SharedPlaylist>> {
+        self.playlist().cloned()
     }
 
     pub fn playlist_add(&self, data: Vec<u8>, title: String) -> Result<()> {

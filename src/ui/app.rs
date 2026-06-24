@@ -75,29 +75,19 @@ impl Route {
 
 #[allow(non_snake_case)]
 pub fn App() -> Element {
-    rsx! {
-        document::Stylesheet { href: asset!("/assets/custom.css") }
-        document::Stylesheet { href: asset!("/assets/tailwind_output.css") }
-
-        Router::<Route> {}
-    }
-}
-
-#[allow(non_snake_case)]
-fn AppLayout() -> Element {
     let state_arc = use_context::<Arc<AppState>>();
 
-    // Create sync signals that can be written from the network thread.
+    // Create app-wide UI signals above the router so route/layout remounts do
+    // not invalidate handles used by background tasks.
     let synced_streams_signal = use_signal_sync(Vec::<SyncedStreamState>::new);
     let playlist_signal = use_signal_sync(PlaylistState::default);
 
-    // Register signals with PartyViewState so the network layer can write directly.
     state_arc
         .view_state
         .set_synced_streams_signal(synced_streams_signal);
     state_arc.view_state.set_playlist_signal(playlist_signal);
 
-    let mut ui = UIState {
+    let ui = UIState {
         active_hosts: use_signal(Vec::<HostInfo>::new),
         mic_volume: use_signal(|| 1.0f32),
         mic_audio_level: use_signal(|| 0u32),
@@ -110,6 +100,21 @@ fn AppLayout() -> Element {
         playlist: playlist_signal,
         is_narrow: use_signal(|| false),
     };
+
+    use_context_provider(|| ui);
+
+    rsx! {
+        document::Stylesheet { href: asset!("/assets/custom.css") }
+        document::Stylesheet { href: asset!("/assets/tailwind_output.css") }
+
+        Router::<Route> {}
+    }
+}
+
+#[allow(non_snake_case)]
+fn AppLayout() -> Element {
+    let state_arc = use_context::<Arc<AppState>>();
+    let mut ui = use_context::<UIState>();
 
     use_effect(move || {
         spawn(async move {
@@ -180,8 +185,6 @@ fn AppLayout() -> Element {
             }
         });
     });
-
-    use_context_provider(|| ui);
 
     let route = use_route::<Route>();
 

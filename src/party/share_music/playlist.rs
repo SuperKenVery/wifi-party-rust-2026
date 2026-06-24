@@ -22,7 +22,7 @@ use tracing::{info, warn};
 use crate::audio::AudioSample;
 use crate::io::NetworkSender;
 use crate::party::network_stream::{NetworkStream, NetworkStreamContext};
-use crate::party::tagged_packet::{PacketTag, PLAYLIST_TAG, TaggedPacket};
+use crate::party::tagged_packet::{PLAYLIST_TAG, PacketTag, TaggedPacket};
 use crate::pipeline::Pushable;
 use crate::state::{AppState, PartyViewState};
 
@@ -318,7 +318,10 @@ impl SharedPlaylist {
                     *self.current_entry_id.write().unwrap() = None;
                 }
             }
-            PlaylistOp::Move { entry_id, new_index } => {
+            PlaylistOp::Move {
+                entry_id,
+                new_index,
+            } => {
                 let mut entries = self.entries.write().unwrap();
                 if let Some(old_index) = entries.iter().position(|e| e.entry_id == *entry_id) {
                     let new_index = *new_index as usize;

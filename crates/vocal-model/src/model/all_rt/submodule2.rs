@@ -46,7 +46,12 @@ impl<B: Backend> Submodule2<B> {
         // temporary that is then moved — keeping the constructor's frame small.
         let pad = PaddingConfig2d::Explicit(2, 1, 2, 1);
         Self {
-            conv2d7: conv([16, 32], [2, 2], PaddingConfig2d::Explicit(1, 1, 1, 1), device),
+            conv2d7: conv(
+                [16, 32],
+                [2, 2],
+                PaddingConfig2d::Explicit(1, 1, 1, 1),
+                device,
+            ),
             instancenormalization9: norm(4, device),
             constant65: const_param([32, 1, 1], device),
             constant66: const_param([32, 1, 1], device),

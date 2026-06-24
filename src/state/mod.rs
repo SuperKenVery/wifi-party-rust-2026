@@ -225,66 +225,54 @@ impl AppState {
     /// Add a song to the shared playlist. The audio data is cached locally
     /// and the entry is broadcast to all peers.
     pub fn playlist_add(&self, data: Vec<u8>, title: String) -> Result<()> {
-        self.party
-            .lock()
-            .expect("Party lock poisoned")
-            .as_ref()
-            .context("Party not initialized")?
-            .playlist_add(data, title)
+        let playlist = self.playlist_handle()?;
+        playlist.add_entry(data, title);
+        Ok(())
     }
 
     pub fn playlist_remove(&self, entry_id: u64) -> Result<()> {
-        self.party
-            .lock()
-            .expect("Party lock poisoned")
-            .as_ref()
-            .context("Party not initialized")?
-            .playlist_remove(entry_id)
+        let playlist = self.playlist_handle()?;
+        playlist.remove_entry(entry_id);
+        Ok(())
     }
 
     pub fn playlist_move(&self, entry_id: u64, new_index: usize) -> Result<()> {
-        self.party
-            .lock()
-            .expect("Party lock poisoned")
-            .as_ref()
-            .context("Party not initialized")?
-            .playlist_move(entry_id, new_index)
+        let playlist = self.playlist_handle()?;
+        playlist.move_entry(entry_id, new_index);
+        Ok(())
     }
 
     pub fn playlist_play(&self, entry_id: u64) -> Result<()> {
-        self.party
-            .lock()
-            .expect("Party lock poisoned")
-            .as_ref()
-            .context("Party not initialized")?
-            .playlist_play(entry_id)
+        let playlist = self.playlist_handle()?;
+        playlist.set_current(Some(entry_id));
+        Ok(())
     }
 
     pub fn playlist_skip(&self) -> Result<()> {
-        self.party
-            .lock()
-            .expect("Party lock poisoned")
-            .as_ref()
-            .context("Party not initialized")?
-            .playlist_skip()
+        let playlist = self.playlist_handle()?;
+        playlist.skip();
+        Ok(())
     }
 
     pub fn playlist_previous(&self) -> Result<()> {
-        self.party
-            .lock()
-            .expect("Party lock poisoned")
-            .as_ref()
-            .context("Party not initialized")?
-            .playlist_previous()
+        let playlist = self.playlist_handle()?;
+        playlist.previous();
+        Ok(())
     }
 
     pub fn playlist_clear(&self) -> Result<()> {
+        let playlist = self.playlist_handle()?;
+        playlist.clear();
+        Ok(())
+    }
+
+    fn playlist_handle(&self) -> Result<Arc<crate::party::SharedPlaylist>> {
         self.party
             .lock()
             .expect("Party lock poisoned")
             .as_ref()
             .context("Party not initialized")?
-            .playlist_clear()
+            .playlist_handle()
     }
 
     pub fn send_target(&self) -> SendTarget {

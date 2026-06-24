@@ -148,10 +148,7 @@ fn lstm_block<B: CustomLstmBackend>(
     affine: Tensor<B, 3>,
 ) -> Tensor<B, 3> {
     let input = affine.permute([2, 0, 1]);
-    let state = LstmState::new(
-        init_state.clone().squeeze_dim(0),
-        init_state.squeeze_dim(0),
-    );
+    let state = LstmState::new(init_state.clone().squeeze_dim(0), init_state.squeeze_dim(0));
     let output_seq = profile_step(label, || {
         let (output_seq, _) = lstm_preproj(lstm, input, Some(state));
         output_seq
