@@ -13,7 +13,7 @@ resolver = "3"
 [dependencies]
 dioxus = { version = "0.7.9", default-features = false, features = ["router"] }
 chrono = "0.4"
-cpal = { git="https://github.com/RustAudio/cpal.git", default-features = false }
+cpal = { git="https://github.com/RustAudio/cpal.git", default-features = false, features = ["asio", "jack", "pulseaudio", "realtime", "realtime-dbus"] }
 rkyv = "0.8"
 rtrb = "0.3"
 socket2 = { version = "0.5", features = ["all"] }
@@ -28,7 +28,6 @@ num-traits = "0.2.19"
 dashmap = "6.1.0"
 network-interface = "2.0"
 opus = "0.3"
-deloxide = { version = "1.0.0", features = ["lock-order-graph", "logging-and-visualization"] }
 symphonia = { version = "0.5", features = ["mp3", "flac", "ogg", "wav", "aac", "alac", "isomp4"] }
 uuid = { version = "1", features = ["v4"] }
 rand = "0.8"
@@ -52,27 +51,19 @@ cubecl-common = { version = "=0.9.0", default-features = false, features = ["ser
 log = "0.4"
 oslog = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock"] }
+
 [dev-dependencies]
 hound = "3.5"
 pollster = "0.4.0"
 wgpu = "29.0.1"
 
 [features]
-default = [
-    "desktop",
-    "cpal-jack",
-    "cpal-pulseaudio",
-    "cpal-realtime",
-    "cpal-pipewire",
-    "vocal-removal",
-]
+default = ["desktop", "cpal-pipewire", "vocal-removal"]
 web = ["dioxus/default", "dioxus/web"]
 desktop = ["dioxus/default", "dioxus/desktop"]
 mobile = ["dioxus/default", "dioxus/mobile", "vocal-removal"]
-cpal-asio = ["cpal/asio"]
-cpal-jack = ["cpal/jack"]
-cpal-pulseaudio = ["cpal/pulseaudio"]
-cpal-realtime = ["cpal/realtime", "cpal/realtime-dbus"]
 cpal-pipewire = ["cpal/pipewire"]
 vocal-removal = ["dep:wifi-party-vocal-model"]
 

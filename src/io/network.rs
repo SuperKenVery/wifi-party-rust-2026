@@ -106,7 +106,7 @@ fn set_socket_dscp(socket: &Socket, ipv6: bool) {
                 fd as usize,
                 level,
                 optname,
-                &dscp as *const _ as *const i8,
+                &dscp as *const _ as *const u8,
                 std::mem::size_of::<i32>() as i32,
             )
         };
