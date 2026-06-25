@@ -75,7 +75,7 @@ jobs:
 
       - name: Install Dioxus CLI
         shell: pwsh
-        run: cargo install dioxus-cli --version $env:DX_VERSION --locked
+        run: cargo install dioxus-cli --version $env:DX_VERSION --locked --force
 
       - name: Generate CSS
         shell: pwsh
