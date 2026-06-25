@@ -75,7 +75,17 @@ jobs:
 
       - name: Install Dioxus CLI
         shell: pwsh
-        run: cargo install dioxus-cli --version $env:DX_VERSION --locked --force
+        run: |
+          if (Get-Command dx -ErrorAction SilentlyContinue) {
+            $dxVersion = dx --version
+            Write-Host "Found cached Dioxus CLI: $dxVersion"
+            if ($dxVersion -match [regex]::Escape($env:DX_VERSION)) {
+              Write-Host "Dioxus CLI $env:DX_VERSION is already installed."
+              exit 0
+            }
+          }
+
+          cargo install dioxus-cli --version $env:DX_VERSION --locked --force
 
       - name: Generate CSS
         shell: pwsh
