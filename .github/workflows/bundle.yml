@@ -61,7 +61,10 @@ jobs:
           if (Test-Path $cmakeBin) {
             "$cmakeBin" | Out-File -FilePath $env:GITHUB_PATH -Append
           }
+          $cmakeGenerator = "Visual Studio 17 2022"
+          "CMAKE_GENERATOR=$cmakeGenerator" | Out-File -FilePath $env:GITHUB_ENV -Append
           cmake --version
+          Write-Host "CMAKE_GENERATOR=$cmakeGenerator"
 
       - name: Install Dioxus CLI
         shell: pwsh
