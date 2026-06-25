@@ -46,7 +46,7 @@ jobs:
       - name: Install Windows bundling tools
         shell: pwsh
         run: |
-          choco install wixtoolset llvm --no-progress -y
+          choco install wixtoolset llvm ninja --no-progress -y
           choco install cmake --version=3.31.8 --allow-downgrade --no-progress -y
 
       - name: Configure native build tools
@@ -61,9 +61,12 @@ jobs:
           if (Test-Path $cmakeBin) {
             "$cmakeBin" | Out-File -FilePath $env:GITHUB_PATH -Append
           }
-          $cmakeGenerator = "Visual Studio 17 2022"
+          $cmakeGenerator = "Ninja"
           "CMAKE_GENERATOR=$cmakeGenerator" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CMAKE_C_COMPILER=clang-cl" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CMAKE_CXX_COMPILER=clang-cl" | Out-File -FilePath $env:GITHUB_ENV -Append
           cmake --version
+          ninja --version
           Write-Host "CMAKE_GENERATOR=$cmakeGenerator"
 
       - name: Install Dioxus CLI
