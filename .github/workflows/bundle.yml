@@ -267,6 +267,8 @@ jobs:
     permissions:
       contents: write
       actions: read
+    env:
+      GH_REPO: ${{ github.repository }}
 
     steps:
       - name: Download Windows MSI
