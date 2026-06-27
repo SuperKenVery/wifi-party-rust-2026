@@ -1,4 +1,15 @@
 {
+  nixConfig = {
+    extra-substituters = [
+      "https://nix-binary-cache.ken.com.im/ken"
+      "https://nix-binary-cache.ken.com.im/wifi-party"
+    ];
+    extra-trusted-public-keys = [
+      "ken.com.im:br/oG6ywHr+tGvmUpZEA5mVYSNZgrNrFflazAEI+AK4="
+      "wifi-party:H2KMuBabLl9WHuBWw0cgXmYDdt82K7a1gmuvfKU9shY="
+    ];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     rust-overlay.url = "github:oxalica/rust-overlay";
