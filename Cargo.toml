@@ -28,7 +28,6 @@ num-traits = "0.2.19"
 dashmap = "6.1.0"
 network-interface = "2.0"
 opus = "0.3"
-deloxide = { version = "1.0.0", features = ["lock-order-graph", "logging-and-visualization"] }
 symphonia = { version = "0.5", features = ["mp3", "flac", "ogg", "wav", "aac", "alac", "isomp4"] }
 uuid = { version = "1", features = ["v4"] }
 rand = "0.8"
@@ -51,6 +50,9 @@ cubecl-common = { version = "=0.9.0", default-features = false, features = ["ser
 cubecl-common = { version = "=0.9.0", default-features = false, features = ["serde"] }
 log = "0.4"
 oslog = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock"] }
 
 [dev-dependencies]
 hound = "3.5"

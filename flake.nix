@@ -35,23 +35,20 @@
         extensions = ["rust-src" "rust-analyzer"];
         targets = [
           "wasm32-unknown-unknown"
-          "aarch64-linux-android"
-          "aarch64-apple-ios"
-          "aarch64-apple-ios-sim"
-          "x86_64-apple-ios"
+          "aarch64-linux-android" "x86_64-linux-android"
+          "aarch64-apple-ios" "aarch64-apple-ios-sim" "x86_64-apple-ios"
         ];
       });
 
     dioxus-cli = eachSystem (pkgs:
       pkgs.dioxus-cli.overrideAttrs (oldAttrs: {
-        # postPatch = ''
-        #   rm Cargo.lock
-        #   cp ${./Dioxus.lock} Cargo.lock
-        # '';
-
-        # cargoDeps = pkgs.rustPlatform.importCargoLock {
-        #   lockFile = ./Dioxus.lock;
-        # };
+        postPatch =
+          (oldAttrs.postPatch or "")
+          + ''
+            substituteInPlace src/build/android.rs \
+              --replace-fail 'Ok(self.root_dir().join(gradle_exec_name))' \
+                'Ok(std::env::var_os("DIOXUS_GRADLE").map(PathBuf::from).unwrap_or_else(|| self.root_dir().join(gradle_exec_name)))'
+          '';
       }));
 
     cargoLock = builtins.fromTOML (builtins.readFile ./Cargo.lock);
@@ -161,83 +158,15 @@
         });
     });
 
-    packages = eachSystem (pkgs: rec {
-      default = app;
-      app = let
-        system = pkgs.stdenv.hostPlatform.system;
-        craneLib = crane.mkLib pkgs;
-        commonArgsBase = rec {
-          src = pkgs.lib.cleanSourceWith {
-            src = ./.;
-            filter = manifestFilter;
-            name = "source";
-          };
-          # src = builtins.trace src1.outPath src1;
-
-          nativeBuildInputs = devShells.${system}.default.nativeBuildInputs;
-          buildInputs = devShells.${system}.default.buildInputs;
-
-          LIBCLANG_PATH = pkgs.lib.optionalString pkgs.stdenv.isLinux "${pkgs.llvmPackages.libclang.lib}/lib";
-          BINDGEN_EXTRA_CLANG_ARGS = pkgs.lib.optionalString pkgs.stdenv.isLinux "-DSPA_ID_INVALID=4294967295U -I${pkgs.glibc.dev}/include";
-          cargoExtraArgs = "--locked --no-default-features --features vocal-removal,desktop,cpal-pipewire";
-          doCheck = false;
-        };
-        cargoVendorDir = pkgs.runCommand "vendor-cargo-deps-patched" {} ''
-          mkdir -p "$out"
-          cp -rL --no-preserve=mode,ownership ${craneLib.vendorCargoDeps commonArgsBase}/. "$out"
-          substituteInPlace "$out/config.toml" \
-            --replace-fail "${craneLib.vendorCargoDeps commonArgsBase}" "$out"
-          substituteInPlace "$out"/*/libspa-0.10.0/src/constants.rs \
-            --replace-fail "spa_sys::SPA_ID_INVALID" "u32::MAX"
-          substituteInPlace "$out"/*/pipewire-0.10.0/src/constants.rs \
-            --replace-fail "pw_sys::PW_ID_ANY" "u32::MAX"
-        '';
-        commonArgs = commonArgsBase // {inherit cargoVendorDir;};
-        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-        # Keep all source and /assets for building this crate
-        sourceFilter = path: type:
-          (craneLib.filterCargoSources path type)
-          || (builtins.match ".*assets/.*" path != null);
-        # Only keep Cargo.toml and Cargo.lock, for building dependencies
-        manifestFilter = path: type:
-          (craneLib.filterCargoSources path type)
-          || (builtins.match ".*/Cargo\\..*" path != null);
-        tailwind-assets = pkgs.buildNpmPackage {
-          name = "tailwind-assets";
-          src = ./assets;
-
-          npmDepsHash = "sha256-1mjkLm2cjzGtxB6llUVvxBjqeLAJweYuI/6qyPCHud8=";
-
-          # Override the build command to generate the specific file you need
-          # Adjust 'input.css' to whatever your source css file is named
-          buildPhase = ''
-            npx @tailwindcss/cli -i tailwind.css -o tailwind_output.css
-          '';
-
-          installPhase = ''
-            mkdir -p $out
-            cp tailwind_output.css $out/
-          '';
-        };
-      in
-        craneLib.buildPackage (
-          commonArgs
-          // {
-            inherit cargoArtifacts;
-
-            src = pkgs.lib.cleanSourceWith {
-              src = ./.;
-              filter = sourceFilter;
-              name = "source";
-            };
-
-            postPatch = ''
-              cp ${tailwind-assets}/tailwind_output.css assets/tailwind_output.css
-            '';
-
-            meta.mainProgram = "wifi-party-rust";
-          }
-        );
-    });
+    packages = eachSystem (pkgs: let
+      system = pkgs.stdenv.hostPlatform.system;
+    in
+      import ./nix/packages.nix {
+        inherit pkgs crane;
+        root = ./.;
+        devShell = devShells.${system}.default;
+        androidSdk = androidSdk.${system};
+        androidCmake = androidCmake.${system};
+      });
   };
 }
