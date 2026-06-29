@@ -169,7 +169,7 @@ jobs:
 
   ios:
     name: iOS TestFlight
-    runs-on: macos-15
+    runs-on: macos-26
 
     steps:
       - name: Checkout
@@ -188,6 +188,7 @@ jobs:
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphoneos --show-sdk-version | grep -E '^26\.'
 
       - name: Build iOS app
         run: |
@@ -264,7 +265,23 @@ jobs:
           fi
 
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${GITHUB_RUN_NUMBER}" "${app_path}/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :MinimumOSVersion 15.0" "${app_path}/Info.plist" 2>/dev/null \
+            || /usr/libexec/PlistBuddy -c "Add :MinimumOSVersion string 15.0" "${app_path}/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :DTPlatformName iphoneos" "${app_path}/Info.plist" 2>/dev/null \
+            || /usr/libexec/PlistBuddy -c "Add :DTPlatformName string iphoneos" "${app_path}/Info.plist"
+          ios_sdk_version=$(xcrun --sdk iphoneos --show-sdk-version)
+          /usr/libexec/PlistBuddy -c "Set :DTPlatformVersion ${ios_sdk_version}" "${app_path}/Info.plist" 2>/dev/null \
+            || /usr/libexec/PlistBuddy -c "Add :DTPlatformVersion string ${ios_sdk_version}" "${app_path}/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :DTSDKName iphoneos${ios_sdk_version}" "${app_path}/Info.plist" 2>/dev/null \
+            || /usr/libexec/PlistBuddy -c "Add :DTSDKName string iphoneos${ios_sdk_version}" "${app_path}/Info.plist"
+          /usr/libexec/PlistBuddy -c "Delete :CFBundleSupportedPlatforms" "${app_path}/Info.plist" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :CFBundleSupportedPlatforms array" "${app_path}/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleSupportedPlatforms:0 string iPhoneOS" "${app_path}/Info.plist"
+          /usr/libexec/PlistBuddy -c "Delete :UIRequiredDeviceCapabilities" "${app_path}/Info.plist" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :UIRequiredDeviceCapabilities array" "${app_path}/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :UIRequiredDeviceCapabilities:0 string arm64" "${app_path}/Info.plist"
           cp "${signing_dir}/profile.mobileprovision" "${app_path}/embedded.mobileprovision"
+          rm -f "${app_path}/CodeResources"
 
           identity=$(security find-identity -v -p codesigning "${keychain_path}" | sed -n 's/.*"\(Apple Distribution:.*\)".*/\1/p' | head -n 1)
           if [ -z "${identity}" ]; then
@@ -278,6 +295,9 @@ jobs:
           done < <(find "${app_path}" \( -name "*.framework" -o -name "*.dylib" -o -name "*.appex" \) -print)
 
           codesign --force --sign "${identity}" --entitlements "${signing_dir}/entitlements.plist" "${app_path}"
+          if [ ! -e "${app_path}/CodeResources" ]; then
+            ln -s "_CodeSignature/CodeResources" "${app_path}/CodeResources"
+          fi
           codesign --verify --deep --strict --verbose=2 "${app_path}"
 
           rm -rf "${signing_dir}/Payload"

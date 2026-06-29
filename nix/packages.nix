@@ -184,6 +184,14 @@
           export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
           unset SDKROOT
           /usr/bin/xcrun --sdk iphoneos --show-sdk-path >/dev/null
+          ios_sdk_version=$(/usr/bin/xcrun --sdk iphoneos --show-sdk-version)
+          case "$ios_sdk_version" in
+            26.*) ;;
+            *)
+              echo "iOS SDK 26.x is required for App Store upload; found $ios_sdk_version." >&2
+              exit 1
+              ;;
+          esac
           export IPHONEOS_DEPLOYMENT_TARGET="15.0"
 
           ios_clang="$TMPDIR/ios-clang"
