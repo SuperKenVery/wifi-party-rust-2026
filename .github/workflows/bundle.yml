@@ -167,6 +167,137 @@ jobs:
           path: dist/macos/*.dmg
           if-no-files-found: error
 
+  ios:
+    name: iOS TestFlight
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            accept-flake-config = true
+            extra-substituters = https://nix-binary-cache.ken.com.im/ken https://nix-binary-cache.ken.com.im/wifi-party
+            extra-trusted-public-keys = ken.com.im:br/oG6ywHr+tGvmUpZEA5mVYSNZgrNrFflazAEI+AK4= wifi-party:H2KMuBabLl9WHuBWw0cgXmYDdt82K7a1gmuvfKU9shY=
+
+      - name: Build iOS app
+        run: |
+          mkdir -p dist/ios
+          nix build .#ios-app --out-link result-ios-app
+          cp -R result-ios-app/*.app dist/ios/
+
+      - name: Push to Nix binary cache
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+        run: |
+          if [ -z "${ATTIC_TOKEN}" ]; then
+            echo "ATTIC_TOKEN is not set; skip Nix cache push."
+            exit 0
+          fi
+
+          nix shell nixpkgs#attic-client -c attic login --set-default wifi-party https://nix-binary-cache.ken.com.im/ "${ATTIC_TOKEN}"
+          nix shell nixpkgs#attic-client -c attic push wifi-party:wifi-party result-ios-app
+
+      - name: Package and upload TestFlight IPA
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          IOS_DISTRIBUTION_CERTIFICATE_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
+          IOS_DISTRIBUTION_CERTIFICATE_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+          IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          APP_STORE_CONNECT_API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+
+          required=(
+            IOS_DISTRIBUTION_CERTIFICATE_BASE64
+            IOS_DISTRIBUTION_CERTIFICATE_PASSWORD
+            IOS_PROVISIONING_PROFILE_BASE64
+            APP_STORE_CONNECT_API_KEY_ID
+            APP_STORE_CONNECT_API_ISSUER_ID
+            APP_STORE_CONNECT_API_KEY_BASE64
+          )
+          for name in "${required[@]}"; do
+            if [ -z "${!name}" ]; then
+              echo "${name} is not set; cannot upload to TestFlight."
+              exit 1
+            fi
+          done
+
+          signing_dir="${RUNNER_TEMP}/ios-signing"
+          keychain_path="${signing_dir}/app-signing.keychain-db"
+          mkdir -p "${signing_dir}" "${HOME}/private_keys"
+
+          echo "${IOS_DISTRIBUTION_CERTIFICATE_BASE64}" | base64 --decode > "${signing_dir}/certificate.p12"
+          echo "${IOS_PROVISIONING_PROFILE_BASE64}" | base64 --decode > "${signing_dir}/profile.mobileprovision"
+          echo "${APP_STORE_CONNECT_API_KEY_BASE64}" | base64 --decode > "${HOME}/private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8"
+
+          security create-keychain -p "" "${keychain_path}"
+          security set-keychain-settings -lut 21600 "${keychain_path}"
+          security unlock-keychain -p "" "${keychain_path}"
+          security import "${signing_dir}/certificate.p12" -k "${keychain_path}" -P "${IOS_DISTRIBUTION_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign
+          security list-keychain -d user -s "${keychain_path}" $(security list-keychain -d user | tr -d '"')
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" "${keychain_path}"
+
+          security cms -D -i "${signing_dir}/profile.mobileprovision" > "${signing_dir}/profile.plist"
+          /usr/libexec/PlistBuddy -x -c "Print :Entitlements" "${signing_dir}/profile.plist" > "${signing_dir}/entitlements.plist"
+          profile_uuid=$(/usr/libexec/PlistBuddy -c "Print :UUID" "${signing_dir}/profile.plist")
+          mkdir -p "${HOME}/Library/MobileDevice/Provisioning Profiles"
+          cp "${signing_dir}/profile.mobileprovision" "${HOME}/Library/MobileDevice/Provisioning Profiles/${profile_uuid}.mobileprovision"
+
+          app_path=$(find dist/ios -maxdepth 1 -name "*.app" -type d | head -n 1)
+          if [ -z "${app_path}" ]; then
+            echo "No iOS .app found in dist/ios."
+            exit 1
+          fi
+
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${GITHUB_RUN_NUMBER}" "${app_path}/Info.plist"
+          cp "${signing_dir}/profile.mobileprovision" "${app_path}/embedded.mobileprovision"
+
+          identity=$(security find-identity -v -p codesigning "${keychain_path}" | sed -n 's/.*"\(Apple Distribution:.*\)".*/\1/p' | head -n 1)
+          if [ -z "${identity}" ]; then
+            echo "No Apple Distribution signing identity found in temporary keychain."
+            security find-identity -v -p codesigning "${keychain_path}"
+            exit 1
+          fi
+
+          while IFS= read -r item; do
+            codesign --force --sign "${identity}" --entitlements "${signing_dir}/entitlements.plist" "${item}"
+          done < <(find "${app_path}" \( -name "*.framework" -o -name "*.dylib" -o -name "*.appex" \) -print)
+
+          codesign --force --sign "${identity}" --entitlements "${signing_dir}/entitlements.plist" "${app_path}"
+          codesign --verify --deep --strict --verbose=2 "${app_path}"
+
+          rm -rf "${signing_dir}/Payload"
+          mkdir -p "${signing_dir}/Payload"
+          cp -R "${app_path}" "${signing_dir}/Payload/"
+          (cd "${signing_dir}" && ditto -c -k --sequesterRsrc --keepParent Payload "${GITHUB_WORKSPACE}/dist/ios/WifiPartyRust.ipa")
+
+          xcrun altool --upload-app \
+            --type ios \
+            --file "${GITHUB_WORKSPACE}/dist/ios/WifiPartyRust.ipa" \
+            --apiKey "${APP_STORE_CONNECT_API_KEY_ID}" \
+            --apiIssuer "${APP_STORE_CONNECT_API_ISSUER_ID}"
+
+      - name: Upload iOS app artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-app
+          path: dist/ios/*.app
+          if-no-files-found: error
+
+      - name: Upload iOS IPA artifact
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-ipa
+          path: dist/ios/*.ipa
+          if-no-files-found: error
+
   linux:
     name: Linux AppImage
     runs-on: ubuntu-latest
@@ -260,7 +391,7 @@ jobs:
   publish-release:
     name: Publish Release
     runs-on: ubuntu-latest
-    needs: [windows, macos, linux, android]
+    needs: [windows, macos, ios, linux, android]
     if: >
       always()
       && startsWith(github.ref, 'refs/tags/')
@@ -288,6 +419,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh run download "${GITHUB_RUN_ID}" --name android-apk --dir release-assets
+
+      - name: Download iOS IPA
+        if: needs.ios.result == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "${GITHUB_RUN_ID}" --name ios-ipa --dir release-assets
 
       - name: Download Linux AppImage
         if: needs.linux.result == 'success'

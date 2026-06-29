@@ -248,6 +248,12 @@ in
       packageType = "dmg";
       features = "vocal-removal,desktop";
     };
+    ios-app = bundlePackage {
+      pname = "wifi-party-rust-ios-app";
+      platformFlag = "--ios";
+      packageType = "ios";
+      features = "mobile";
+    };
   }
   // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux (rec {
     android-apk = bundlePackage {
