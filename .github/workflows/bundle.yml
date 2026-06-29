@@ -298,6 +298,7 @@ jobs:
             "info": {"author":"xcode","version":1}
           }
           JSON
+          mkdir -p "${signing_dir}/assetcatalog"
           xcrun actool "${signing_dir}/Assets.xcassets" \
             --compile "${signing_dir}/assetcatalog" \
             --platform iphoneos \
