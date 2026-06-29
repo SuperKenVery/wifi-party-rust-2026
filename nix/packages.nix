@@ -135,6 +135,7 @@
     packageType,
     features,
     gradleDeps ? null,
+    needsIphoneOS ? false,
   }:
     pkgs.stdenv.mkDerivation ({
       inherit pname;
@@ -178,6 +179,30 @@
         export CARGO_HOME="$TMPDIR/cargo-home"
         export DX_SESSION_CACHE_DIR="$TMPDIR/dx"
         mkdir -p "$HOME" "$CARGO_HOME" "$DX_SESSION_CACHE_DIR"
+
+        ${pkgs.lib.optionalString needsIphoneOS ''
+          export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
+          unset SDKROOT
+          /usr/bin/xcrun --sdk iphoneos --show-sdk-path >/dev/null
+          export IPHONEOS_DEPLOYMENT_TARGET="15.0"
+
+          ios_clang="$TMPDIR/ios-clang"
+          ios_clangxx="$TMPDIR/ios-clang++"
+          cat > "$ios_clang" <<'EOF'
+          #!${pkgs.runtimeShell}
+          exec /usr/bin/xcrun --sdk iphoneos clang "$@"
+          EOF
+          cat > "$ios_clangxx" <<'EOF'
+          #!${pkgs.runtimeShell}
+          exec /usr/bin/xcrun --sdk iphoneos clang++ "$@"
+          EOF
+          chmod +x "$ios_clang" "$ios_clangxx"
+
+          export CC_aarch64_apple_ios="$ios_clang"
+          export CXX_aarch64_apple_ios="$ios_clangxx"
+          export AR_aarch64_apple_ios="$(/usr/bin/xcrun --sdk iphoneos -f ar)"
+          export CARGO_TARGET_AARCH64_APPLE_IOS_LINKER="$ios_clang"
+        ''}
 
         ${pkgs.lib.optionalString (gradleDeps != null) ''
           dioxus_gradle="$TMPDIR/dioxus-gradle"
@@ -253,6 +278,7 @@ in
       platformFlag = "--ios";
       packageType = "ios";
       features = "mobile";
+      needsIphoneOS = true;
     };
   }
   // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux (rec {
