@@ -196,6 +196,7 @@ jobs:
           cp -R result-ios-app/*.app dist/ios/
 
       - name: Push to Nix binary cache
+        continue-on-error: true
         env:
           ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
         run: |
