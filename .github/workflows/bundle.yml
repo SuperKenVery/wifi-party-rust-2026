@@ -194,6 +194,7 @@ jobs:
           mkdir -p dist/ios
           nix build .#ios-app --out-link result-ios-app
           cp -R result-ios-app/*.app dist/ios/
+          chmod -R u+w dist/ios/*.app
 
       - name: Push to Nix binary cache
         continue-on-error: true
