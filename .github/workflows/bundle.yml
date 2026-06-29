@@ -267,6 +267,8 @@ jobs:
           iconset="${signing_dir}/Assets.xcassets/AppIcon.appiconset"
           mkdir -p "${iconset}"
           sips -s format png assets/favicon.ico --out "${signing_dir}/AppIcon.png" >/dev/null
+          sips -s format jpeg "${signing_dir}/AppIcon.png" --out "${signing_dir}/AppIconOpaque.jpg" >/dev/null
+          sips -s format png "${signing_dir}/AppIconOpaque.jpg" --out "${signing_dir}/AppIconOpaque.png" >/dev/null
           for spec in \
             "40 Icon-20@2x.png" \
             "60 Icon-20@3x.png" \
@@ -278,7 +280,7 @@ jobs:
             "180 Icon-60@3x.png" \
             "1024 Icon-1024.png"; do
             set -- ${spec}
-            sips -z "$1" "$1" "${signing_dir}/AppIcon.png" --out "${iconset}/$2" >/dev/null
+            sips -z "$1" "$1" "${signing_dir}/AppIconOpaque.png" --out "${iconset}/$2" >/dev/null
           done
           cp "${iconset}/Icon-60@2x.png" "${app_path}/Icon-60@2x.png"
           cp "${iconset}/Icon-60@3x.png" "${app_path}/Icon-60@3x.png"
