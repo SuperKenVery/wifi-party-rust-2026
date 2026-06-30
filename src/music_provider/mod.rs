@@ -1,6 +1,7 @@
 use dioxus::core::Element;
 use std::sync::Arc;
 
+#[cfg(feature = "music-provider-apple-music")]
 pub mod apple_music;
 pub mod local_file;
 

@@ -137,6 +137,7 @@ impl AppState {
             party: Mutex::new(None),
             music_provider_factories: &[
                 crate::music_provider::local_file::factory,
+                #[cfg(feature = "music-provider-apple-music")]
                 crate::music_provider::apple_music::factory,
             ],
         });

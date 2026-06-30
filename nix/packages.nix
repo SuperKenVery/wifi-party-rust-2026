@@ -28,7 +28,7 @@
 
     LIBCLANG_PATH = pkgs.lib.optionalString pkgs.stdenv.isLinux "${pkgs.llvmPackages.libclang.lib}/lib";
     BINDGEN_EXTRA_CLANG_ARGS = pkgs.lib.optionalString pkgs.stdenv.isLinux "-DSPA_ID_INVALID=4294967295U -I${pkgs.glibc.dev}/include";
-    cargoExtraArgs = "--locked --no-default-features --features vocal-removal,desktop,cpal-pipewire";
+    cargoExtraArgs = "--locked --no-default-features --features vocal-removal,desktop,cpal-pipewire,music-provider-apple-music";
     doCheck = false;
   };
   cargoVendorDir = pkgs.runCommand "vendor-cargo-deps-patched" {} ''
@@ -279,7 +279,7 @@ in
       pname = "wifi-party-rust-dmg";
       platformFlag = "--macos";
       packageType = "dmg";
-      features = "vocal-removal,desktop";
+      features = "vocal-removal,desktop,music-provider-apple-music";
     };
     ios-app = bundlePackage {
       pname = "wifi-party-rust-ios-app";
@@ -294,7 +294,7 @@ in
       pname = "wifi-party-rust-apk";
       platformFlag = "--android";
       packageType = "apk";
-      features = "mobile";
+      features = "mobile,music-provider-apple-music";
       gradleDeps = android-gradle-deps;
     };
     android-gradle-deps = pkgs.gradle_9.fetchDeps {
